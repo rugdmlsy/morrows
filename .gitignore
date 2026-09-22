@@ -1,0 +1,9 @@
+/target
+/data/*.db
+/data/*.db-*
+/data/artifacts/*
+!/data/artifacts/.gitkeep
+/web/node_modules
+/web/dist
+.DS_Store
+.env
