@@ -91,87 +91,6 @@ impl Store {
         row_to_task(row)
     }
 
-    pub async fn register_agent(
-        &self,
-        name: &str,
-        capabilities: &[String],
-    ) -> Result<AgentInstance, DomainError> {
-        if name.trim().is_empty() {
-            return Err(DomainError::InvalidInput(
-                "agent name cannot be empty".into(),
-            ));
-        }
-        let now = Utc::now();
-        if let Some(row) = sqlx::query("SELECT * FROM agent_instances WHERE name=?")
-            .bind(name)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(storage)?
-        {
-            let id: String = row.try_get("id").map_err(storage)?;
-            sqlx::query("UPDATE agent_instances SET status='online', capabilities_json=?, last_heartbeat_at=? WHERE id=?")
-                .bind(serde_json::to_string(capabilities).map_err(storage)?)
-                .bind(now.to_rfc3339())
-                .bind(&id)
-                .execute(&self.pool).await.map_err(storage)?;
-            return self.get_agent(Uuid::parse_str(&id).map_err(storage)?).await;
-        }
-        let id = Uuid::new_v4();
-        sqlx::query("INSERT INTO agent_instances(id,name,status,capabilities_json,last_heartbeat_at) VALUES(?,?,?,?,?)")
-            .bind(id.to_string()).bind(name.trim()).bind("online")
-            .bind(serde_json::to_string(capabilities).map_err(storage)?)
-            .bind(now.to_rfc3339()).execute(&self.pool).await.map_err(storage)?;
-        self.get_agent(id).await
-    }
-
-    pub async fn get_agent(&self, id: Id) -> Result<AgentInstance, DomainError> {
-        let row = sqlx::query("SELECT * FROM agent_instances WHERE id=?")
-            .bind(id.to_string())
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(storage)?
-            .ok_or_else(|| DomainError::NotFound(format!("agent {id}")))?;
-        Ok(AgentInstance {
-            id,
-            name: row.try_get("name").map_err(storage)?,
-            status: row.try_get("status").map_err(storage)?,
-            capabilities: serde_json::from_str(
-                row.try_get::<String, _>("capabilities_json")
-                    .map_err(storage)?
-                    .as_str(),
-            )
-            .map_err(storage)?,
-            last_heartbeat_at: parse_dt(row.try_get("last_heartbeat_at").map_err(storage)?)?,
-        })
-    }
-
-    pub async fn list_agents(&self) -> Result<Vec<AgentInstance>, DomainError> {
-        let rows = sqlx::query("SELECT * FROM agent_instances ORDER BY name")
-            .fetch_all(&self.pool)
-            .await
-            .map_err(storage)?;
-        rows.into_iter()
-            .map(|row| {
-                let id = Uuid::parse_str(row.try_get::<String, _>("id").map_err(storage)?.as_str())
-                    .map_err(storage)?;
-                Ok(AgentInstance {
-                    id,
-                    name: row.try_get("name").map_err(storage)?,
-                    status: row.try_get("status").map_err(storage)?,
-                    capabilities: serde_json::from_str(
-                        row.try_get::<String, _>("capabilities_json")
-                            .map_err(storage)?
-                            .as_str(),
-                    )
-                    .map_err(storage)?,
-                    last_heartbeat_at: parse_dt(
-                        row.try_get("last_heartbeat_at").map_err(storage)?,
-                    )?,
-                })
-            })
-            .collect()
-    }
-
     pub async fn claim_task(
         &self,
         task_id: Id,
@@ -795,3 +714,5 @@ fn storage<E: std::fmt::Display>(e: E) -> DomainError {
 }
 
 mod collaboration;
+
+mod fleet;

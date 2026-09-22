@@ -146,3 +146,10 @@ h3 { color: #8c96a8; text-transform: uppercase; letter-spacing: .09em; font-size
 .message-row:first-of-type { margin-top: 9px; }
 .message-row small { color: #697589; font-size: 9px; }
 .message-row p { margin: 5px 0 0; color: #a8b1c0; font-size: 11px; line-height: 1.5; }
+
+.fleet-identity { display: grid; gap: 10px; margin: 18px 0; }
+.fleet-identity div { display: grid; grid-template-columns: 65px minmax(0, 1fr); gap: 10px; }
+.fleet-identity dt { color: var(--muted, #7c8495); font-size: 12px; }
+.fleet-identity dd { margin: 0; font-size: 13px; overflow-wrap: anywhere; }
+.fleet-capacity { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border, #202631); }
+.fleet-capacity p { font-size: 13px; margin: 8px 0; }

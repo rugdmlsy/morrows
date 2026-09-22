@@ -86,6 +86,11 @@ fn default_task_state() -> TaskState {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentInstance {
+    pub profile_id: Id,
+    pub account_id: Option<Id>,
+    pub machine_id: Option<Id>,
+    pub external_instance_ref: Option<String>,
+    pub created_at: DateTime<Utc>,
     pub id: Id,
     pub name: String,
     pub status: String,
@@ -181,3 +186,6 @@ pub enum DomainError {
 
 mod collaboration;
 pub use collaboration::*;
+
+mod fleet;
+pub use fleet::*;

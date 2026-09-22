@@ -1,4 +1,5 @@
 mod collaboration;
+mod fleet;
 mod mcp;
 
 use ac_core::{CreateContextRevision, CreateTask, DomainError, Id};
@@ -126,6 +127,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/runs/{id}/checkpoint", post(checkpoint_run))
         .route("/runs/{id}/complete", post(complete_run))
         .merge(collaboration::routes())
+        .merge(fleet::routes())
         .with_state(state);
 
     let mcp_store = store.clone();

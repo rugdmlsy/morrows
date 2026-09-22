@@ -38,9 +38,11 @@ Append-only event timeline
 - Directed agent messages with reply/correlation metadata
 - Atomic handoff creation and explicit acceptance linked to the accepting Run
 - Dependency cycle prevention and executor gating
+- Normalized AgentProfile / Account / Machine / AgentInstance identities
+- Owned heartbeats, append-only capacity observations, and joined Agent Fleet UI
 - SQLite job/outbox tables reserved for durable automation
 
-Not yet implemented: full AgentProfile/Account/Machine split, automatic Dispatcher, executor launch adapters, multi-user auth/RBAC, or distributed deployment.
+Not yet implemented: automatic Dispatcher, executor launch adapters, multi-user auth/RBAC, or distributed deployment.
 
 ## Run
 
@@ -90,7 +92,7 @@ Streamable HTTP endpoint:
 http://127.0.0.1:8787/mcp
 ```
 
-Register an AgentInstance using the `agent_register` tool. For mutation tools such as `task_claim`, `assignment_renew`, `run_start`, `run_checkpoint`, and `run_complete`, send the returned UUID in:
+Register explicit identities with `agent_profile_register`, `account_register`, and `machine_register`, then use `agent_instance_register` to link a worker. Legacy `agent_register(name, capabilities)` remains supported and returns the same AgentInstance UUID on refresh. See [M3 identity and capacity](docs/architecture.md#m3-identity-and-capacity) for fields, REST routes, and compatibility details. For mutation tools such as `task_claim`, `assignment_renew`, `run_start`, `run_checkpoint`, and `run_complete`, send the returned UUID in:
 
 ```
 X-Agent-Instance-Id: <uuid>

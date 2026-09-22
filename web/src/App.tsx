@@ -52,6 +52,22 @@ type Agent = {
   last_heartbeat_at: string;
 };
 
+type FleetEntry = {
+  instance: Agent;
+  profile: { id: string; name: string; provider: string; kind: string };
+  account: { id: string; label: string; provider: string; status: string } | null;
+  machine: { id: string; name: string; hostname: string; os: string; arch: string } | null;
+  latest_capacity: {
+    status: string;
+    available_slots: number;
+    active_assignments: number;
+    active_runs: number;
+    max_concurrency: number | null;
+    quota_state: string | null;
+    observed_at: string;
+  } | null;
+};
+
 type Assignment = {
   id: string;
   task_id: string;
@@ -127,7 +143,7 @@ function StateBadge({ state }: { state: string }) {
 export default function App() {
   const [view, setView] = useState<"queue" | "agents">("queue");
   const [tasks, setTasks] = useState<Task[]>([]);
-  const [agents, setAgents] = useState<Agent[]>([]);
+  const [agents, setAgents] = useState<FleetEntry[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [assignments, setAssignments] = useState<Assignment[]>([]);
   const [runs, setRuns] = useState<Run[]>([]);
@@ -144,7 +160,7 @@ export default function App() {
     try {
       const [nextTasks, nextAgents] = await Promise.all([
         api<Task[]>("/api/tasks"),
-        api<Agent[]>("/api/agents"),
+        api<FleetEntry[]>("/api/agent-fleet"),
       ]);
       setTasks(nextTasks);
       setAgents(nextAgents);
@@ -220,7 +236,7 @@ export default function App() {
             Work Queue <span>{tasks.length}</span>
           </button>
           <button className={view === "agents" ? "nav-active" : ""} onClick={() => setView("agents")}>
-            Agent Fleet <span>{agents.filter((a) => a.status === "online").length}</span>
+            Agent Fleet <span>{agents.filter((a) => a.instance.status === "online").length}</span>
           </button>
         </nav>
 
@@ -406,7 +422,7 @@ export default function App() {
           </div>
         ) : (
           <section className="agent-grid">
-            {agents.map((agent) => (
+            {agents.map(({ instance: agent, profile, account, machine, latest_capacity: capacity }) => (
               <article className="agent-card" key={agent.id}>
                 <div className="agent-card-head">
                   <div className="avatar">{agent.name.slice(0, 2).toUpperCase()}</div>
@@ -416,10 +432,23 @@ export default function App() {
                   </div>
                   <StateBadge state={agent.status} />
                 </div>
+                <dl className="fleet-identity">
+                  <div><dt>Profile</dt><dd>{profile.name} · {profile.provider || "unknown provider"}{profile.kind ? ` · ${profile.kind}` : ""}</dd></div>
+                  <div><dt>Account</dt><dd>{account ? `${account.label} · ${account.provider || "unknown provider"} · ${account.status}` : "Not linked"}</dd></div>
+                  <div><dt>Machine</dt><dd>{machine ? `${machine.name} · ${machine.hostname} · ${machine.os} ${machine.arch}` : "Not linked"}</dd></div>
+                </dl>
                 <div className="capability-list">
                   {agent.capabilities.length ? agent.capabilities.map((cap) => <span key={cap}>{cap}</span>) : <span>general</span>}
                 </div>
-                <small>heartbeat {age(agent.last_heartbeat_at)}</small>
+                <small title={new Date(agent.last_heartbeat_at).toLocaleString()}>Heartbeat {age(agent.last_heartbeat_at)}</small>
+                <div className="fleet-capacity">
+                  {capacity ? <>
+                    <div className="mini-card-row"><strong>Capacity</strong><StateBadge state={capacity.status} /></div>
+                    <p>{capacity.available_slots} available slots{capacity.max_concurrency !== null ? ` / ${capacity.max_concurrency} max` : " · max not reported"}</p>
+                    <p>{capacity.active_assignments} active assignments · {capacity.active_runs} active runs</p>
+                    <small>Quota: {capacity.quota_state ?? "not reported"} · observed {age(capacity.observed_at)}</small>
+                  </> : <p>No capacity reported.</p>}
+                </div>
               </article>
             ))}
             {!agents.length && <div className="empty large">No agent instances registered yet.</div>}

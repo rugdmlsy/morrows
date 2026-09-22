@@ -2,7 +2,7 @@ use super::*;
 use ac_core::*;
 use axum::http::HeaderMap;
 
-fn actor(headers: &HeaderMap) -> Result<Id, ApiError> {
+pub(crate) fn actor(headers: &HeaderMap) -> Result<Id, ApiError> {
     headers
         .get("x-agent-instance-id")
         .and_then(|v| v.to_str().ok())

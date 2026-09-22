@@ -143,8 +143,220 @@ pub struct DependencyRequest {
     pub depends_on_task_id: String,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct FleetIdRequest {
+    pub id: String,
+}
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct InstanceIdRequest {
+    pub agent_instance_id: String,
+}
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct HeartbeatRequest {
+    pub agent_instance_id: String,
+    pub input: ac_core::AgentHeartbeat,
+}
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CapacityRequest {
+    pub agent_instance_id: String,
+    pub input: ac_core::RecordCapacity,
+}
+
 #[tool_router(router = tool_router)]
 impl AgentCompanyMcp {
+    #[tool(
+        description = "Register or reuse a profile identity by its natural key. Existing rows are returned unchanged."
+    )]
+    async fn agent_profile_register(
+        &self,
+        Parameters(input): Parameters<ac_core::RegisterProfile>,
+    ) -> Result<String, String> {
+        let value = self
+            .store
+            .register_profile(input)
+            .await
+            .map_err(|e| e.to_string())?;
+        serde_json::to_string(&value).map_err(|e| e.to_string())
+    }
+    #[tool(description = "List profile identities.")]
+    async fn agent_profile_list(&self) -> Result<String, String> {
+        let value = self
+            .store
+            .list_profiles()
+            .await
+            .map_err(|e| e.to_string())?;
+        serde_json::to_string(&value).map_err(|e| e.to_string())
+    }
+    #[tool(description = "Get a profile identity by UUID.")]
+    async fn agent_profile_get(
+        &self,
+        Parameters(req): Parameters<FleetIdRequest>,
+    ) -> Result<String, String> {
+        let value = self
+            .store
+            .get_profile(parse_id(&req.id)?)
+            .await
+            .map_err(|e| e.to_string())?;
+        serde_json::to_string(&value).map_err(|e| e.to_string())
+    }
+    #[tool(
+        description = "Register or reuse a account identity by its natural key. Existing rows are returned unchanged."
+    )]
+    async fn account_register(
+        &self,
+        Parameters(input): Parameters<ac_core::RegisterAccount>,
+    ) -> Result<String, String> {
+        let value = self
+            .store
+            .register_account(input)
+            .await
+            .map_err(|e| e.to_string())?;
+        serde_json::to_string(&value).map_err(|e| e.to_string())
+    }
+    #[tool(description = "List account identities.")]
+    async fn account_list(&self) -> Result<String, String> {
+        let value = self
+            .store
+            .list_accounts()
+            .await
+            .map_err(|e| e.to_string())?;
+        serde_json::to_string(&value).map_err(|e| e.to_string())
+    }
+    #[tool(description = "Get a account identity by UUID.")]
+    async fn account_get(
+        &self,
+        Parameters(req): Parameters<FleetIdRequest>,
+    ) -> Result<String, String> {
+        let value = self
+            .store
+            .get_account(parse_id(&req.id)?)
+            .await
+            .map_err(|e| e.to_string())?;
+        serde_json::to_string(&value).map_err(|e| e.to_string())
+    }
+    #[tool(
+        description = "Register or reuse a machine identity by its natural key. Existing rows are returned unchanged."
+    )]
+    async fn machine_register(
+        &self,
+        Parameters(input): Parameters<ac_core::RegisterMachine>,
+    ) -> Result<String, String> {
+        let value = self
+            .store
+            .register_machine(input)
+            .await
+            .map_err(|e| e.to_string())?;
+        serde_json::to_string(&value).map_err(|e| e.to_string())
+    }
+    #[tool(description = "List machine identities.")]
+    async fn machine_list(&self) -> Result<String, String> {
+        let value = self
+            .store
+            .list_machines()
+            .await
+            .map_err(|e| e.to_string())?;
+        serde_json::to_string(&value).map_err(|e| e.to_string())
+    }
+    #[tool(description = "Get a machine identity by UUID.")]
+    async fn machine_get(
+        &self,
+        Parameters(req): Parameters<FleetIdRequest>,
+    ) -> Result<String, String> {
+        let value = self
+            .store
+            .get_machine(parse_id(&req.id)?)
+            .await
+            .map_err(|e| e.to_string())?;
+        serde_json::to_string(&value).map_err(|e| e.to_string())
+    }
+    #[tool(
+        description = "Register an instance with explicit profile and optional account/machine links. Omitted capabilities inherit profile defaults."
+    )]
+    async fn agent_instance_register(
+        &self,
+        Parameters(input): Parameters<ac_core::RegisterAgentInstance>,
+    ) -> Result<String, String> {
+        let value = self
+            .store
+            .register_agent_instance(input)
+            .await
+            .map_err(|e| e.to_string())?;
+        serde_json::to_string(&value).map_err(|e| e.to_string())
+    }
+    #[tool(
+        description = "Update own heartbeat/status and optionally append capacity atomically. Requires X-Agent-Instance-Id."
+    )]
+    async fn agent_heartbeat(
+        &self,
+        Parameters(req): Parameters<HeartbeatRequest>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<String, String> {
+        let value = self
+            .store
+            .agent_heartbeat(
+                parse_id(&req.agent_instance_id)?,
+                authenticated_agent(&parts)?,
+                req.input,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        serde_json::to_string(&value).map_err(|e| e.to_string())
+    }
+    #[tool(
+        description = "Append a capacity observation for own instance. Requires X-Agent-Instance-Id."
+    )]
+    async fn capacity_record(
+        &self,
+        Parameters(req): Parameters<CapacityRequest>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<String, String> {
+        let value = self
+            .store
+            .capacity_record(
+                parse_id(&req.agent_instance_id)?,
+                authenticated_agent(&parts)?,
+                req.input,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        serde_json::to_string(&value).map_err(|e| e.to_string())
+    }
+    #[tool(
+        description = "Read capacity latest for an instance. History is newest first; latest is null before any observation."
+    )]
+    async fn capacity_latest(
+        &self,
+        Parameters(req): Parameters<InstanceIdRequest>,
+    ) -> Result<String, String> {
+        let value = self
+            .store
+            .capacity_latest(parse_id(&req.agent_instance_id)?)
+            .await
+            .map_err(|e| e.to_string())?;
+        serde_json::to_string(&value).map_err(|e| e.to_string())
+    }
+    #[tool(
+        description = "Read capacity history for an instance. History is newest first; latest is null before any observation."
+    )]
+    async fn capacity_history(
+        &self,
+        Parameters(req): Parameters<InstanceIdRequest>,
+    ) -> Result<String, String> {
+        let value = self
+            .store
+            .capacity_history(parse_id(&req.agent_instance_id)?)
+            .await
+            .map_err(|e| e.to_string())?;
+        serde_json::to_string(&value).map_err(|e| e.to_string())
+    }
+    #[tool(
+        description = "List instances with their profile, account, machine and latest observed capacity."
+    )]
+    async fn agent_fleet(&self) -> Result<String, String> {
+        let value = self.store.agent_fleet().await.map_err(|e| e.to_string())?;
+        serde_json::to_string(&value).map_err(|e| e.to_string())
+    }
+
     #[tool(
         description = "Atomically accept a pending handoff with a live same-task target run owned by the caller. Requires X-Agent-Instance-Id."
     )]
@@ -692,3 +904,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "mcp_fleet_tests.rs"]
+mod fleet_tests;

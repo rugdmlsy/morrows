@@ -35,7 +35,7 @@ Task
  └── Event*
 ```
 
-AgentInstance is currently the worker identity used by M1/M2. AgentProfile / Account / Machine become separate first-class entities in M3.
+AgentInstance remains the worker identity referenced by M1/M2 work. M3 links each instance to an AgentProfile and optional independent Account and Machine identities, with append-only CapacitySnapshots.
 
 ## Important invariants
 
@@ -141,3 +141,118 @@ accepted the handoff, replied to A's directed message with the same correlation 
 the reconstructed state, and completed the task. The persisted handoff's
 `accepted_by_run_id` points to B's Run, and the reply's `reply_to_message_id` points to A's
 request.
+
+## M3 identity and capacity
+
+An **AgentProfile** describes a stable product/template (`name`, `provider`, `kind`,
+`default_capabilities`, `metadata`). An **Account** describes an independent provider
+identity (`provider`, `label`, optional `external_account_ref`, `status`, `metadata`).
+An account can be used with multiple profiles from the same provider. A **Machine**
+describes a host (`name`, `hostname`, `os`, `arch`, `status`, `metadata`, `last_seen_at`).
+All three have UUIDs and `created_at`/`updated_at` timestamps.
+
+Registration creates or returns the existing row unchanged by these natural keys:
+profile `(provider, name)`, account `(provider, label)`, machine `name`. Name/label must
+be nonempty. Optional metadata defaults to `{}`, profile capabilities to `[]`, account
+and machine status to `active`; unspecified machine descriptors and profile kind are
+empty strings. No credentials or secrets are stored or requested.
+
+**AgentInstance** keeps its original UUID, name, status, capabilities and heartbeat,
+adding required `profile_id`, optional `account_id`, `machine_id`,
+`external_instance_ref`, and `created_at`. Registration requires existing foreign keys;
+nonempty account/profile providers must match exactly. Omitted capabilities inherit
+profile defaults; explicit `[]` means no capabilities. The existing unique name remains
+the registration key. Repeating normalized registration with the same links reuses the
+UUID and refreshes status/capabilities/heartbeat; different links for an existing name
+return a conflict rather than repointing the identity of historical work.
+
+Migration `0004_identity_capacity.sql` adds columns in place and does not replace or
+renumber instances, assignments, runs, messages, or handoffs. It backfills one explicit
+`legacy` profile and per-instance legacy account/unknown-machine rows. Backfilled
+account/machine UUIDs equal the corresponding instance UUID in their separate tables;
+this makes migration deterministic without guessing shared real accounts or hosts.
+The original heartbeat is used for backfilled creation time because M1 did not store
+instance creation time. SQLite triggers enforce the required profile/time after
+backfill, avoiding a rebuild of the heavily referenced instance table.
+
+Legacy `agent_register(name, capabilities)` and `POST /api/agents` still return
+AgentInstance. New legacy callers create/reuse the legacy profile/account and create an
+explicit unknown host; repeat calls reuse the same instance and links. Refreshing a
+normalized instance through legacy registration preserves its normalized links. Existing
+`X-Agent-Instance-Id` configuration, M1 REST payload conventions, leases, run ownership,
+and M2/M2.1 handoff/message semantics remain unchanged.
+
+Heartbeat requires `X-Agent-Instance-Id` to equal the target instance UUID. In one
+transaction it sets instance status and server heartbeat time, advances the linked
+machine's `last_seen_at` without moving it backwards, and optionally appends capacity.
+Invalid optional capacity leaves the entire heartbeat unchanged. Heartbeats do not
+renew assignment leases or change runs, and status is an opaque nonempty label; there
+is no automatic stale/offline classification or dispatch.
+
+A **CapacitySnapshot** contains UUID, instance UUID, status, `available_slots`,
+`active_assignments`, `active_runs`, optional `max_concurrency`, optional opaque string
+`quota_state`, `details` (default `{}`), and server `observed_at`. Counts are reported
+observations, not derived scheduling authority. All counts must be nonnegative and
+available slots cannot exceed a supplied maximum. Capacity recording uses the same
+ownership check as heartbeat but does not itself refresh heartbeat/status. Snapshots
+cannot be updated or deleted, enforced in SQLite as well as the store API. History is
+newest observation first, with insertion order breaking timestamp ties; latest is
+`null` for a registered instance with no observations, and an unknown instance is an
+error. No quota parsing, billing adapters, launcher, remote auth, or Dispatcher is added.
+
+REST routes (under `/api`):
+
+| Method | Path | Body / result |
+| --- | --- | --- |
+| POST / GET | `/agent-profiles` | Register profile / list profiles |
+| GET | `/agent-profiles/{id}` | Profile |
+| POST / GET | `/accounts` | Register account / list accounts |
+| GET | `/accounts/{id}` | Account |
+| POST / GET | `/machines` | Register machine / list machines |
+| GET | `/machines/{id}` | Machine |
+| POST / GET | `/agent-instances` | `{name, profile_id, account_id?, machine_id?, capabilities?, external_instance_ref?}` / list instances |
+| GET | `/agent-instances/{id}` | Instance |
+| POST | `/agent-instances/{id}/heartbeat` | `{status, capacity?}`; returns instance |
+| POST / GET | `/agent-instances/{id}/capacity` | Capacity fields / full newest-first history |
+| GET | `/agent-instances/{id}/capacity/latest` | Snapshot or `null` |
+| GET | `/agent-fleet` | `[{instance, profile, account, machine, latest_capacity}]` |
+
+Only heartbeat and capacity mutations above require the identity header; identity
+registration remains available before a caller has an instance ID. Missing/invalid
+headers and invalid counts return 400; cross-instance mutation returns 409; missing
+identities return 404. Nullable account/machine links appear as `null` in fleet results.
+
+MCP exposes `agent_profile_register/list/get`, `account_register/list/get`,
+`machine_register/list/get`, `agent_instance_register`, `agent_heartbeat`,
+`capacity_record/latest/history`, and `agent_fleet` (slash notation lists separate
+tools). Identity registrations take the fields directly, and identity get tools take
+`{id}`. Heartbeat/capacity recording takes `{agent_instance_id, input}` where `input`
+matches the REST body. Capacity reads take `{agent_instance_id}`; lists and fleet have
+no arguments. The request header supplies the actor, independently of the target ID.
+
+Example heartbeat MCP arguments, using the returned instance UUID and matching header:
+
+```json
+{
+  "agent_instance_id": "<instance-uuid>",
+  "input": {
+    "status": "online",
+    "capacity": {
+      "status": "available",
+      "available_slots": 1,
+      "active_assignments": 0,
+      "active_runs": 0,
+      "max_concurrency": 1,
+      "quota_state": "unknown",
+      "details": {"source": "worker-report"}
+    }
+  }
+}
+```
+
+The Fleet UI polls the joined endpoint and shows profile, account, machine, instance
+status, capabilities, heartbeat age, and latest capacity with its own observation age.
+Missing capacity is shown explicitly rather than inferred as zero. M3 tests upgrade a
+seeded M2.1 database using production migrations, compare all existing collaboration
+rows, exercise the original run owner after migration, verify snapshot durability and
+append-only constraints, and cover registration/ownership/validation through REST/MCP.
