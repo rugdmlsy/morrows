@@ -3,6 +3,7 @@
 /data/*.db-*
 /data/artifacts/*
 !/data/artifacts/.gitkeep
+/data/launches/
 /web/node_modules
 /web/dist
 .DS_Store

@@ -179,6 +179,23 @@ pub struct DispatchNextRequest {
     pub role: String,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct LaunchProfileIdRequest {
+    pub launch_profile_id: String,
+}
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RegisterLaunchProfileRequest {
+    pub input: ac_core::RegisterLaunchProfile,
+}
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct EnqueueLaunchRequest {
+    pub input: ac_core::EnqueueLaunch,
+}
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct LaunchAttemptIdRequest {
+    pub launch_attempt_id: String,
+}
+
 #[tool_router(router = tool_router)]
 impl AgentCompanyMcp {
     #[tool(
@@ -457,6 +474,80 @@ impl AgentCompanyMcp {
         let value = self
             .store
             .task_dispatch_decisions(parse_id(&req.task_id)?)
+            .await
+            .map_err(|e| e.to_string())?;
+        serde_json::to_string(&value).map_err(|e| e.to_string())
+    }
+
+    #[tool(
+        description = "Register an operator-controlled executor launch profile. M5 currently supports adapter=codex_cli only."
+    )]
+    async fn launch_profile_register(
+        &self,
+        Parameters(req): Parameters<RegisterLaunchProfileRequest>,
+    ) -> Result<String, String> {
+        let value = self
+            .store
+            .register_launch_profile(req.input)
+            .await
+            .map_err(|e| e.to_string())?;
+        serde_json::to_string(&value).map_err(|e| e.to_string())
+    }
+    #[tool(description = "List configured executor launch profiles.")]
+    async fn launch_profile_list(&self) -> Result<String, String> {
+        let value = self
+            .store
+            .list_launch_profiles()
+            .await
+            .map_err(|e| e.to_string())?;
+        serde_json::to_string(&value).map_err(|e| e.to_string())
+    }
+    #[tool(description = "Get an executor launch profile by UUID.")]
+    async fn launch_profile_get(
+        &self,
+        Parameters(req): Parameters<LaunchProfileIdRequest>,
+    ) -> Result<String, String> {
+        let value = self
+            .store
+            .get_launch_profile(parse_id(&req.launch_profile_id)?)
+            .await
+            .map_err(|e| e.to_string())?;
+        serde_json::to_string(&value).map_err(|e| e.to_string())
+    }
+    #[tool(
+        description = "Queue an explicit executor launch for an active executor Assignment. This does not accept task-supplied commands."
+    )]
+    async fn launch_enqueue(
+        &self,
+        Parameters(req): Parameters<EnqueueLaunchRequest>,
+    ) -> Result<String, String> {
+        let value = self
+            .store
+            .enqueue_launch(req.input)
+            .await
+            .map_err(|e| e.to_string())?;
+        serde_json::to_string(&value).map_err(|e| e.to_string())
+    }
+    #[tool(description = "Get a durable executor launch attempt by UUID.")]
+    async fn launch_attempt_get(
+        &self,
+        Parameters(req): Parameters<LaunchAttemptIdRequest>,
+    ) -> Result<String, String> {
+        let value = self
+            .store
+            .get_launch_attempt(parse_id(&req.launch_attempt_id)?)
+            .await
+            .map_err(|e| e.to_string())?;
+        serde_json::to_string(&value).map_err(|e| e.to_string())
+    }
+    #[tool(description = "List executor launch attempts for a task, newest first.")]
+    async fn task_launch_attempts(
+        &self,
+        Parameters(req): Parameters<TaskIdRequest>,
+    ) -> Result<String, String> {
+        let value = self
+            .store
+            .task_launch_attempts(parse_id(&req.task_id)?)
             .await
             .map_err(|e| e.to_string())?;
         serde_json::to_string(&value).map_err(|e| e.to_string())
@@ -1017,3 +1108,7 @@ mod fleet_tests;
 #[cfg(test)]
 #[path = "mcp_dispatch_tests.rs"]
 mod dispatch_tests;
+
+#[cfg(test)]
+#[path = "mcp_launch_tests.rs"]
+mod launch_tests;

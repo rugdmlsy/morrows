@@ -1,6 +1,7 @@
 mod collaboration;
 mod dispatch;
 mod fleet;
+mod launch;
 mod mcp;
 
 use ac_core::{CreateContextRevision, CreateTask, DomainError, Id};
@@ -130,6 +131,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(collaboration::routes())
         .merge(dispatch::routes())
         .merge(fleet::routes())
+        .merge(launch::routes())
         .with_state(state);
 
     let mcp_store = store.clone();
@@ -151,6 +153,11 @@ async fn main() -> anyhow::Result<()> {
                 Err(err) => tracing::error!(%err, "lease expiry scan failed"),
             }
         }
+    });
+
+    let launch_store = store.clone();
+    tokio::spawn(async move {
+        launch::worker_loop(launch_store).await;
     });
 
     let web_dir = env::var("AC_WEB_DIR").unwrap_or_else(|_| "web/dist".into());

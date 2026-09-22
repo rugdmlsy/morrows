@@ -232,6 +232,10 @@ button.secondary {
 }
 .candidate-ok > span { color: var(--text); }
 .dispatch-history small { display: block; }
+.launch-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.launch-attempt { display: grid; gap: 6px; }
+.launch-attempt code { overflow-wrap: anywhere; white-space: normal; }
+.launch-error { margin: 2px 0 0; color: #f08a8a; font-size: 11px; line-height: 1.5; }
 
 @media (max-width: 900px) {
   .dispatch-form { grid-template-columns: 1fr; }

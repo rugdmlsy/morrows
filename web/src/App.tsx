@@ -172,6 +172,42 @@ type DispatchDecision = {
   created_at: string;
 };
 
+type LaunchProfile = {
+  id: string;
+  name: string;
+  adapter: string;
+  agent_instance_id: string;
+  program: string;
+  codex_home?: string | null;
+  default_cwd?: string | null;
+  model?: string | null;
+  enabled: boolean;
+  metadata: unknown;
+  created_at: string;
+  updated_at: string;
+};
+
+type LaunchAttempt = {
+  id: string;
+  assignment_id: string;
+  task_id: string;
+  agent_instance_id: string;
+  launch_profile_id: string;
+  run_id?: string | null;
+  job_id?: string | null;
+  status: string;
+  cwd?: string | null;
+  external_session_ref?: string | null;
+  pid?: number | null;
+  exit_code?: number | null;
+  stdout_path?: string | null;
+  stderr_path?: string | null;
+  error?: string | null;
+  created_at: string;
+  started_at?: string | null;
+  ended_at?: string | null;
+};
+
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
     ...init,
@@ -207,6 +243,9 @@ export default function App() {
   const [dispatchPolicy, setDispatchPolicy] = useState<DispatchPolicy | null>(null);
   const [dispatchPreview, setDispatchPreview] = useState<DispatchPreview | null>(null);
   const [dispatchDecisions, setDispatchDecisions] = useState<DispatchDecision[]>([]);
+  const [launchProfiles, setLaunchProfiles] = useState<LaunchProfile[]>([]);
+  const [launchAttempts, setLaunchAttempts] = useState<LaunchAttempt[]>([]);
+  const [launchBusy, setLaunchBusy] = useState(false);
   const [dispatchCapabilities, setDispatchCapabilities] = useState("");
   const [dispatchEnabled, setDispatchEnabled] = useState(true);
   const [dispatchLease, setDispatchLease] = useState(900);
@@ -225,14 +264,16 @@ export default function App() {
 
   const refreshBase = useCallback(async () => {
     try {
-      const [nextTasks, nextAgents, nextPolicies] = await Promise.all([
+      const [nextTasks, nextAgents, nextPolicies, nextLaunchProfiles] = await Promise.all([
         api<Task[]>("/api/tasks"),
         api<FleetEntry[]>("/api/agent-fleet"),
         api<DispatchPolicy[]>("/api/dispatch-policies"),
+        api<LaunchProfile[]>("/api/launch-profiles"),
       ]);
       setTasks(nextTasks);
       setAgents(nextAgents);
       setDispatchPolicies(nextPolicies);
+      setLaunchProfiles(nextLaunchProfiles);
       if (!selectedId && nextTasks.length) setSelectedId(nextTasks[0].id);
       setError(null);
     } catch (e) {
@@ -243,7 +284,7 @@ export default function App() {
   const refreshDetail = useCallback(async () => {
     if (!selectedId) return;
     try {
-      const [nextAssignments, nextRuns, nextEvents, nextContext, nextCollaboration, nextPolicy, nextPreview, nextDispatchDecisions] = await Promise.all([
+      const [nextAssignments, nextRuns, nextEvents, nextContext, nextCollaboration, nextPolicy, nextPreview, nextDispatchDecisions, nextLaunchAttempts] = await Promise.all([
         api<Assignment[]>(`/api/tasks/${selectedId}/assignments`),
         api<Run[]>(`/api/tasks/${selectedId}/runs`),
         api<EventItem[]>(`/api/tasks/${selectedId}/events`),
@@ -252,6 +293,7 @@ export default function App() {
         api<DispatchPolicy>(`/api/tasks/${selectedId}/dispatch-policy/executor`).catch(() => null),
         api<DispatchPreview>(`/api/tasks/${selectedId}/dispatch-preview/executor`).catch(() => null),
         api<DispatchDecision[]>(`/api/tasks/${selectedId}/dispatch-decisions`),
+        api<LaunchAttempt[]>(`/api/tasks/${selectedId}/launch-attempts`),
       ]);
       setAssignments(nextAssignments);
       setRuns(nextRuns);
@@ -261,6 +303,7 @@ export default function App() {
       setDispatchPolicy(nextPolicy);
       setDispatchPreview(nextPreview);
       setDispatchDecisions(nextDispatchDecisions);
+      setLaunchAttempts(nextLaunchAttempts);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -358,6 +401,25 @@ export default function App() {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setDispatchBusy(false);
+    }
+  }
+
+  async function enqueueLaunch(assignmentId: string, launchProfileId: string) {
+    setLaunchBusy(true);
+    try {
+      await api<LaunchAttempt>("/api/launch-attempts/enqueue", {
+        method: "POST",
+        body: JSON.stringify({
+          assignment_id: assignmentId,
+          launch_profile_id: launchProfileId,
+        }),
+      });
+      await Promise.all([refreshBase(), refreshDetail()]);
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLaunchBusy(false);
     }
   }
 
@@ -550,6 +612,62 @@ export default function App() {
                           </div>
                         ))}
                         {!assignments.length && <div className="empty compact">{t("unassigned")}</div>}
+                      </div>
+
+                      <h3>{t("launcher")}</h3>
+                      <div className="stack">
+                        {assignments
+                          .filter((item) => item.role === "executor" && item.status === "active")
+                          .map((item) => {
+                            const profiles = launchProfiles.filter(
+                              (profile) => profile.enabled && profile.agent_instance_id === item.agent_instance_id,
+                            );
+                            return (
+                              <div className="context-card" key={"launch-" + item.id}>
+                                <div className="mini-card-row">
+                                  <strong>{shortId(item.agent_instance_id)}</strong>
+                                  <small>{t("launchWith")}</small>
+                                </div>
+                                <div className="launch-actions">
+                                  {profiles.map((profile) => (
+                                    <button
+                                      key={profile.id}
+                                      className="secondary"
+                                      disabled={launchBusy}
+                                      onClick={() => void enqueueLaunch(item.id, profile.id)}
+                                    >
+                                      {t("launch")} · {profile.name}
+                                    </button>
+                                  ))}
+                                </div>
+                                {!profiles.length && <div className="empty compact">{t("noLaunchProfile")}</div>}
+                              </div>
+                            );
+                          })}
+                        {!assignments.some((item) => item.role === "executor" && item.status === "active") && (
+                          <div className="empty compact">{t("unassigned")}</div>
+                        )}
+                      </div>
+
+                      <h3>{t("launchAttempts")}</h3>
+                      <div className="stack">
+                        {launchAttempts.map((attempt) => (
+                          <div className="mini-card launch-attempt" key={attempt.id}>
+                            <div className="mini-card-row">
+                              <code>{shortId(attempt.id)}</code>
+                              <StateBadge state={attempt.status} locale={locale} />
+                            </div>
+                            <small>{shortId(attempt.agent_instance_id)} · {attempt.cwd || "—"}</small>
+                            {attempt.run_id && <small>Run {shortId(attempt.run_id)}</small>}
+                            {attempt.external_session_ref && <small>{t("externalSession")} · {attempt.external_session_ref}</small>}
+                            {attempt.pid !== null && attempt.pid !== undefined && <small>{t("processId")} · {attempt.pid}</small>}
+                            {attempt.exit_code !== null && attempt.exit_code !== undefined && <small>{t("exitCode")} · {attempt.exit_code}</small>}
+                            {attempt.stdout_path && <code>{t("stdoutLog")} · {attempt.stdout_path}</code>}
+                            {attempt.stderr_path && <code>{t("stderrLog")} · {attempt.stderr_path}</code>}
+                            {attempt.error && <p className="launch-error">{t("launchError")}：{attempt.error}</p>}
+                          </div>
+                        ))}
+                        {!launchAttempts.length && <div className="empty compact">{t("noLaunchAttempts")}</div>}
                       </div>
 
                       <h3>{t("runs")}</h3>

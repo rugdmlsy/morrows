@@ -20,4 +20,5 @@ tracing-subscriber.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+chrono.workspace = true
 tower = { version = "0.5", features = ["util"] }

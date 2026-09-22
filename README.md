@@ -42,9 +42,12 @@ Append-only event timeline
 - Owned heartbeats, append-only capacity observations, and joined Agent Fleet UI
 - Durable per-task dispatch policies and append-only dispatch decisions
 - Explainable capacity-aware Dispatcher with atomic Assignment creation
-- SQLite job/outbox tables reserved for durable automation
+- Durable executor LaunchProfile / LaunchAttempt records and background launch jobs
+- Safe Codex CLI launcher with Agent Company Run/session reconciliation
+- Chinese/English Web UI with Chinese as the first-visit default
+- SQLite durable jobs for launcher work; outbox remains reserved for later delivery automation
 
-Not yet implemented: executor launch adapters, a periodic auto-dispatch loop, multi-user auth/RBAC, or distributed deployment.
+Not yet implemented: Antigravity/Gemini concrete launch adapters, automatic dispatch→launch chaining, process cancellation, multi-user auth/RBAC, or distributed deployment.
 
 ## Run
 
@@ -103,6 +106,14 @@ X-Agent-Instance-Id: <uuid>
 The server obtains actor identity from the transport request instead of trusting an `agent_id` supplied in the tool arguments.
 
 M4 adds `dispatch_policy_list/set/get`, `dispatch_preview`, `dispatch_task`, `dispatch_next`, and `dispatch_decisions`. Dispatch creates an Assignment only; it deliberately does not start or resume an external agent process.
+
+M5 keeps that boundary and adds explicit launch operations: `launch_profile_register/list/get`,
+`launch_enqueue`, `launch_attempt_get`, and `task_launch_attempts`. The first concrete
+adapter is `codex_cli`. Operator-controlled absolute program/workspace paths are stored in a
+LaunchProfile; task text is sent to Codex over stdin and is never interpolated into a shell
+command. A background worker claims durable launch jobs, creates the Agent Company Run, captures
+JSONL/stderr logs, records the Codex external session id when available, and reconciles process
+exit with Run/Assignment state.
 
 This header is an identity binding mechanism for the local-only daemon, not authentication. A later milestone will replace it with issued credentials/tokens before remote exposure.
 
