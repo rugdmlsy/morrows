@@ -195,6 +195,7 @@ type LaunchAttempt = {
   launch_profile_id: string;
   run_id?: string | null;
   job_id?: string | null;
+  resume_from_attempt_id?: string | null;
   status: string;
   cwd?: string | null;
   external_session_ref?: string | null;
@@ -206,6 +207,15 @@ type LaunchAttempt = {
   created_at: string;
   started_at?: string | null;
   ended_at?: string | null;
+};
+
+type LaunchInstruction = {
+  id: string;
+  launch_attempt_id: string;
+  actor_type: string;
+  actor_id: string;
+  body: string;
+  created_at: string;
 };
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
@@ -245,6 +255,8 @@ export default function App() {
   const [dispatchDecisions, setDispatchDecisions] = useState<DispatchDecision[]>([]);
   const [launchProfiles, setLaunchProfiles] = useState<LaunchProfile[]>([]);
   const [launchAttempts, setLaunchAttempts] = useState<LaunchAttempt[]>([]);
+  const [launchInstructions, setLaunchInstructions] = useState<LaunchInstruction[]>([]);
+  const [instructionDrafts, setInstructionDrafts] = useState<Record<string, string>>({});
   const [launchBusy, setLaunchBusy] = useState(false);
   const [dispatchCapabilities, setDispatchCapabilities] = useState("");
   const [dispatchEnabled, setDispatchEnabled] = useState(true);
@@ -258,7 +270,7 @@ export default function App() {
   const t = (key: TranslationKey) => translate(locale, key);
 
   useEffect(() => {
-    window.localStorage.setItem("agent-company.locale", locale);
+    window.localStorage.setItem("morrows.locale", locale);
     document.documentElement.lang = locale;
   }, [locale]);
 
@@ -284,7 +296,7 @@ export default function App() {
   const refreshDetail = useCallback(async () => {
     if (!selectedId) return;
     try {
-      const [nextAssignments, nextRuns, nextEvents, nextContext, nextCollaboration, nextPolicy, nextPreview, nextDispatchDecisions, nextLaunchAttempts] = await Promise.all([
+      const [nextAssignments, nextRuns, nextEvents, nextContext, nextCollaboration, nextPolicy, nextPreview, nextDispatchDecisions, nextLaunchAttempts, nextLaunchInstructions] = await Promise.all([
         api<Assignment[]>(`/api/tasks/${selectedId}/assignments`),
         api<Run[]>(`/api/tasks/${selectedId}/runs`),
         api<EventItem[]>(`/api/tasks/${selectedId}/events`),
@@ -294,6 +306,7 @@ export default function App() {
         api<DispatchPreview>(`/api/tasks/${selectedId}/dispatch-preview/executor`).catch(() => null),
         api<DispatchDecision[]>(`/api/tasks/${selectedId}/dispatch-decisions`),
         api<LaunchAttempt[]>(`/api/tasks/${selectedId}/launch-attempts`),
+        api<LaunchInstruction[]>(`/api/tasks/${selectedId}/launch-instructions`),
       ]);
       setAssignments(nextAssignments);
       setRuns(nextRuns);
@@ -304,6 +317,7 @@ export default function App() {
       setDispatchPreview(nextPreview);
       setDispatchDecisions(nextDispatchDecisions);
       setLaunchAttempts(nextLaunchAttempts);
+      setLaunchInstructions(nextLaunchInstructions);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -404,7 +418,7 @@ export default function App() {
     }
   }
 
-  async function enqueueLaunch(assignmentId: string, launchProfileId: string) {
+  async function enqueueLaunch(assignmentId: string, launchProfileId: string, resumeFromAttemptId?: string) {
     setLaunchBusy(true);
     try {
       await api<LaunchAttempt>("/api/launch-attempts/enqueue", {
@@ -412,8 +426,41 @@ export default function App() {
         body: JSON.stringify({
           assignment_id: assignmentId,
           launch_profile_id: launchProfileId,
+          resume_from_attempt_id: resumeFromAttemptId,
         }),
       });
+      await Promise.all([refreshBase(), refreshDetail()]);
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLaunchBusy(false);
+    }
+  }
+
+  async function sendLaunchInstruction(attemptId: string) {
+    const body = instructionDrafts[attemptId]?.trim();
+    if (!body) return;
+    setLaunchBusy(true);
+    try {
+      await api(`/api/launch-attempts/${attemptId}/instructions`, {
+        method: "POST",
+        body: JSON.stringify({ launch_attempt_id: attemptId, body }),
+      });
+      setInstructionDrafts((current) => ({ ...current, [attemptId]: "" }));
+      await refreshDetail();
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLaunchBusy(false);
+    }
+  }
+
+  async function stopLaunch(attemptId: string) {
+    setLaunchBusy(true);
+    try {
+      await api(`/api/launch-attempts/${attemptId}/stop`, { method: "POST", body: "null" });
       await Promise.all([refreshBase(), refreshDetail()]);
       setError(null);
     } catch (e) {
@@ -444,9 +491,9 @@ export default function App() {
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand">
-          <div className="brand-mark">AC</div>
+          <div className="brand-mark">M</div>
           <div>
-            <strong>Agent Company</strong>
+            <strong>Morrows</strong>
             <span>{t("workOs")}</span>
           </div>
         </div>
@@ -630,14 +677,24 @@ export default function App() {
                                 </div>
                                 <div className="launch-actions">
                                   {profiles.map((profile) => (
-                                    <button
-                                      key={profile.id}
-                                      className="secondary"
-                                      disabled={launchBusy}
-                                      onClick={() => void enqueueLaunch(item.id, profile.id)}
-                                    >
-                                      {t("launch")} · {profile.name}
-                                    </button>
+                                    <div key={profile.id} className="launch-profile-actions">
+                                      <button
+                                        className="secondary"
+                                        disabled={launchBusy}
+                                        onClick={() => void enqueueLaunch(item.id, profile.id)}
+                                      >
+                                        {profile.adapter === "codex_cli" ? t("launch") : t("inviteExternal")} · {profile.name}
+                                      </button>
+                                      {profile.adapter === "codex_cli" && (() => {
+                                        const previous = launchAttempts.find((attempt) =>
+                                          attempt.launch_profile_id === profile.id &&
+                                          attempt.agent_instance_id === item.agent_instance_id &&
+                                          !!attempt.external_session_ref &&
+                                          ["completed", "failed"].includes(attempt.status)
+                                        );
+                                        return previous && <button className="secondary" disabled={launchBusy} onClick={() => void enqueueLaunch(item.id, profile.id, previous.id)}>{t("resumeSession")}</button>;
+                                      })()}
+                                    </div>
                                   ))}
                                 </div>
                                 {!profiles.length && <div className="empty compact">{t("noLaunchProfile")}</div>}
@@ -665,6 +722,22 @@ export default function App() {
                             {attempt.stdout_path && <code>{t("stdoutLog")} · {attempt.stdout_path}</code>}
                             {attempt.stderr_path && <code>{t("stderrLog")} · {attempt.stderr_path}</code>}
                             {attempt.error && <p className="launch-error">{t("launchError")}：{attempt.error}</p>}
+                            {attempt.resume_from_attempt_id && <small>{t("resumedFrom")} · {shortId(attempt.resume_from_attempt_id)}</small>}
+                            {launchInstructions.filter((instruction) => instruction.launch_attempt_id === attempt.id).map((instruction) => (
+                              <p key={instruction.id} className="launch-instruction">{instruction.body}</p>
+                            ))}
+                            {["queued", "starting", "running", "awaiting_agent"].includes(attempt.status) && <>
+                              <div className="launch-instruction-form">
+                                <input
+                                  value={instructionDrafts[attempt.id] || ""}
+                                  onChange={(event) => setInstructionDrafts((current) => ({ ...current, [attempt.id]: event.target.value }))}
+                                  placeholder={t("instructionPlaceholder")}
+                                  aria-label={t("instructionPlaceholder")}
+                                />
+                                <button className="secondary" disabled={launchBusy || !instructionDrafts[attempt.id]?.trim()} onClick={() => void sendLaunchInstruction(attempt.id)}>{t("sendInstruction")}</button>
+                                <button className="secondary" disabled={launchBusy} onClick={() => void stopLaunch(attempt.id)}>{t("stopLaunch")}</button>
+                              </div>
+                            </>}
                           </div>
                         ))}
                         {!launchAttempts.length && <div className="empty compact">{t("noLaunchAttempts")}</div>}

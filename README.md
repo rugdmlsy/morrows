@@ -1,4 +1,4 @@
-# Agent Company Work OS
+# Morrows
 
 Local-first, agent-native work coordination for humans and multiple AI agent products/accounts.
 
@@ -43,11 +43,14 @@ Append-only event timeline
 - Durable per-task dispatch policies and append-only dispatch decisions
 - Explainable capacity-aware Dispatcher with atomic Assignment creation
 - Durable executor LaunchProfile / LaunchAttempt records and background launch jobs
-- Safe Codex CLI launcher with Agent Company Run/session reconciliation
+- Safe Codex CLI launch, session resume, stop, and Run/session reconciliation
+- Durable launch instructions, visible in the Web UI and over MCP
+- External handoff adapters for LSM, Antigravity, and Gemini with owned accept/status
+- Startup recovery for interrupted local launch jobs
 - Chinese/English Web UI with Chinese as the first-visit default
 - SQLite durable jobs for launcher work; outbox remains reserved for later delivery automation
 
-Not yet implemented: Antigravity/Gemini concrete launch adapters, automatic dispatch→launch chaining, process cancellation, multi-user auth/RBAC, or distributed deployment.
+Not yet implemented: automatic dispatch→launch chaining, direct process control for the external agent products, multi-user auth/RBAC, or distributed deployment. External adapters invite an existing agent session; they do not open those products automatically.
 
 ## Run
 
@@ -59,7 +62,7 @@ npm install
 npm run build
 cd ..
 
-cargo run -p ac-server
+cargo run -p morrows-server
 ```
 
 Then open:
@@ -71,9 +74,10 @@ http://127.0.0.1:8787
 Environment variables:
 
 ```bash
-AC_DATABASE_URL=sqlite://data/agent-company.db
-AC_BIND=127.0.0.1:8787
-AC_WEB_DIR=web/dist
+MORROWS_DATABASE_URL=sqlite://data/morrows.db
+MORROWS_BIND=127.0.0.1:8787
+MORROWS_WEB_DIR=web/dist
+MORROWS_LAUNCH_DIR=data/launches
 ```
 
 ## Test
@@ -108,12 +112,22 @@ The server obtains actor identity from the transport request instead of trusting
 M4 adds `dispatch_policy_list/set/get`, `dispatch_preview`, `dispatch_task`, `dispatch_next`, and `dispatch_decisions`. Dispatch creates an Assignment only; it deliberately does not start or resume an external agent process.
 
 M5 keeps that boundary and adds explicit launch operations: `launch_profile_register/list/get`,
-`launch_enqueue`, `launch_attempt_get`, and `task_launch_attempts`. The first concrete
-adapter is `codex_cli`. Operator-controlled absolute program/workspace paths are stored in a
-LaunchProfile; task text is sent to Codex over stdin and is never interpolated into a shell
-command. A background worker claims durable launch jobs, creates the Agent Company Run, captures
-JSONL/stderr logs, records the Codex external session id when available, and reconciles process
-exit with Run/Assignment state.
+`launch_enqueue`, `launch_attempt_get`, `task_launch_attempts`, `launch_stop`,
+`launch_instruction_send`, and `launch_instructions`. The `codex_cli` adapter uses an
+operator-controlled program and workspace, sends task text through stdin, captures logs and
+session IDs, and can resume a previous finished attempt for the same task/agent/profile.
+Stopping revokes the assignment and kills the child process owned by this daemon. A normal
+process exit without `run_complete` returns the task to `ready`.
+
+`lsm_external`, `antigravity_external`, and `gemini_external` have no executable path. Enqueue
+creates an `awaiting_agent` invitation. The matching AgentInstance reads
+`external_launch_list` through MCP, calls `external_launch_accept` with its session reference,
+then uses the existing Run checkpoint/complete tools. It can read new instructions with
+`launch_instructions`; the daemon reconciles completed Runs and expired assignments. These
+adapters track work across product accounts and sessions without claiming a provider-specific
+automation interface that is not available.
+
+`MORROWS_*` settings take precedence; the former `AC_*` settings remain accepted during migration.
 
 This header is an identity binding mechanism for the local-only daemon, not authentication. A later milestone will replace it with issued credentials/tokens before remote exposure.
 

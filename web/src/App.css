@@ -241,3 +241,6 @@ button.secondary {
   .dispatch-form { grid-template-columns: 1fr; }
   .dispatch-check { padding-bottom: 0; }
 }
+.launch-profile-actions, .launch-instruction-form { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
+.launch-instruction-form input { flex: 1 1 14rem; min-width: 0; }
+.launch-instruction { margin: 0.35rem 0; white-space: pre-wrap; }

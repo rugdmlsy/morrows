@@ -47,6 +47,12 @@ const translations = {
     launcher: "执行器启动",
     launchWith: "使用以下配置启动",
     launch: "启动",
+    inviteExternal: "通知外部 Agent",
+    resumeSession: "恢复会话",
+    resumedFrom: "恢复自",
+    instructionPlaceholder: "给 Agent 的新指令",
+    sendInstruction: "发送指令",
+    stopLaunch: "停止并释放",
     noLaunchProfile: "这个 Agent 没有可用的启动配置。",
     launchAttempts: "启动记录",
     noLaunchAttempts: "还没有启动记录。",
@@ -142,6 +148,12 @@ const translations = {
     launcher: "Executor Launcher",
     launchWith: "Launch with",
     launch: "Launch",
+    inviteExternal: "Invite external agent",
+    resumeSession: "Resume session",
+    resumedFrom: "Resumed from",
+    instructionPlaceholder: "New instruction for the agent",
+    sendInstruction: "Send instruction",
+    stopLaunch: "Stop and release",
     noLaunchProfile: "No enabled launch profile for this agent.",
     launchAttempts: "Launch attempts",
     noLaunchAttempts: "No launch attempts yet.",
@@ -200,7 +212,7 @@ export function translate(locale: Locale, key: TranslationKey): string {
 }
 
 export function initialLocale(): Locale {
-  const stored = window.localStorage.getItem("agent-company.locale");
+  const stored = window.localStorage.getItem("morrows.locale") ?? window.localStorage.getItem("agent-company.locale");
   return stored === "en" ? "en" : "zh-CN";
 }
 
@@ -223,6 +235,7 @@ const stateZh: Record<string, string> = {
   expired: "已过期",
   pending: "待处理",
   queued: "已排队",
+  awaiting_agent: "等待 Agent 领取",
   starting: "启动中",
   accepted: "已接受",
   rejected: "已拒绝",

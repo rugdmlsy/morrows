@@ -9,7 +9,7 @@
                               │ REST
                               ▼
 ┌─────────────┐       ┌──────────────┐       ┌─────────────┐
-│ MCP clients │──────▶│ ac-server    │──────▶│ ac-store    │
+│ MCP clients │──────▶│ morrows-server    │──────▶│ morrows-store    │
 └─────────────┘       │ Axum + rmcp  │       │ SQLx/SQLite │
                       └──────┬───────┘       └─────────────┘
                              │
@@ -326,65 +326,62 @@ a periodic automatic dispatch loop.
 
 ## M5 Executor launcher
 
-M5 consumes an existing executor Assignment without changing Dispatcher policy. The
-operator first registers a `LaunchProfile` bound to one AgentInstance. The current
-concrete adapter is `codex_cli`; Antigravity and Gemini remain unimplemented until a
-supported local invocation contract is available.
+M5 consumes an existing executor Assignment without changing Dispatcher policy. An
+operator registers a `LaunchProfile` for that AgentInstance. A local `codex_cli`
+profile fixes the absolute executable and workspace; task text cannot choose the
+program, cwd, environment, or argv. The bounded prompt is written to stdin.
 
-A LaunchProfile contains only operator-controlled execution configuration: adapter,
-absolute program path, optional `CODEX_HOME`, optional default workspace, optional
-model, enabled state, and metadata. Task/context text cannot select the executable,
-working directory, environment variable names, or arbitrary argv. The Codex adapter
-constructs argv structurally and supplies the bounded task/context prompt through
-stdin.
-
-`launch_enqueue` validates that the Assignment is live, has role `executor`, and
-belongs to the same AgentInstance as the enabled LaunchProfile. The workspace is the
-absolute existing `default_cwd` fixed by that operator-controlled profile; callers
-cannot override it to another directory. Enqueue atomically writes both a `LaunchAttempt(status=queued)`
-and a durable `jobs(kind=launch_executor)` record. A partial unique index prevents
-more than one queued/starting/running launch for the same Assignment.
-
-The server launch worker atomically claims pending jobs. Before spawning the process,
-it creates the Agent Company Run and moves the attempt to `starting`. The Codex
-adapter runs:
+`launch_enqueue` checks the live Assignment and profile in one immediate transaction.
+For Codex, it creates a queued LaunchAttempt and a durable launch job. The worker
+creates the Run before spawn, then starts either a new session:
 
 `<program> exec --json --color never --approve-for-me -C <cwd> -o <last-message> [ -m <model> ] -`
 
-The initial prompt is written to stdin. stdout JSONL, stderr, and the last message are
-stored under `AC_LAUNCH_DIR/<launch-attempt-id>/` (default:
-`data/launches/<launch-attempt-id>/`). The launcher scans JSONL recursively for
-`thread_id`, `session_id`, or `conversation_id` and stores the first external
-session reference on both LaunchAttempt and Run.
+or resumes a previous finished attempt for the same task, agent, and profile:
 
-Process exit is intentionally not equivalent to semantic task completion:
+`<program> exec resume --json -o <last-message> [ -m <model> ] <session-id> -`
 
-- If the agent called `run_complete` through MCP, that completed Run/Task state wins.
-- Exit code 0 without `run_complete` marks the LaunchAttempt completed, pauses the
-  Run with `launcher_process_exited_without_completion`, releases the Assignment,
-  and returns an in-progress executor task to `ready`.
-- Spawn/wait/nonzero failures mark the attempt and Run failed, release the Assignment,
-  and return the task to `ready`.
+The worker records JSONL, stderr, last message, PID, and external session reference
+under `MORROWS_LAUNCH_DIR/<attempt-id>/`. A `launch_stop` request atomically revokes
+the assignment and marks the attempt cancelled; the owning worker polls that state
+and kills its child. On restart, the daemon marks interrupted local attempts failed
+and restores claimed jobs whose attempts had not started. It cannot safely identify
+and kill an orphan process after an unclean OS crash.
 
-This keeps "the process ended" separate from "the assigned work is done" and prevents
-failed launchers from leaking active executor leases.
+`lsm_external`, `antigravity_external`, and `gemini_external` profiles contain no
+executable or workspace. Enqueue writes an `awaiting_agent` attempt. The bound agent
+polls `external_launch_list` over MCP and calls `external_launch_accept` with its
+external session reference. Acceptance creates its Run atomically. The agent then
+reads `task_get`, `context_get`, and `launch_instructions`, checkpoints progress,
+and calls `run_complete` when done. The worker reconciles terminal Runs and expired
+assignments. These adapters do not open a product UI or start a provider process.
+
+`launch_instruction_send` creates a durable, ordered mailbox entry and audit event.
+Agents read it with `launch_instructions`; a running Codex process must poll the MCP
+tool, since the CLI has no live turn injection in this adapter. On resume, all
+instructions are included in the new prompt.
+
+Process exit is distinct from semantic completion. `run_complete` wins if already
+committed. A zero exit without it pauses the Run, releases the Assignment, and
+returns the Task to `ready`; a failed process marks the Run failed and does the same.
 
 REST additions under `/api`:
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| GET/POST | `/launch-profiles` | List/register operator launch profiles |
-| GET | `/launch-profiles/{id}` | Read a launch profile |
-| POST | `/launch-attempts/enqueue` | Queue an explicit launch for an Assignment |
-| GET | `/launch-attempts/{id}` | Read one durable launch attempt |
-| GET | `/tasks/{id}/launch-attempts` | Read task launch history |
+| GET/POST | `/launch-profiles` | List/register launch profiles |
+| GET | `/launch-profiles/{id}` | Read a profile |
+| POST | `/launch-attempts/enqueue` | Queue Codex or invite an external agent |
+| GET | `/launch-attempts/{id}` | Read attempt status |
+| POST | `/launch-attempts/{id}/stop` | Stop and release an attempt |
+| GET/POST | `/launch-attempts/{id}/instructions` | Read/send instructions |
+| POST | `/launch-attempts/external/accept` | Accept as assigned AgentInstance |
+| GET | `/agent-instances/{id}/external-launches` | Read external work for an instance |
+| GET | `/tasks/{id}/launch-attempts` | Task launch history |
+| GET | `/tasks/{id}/launch-instructions` | Task instruction history |
 
-MCP exposes the matching `launch_profile_register/list/get`, `launch_enqueue`,
-`launch_attempt_get`, and `task_launch_attempts` tools. The Web Task Detail view
-only offers enabled profiles whose AgentInstance matches the active executor
-Assignment, and shows attempt status, linked Run/session, PID, exit code, log paths,
-and durable errors.
-
-M5 does not automatically launch immediately after dispatch, kill/cancel processes,
-launch on remote machines, resume Codex sessions, or implement Antigravity/Gemini
-adapters.
+MCP exposes the corresponding profile, attempt, instruction, stop, external list,
+and external accept tools. The Web Task Detail view supports launch/invite, resume,
+instruction send, stop, and status. Dispatch and launch remain explicit separate
+actions. Authentication and remote process launch belong to the later deployment
+milestone.

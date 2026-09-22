@@ -9,4 +9,4 @@ if [[ ! -f web/dist/index.html ]]; then
     npm run build
   )
 fi
-exec cargo run -p ac-server
+exec cargo run -p morrows-server
