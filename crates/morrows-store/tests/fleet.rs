@@ -275,18 +275,20 @@ async fn migration_preserves_m21_uuids_and_references_and_capacity_is_append_onl
     // database, then let Store::connect perform exactly the production upgrade.
     let dir = std::env::temp_dir().join(format!("ac-m3-{}", Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
-    for file in [
-        "0001_init.sql",
-        "0002_collaboration.sql",
-        "0003_messaging_handoff_acceptance.sql",
+    // Embed the historical migration text so a moved repository does not leave
+    // a compiled test binary pointing at its former source directory.
+    for (file, contents) in [
+        ("0001_init.sql", include_str!("../migrations/0001_init.sql")),
+        (
+            "0002_collaboration.sql",
+            include_str!("../migrations/0002_collaboration.sql"),
+        ),
+        (
+            "0003_messaging_handoff_acceptance.sql",
+            include_str!("../migrations/0003_messaging_handoff_acceptance.sql"),
+        ),
     ] {
-        std::fs::copy(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("migrations")
-                .join(file),
-            dir.join(file),
-        )
-        .unwrap();
+        std::fs::write(dir.join(file), contents).unwrap();
     }
     let url = format!("sqlite://{}?mode=rwc", dir.join("test.db").display());
     let pool = sqlx::SqlitePool::connect(&url).await.unwrap();
