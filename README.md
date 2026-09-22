@@ -40,9 +40,11 @@ Append-only event timeline
 - Dependency cycle prevention and executor gating
 - Normalized AgentProfile / Account / Machine / AgentInstance identities
 - Owned heartbeats, append-only capacity observations, and joined Agent Fleet UI
+- Durable per-task dispatch policies and append-only dispatch decisions
+- Explainable capacity-aware Dispatcher with atomic Assignment creation
 - SQLite job/outbox tables reserved for durable automation
 
-Not yet implemented: automatic Dispatcher, executor launch adapters, multi-user auth/RBAC, or distributed deployment.
+Not yet implemented: executor launch adapters, a periodic auto-dispatch loop, multi-user auth/RBAC, or distributed deployment.
 
 ## Run
 
@@ -99,6 +101,8 @@ X-Agent-Instance-Id: <uuid>
 ```
 
 The server obtains actor identity from the transport request instead of trusting an `agent_id` supplied in the tool arguments.
+
+M4 adds `dispatch_policy_list/set/get`, `dispatch_preview`, `dispatch_task`, `dispatch_next`, and `dispatch_decisions`. Dispatch creates an Assignment only; it deliberately does not start or resume an external agent process.
 
 This header is an identity binding mechanism for the local-only daemon, not authentication. A later milestone will replace it with issued credentials/tokens before remote exposure.
 

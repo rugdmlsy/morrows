@@ -189,3 +189,6 @@ pub use collaboration::*;
 
 mod fleet;
 pub use fleet::*;
+
+mod dispatch;
+pub use dispatch::*;

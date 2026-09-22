@@ -113,6 +113,55 @@ type EventItem = {
   created_at: string;
 };
 
+type DispatchPolicy = {
+  task_id: string;
+  role: string;
+  required_capabilities: string[];
+  profile_id?: string | null;
+  account_id?: string | null;
+  machine_id?: string | null;
+  heartbeat_ttl_seconds: number;
+  capacity_ttl_seconds: number;
+  lease_seconds: number;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+type DispatchCandidate = {
+  agent_instance_id: string;
+  agent_name: string;
+  eligible: boolean;
+  effective_slots: number;
+  current_active_assignments: number;
+  heartbeat_age_seconds: number;
+  capacity_age_seconds?: number | null;
+  capacity_status?: string | null;
+  quota_state?: string | null;
+  reasons: string[];
+};
+
+type DispatchPreview = {
+  task_id: string;
+  role: string;
+  policy: DispatchPolicy;
+  task_dispatchable: boolean;
+  task_reasons: string[];
+  candidates: DispatchCandidate[];
+  selected_agent_instance_id?: string | null;
+};
+
+type DispatchDecision = {
+  id: string;
+  task_id: string;
+  role: string;
+  outcome: string;
+  selected_agent_instance_id?: string | null;
+  assignment_id?: string | null;
+  preview: DispatchPreview;
+  created_at: string;
+};
+
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
     ...init,
@@ -150,6 +199,14 @@ export default function App() {
   const [events, setEvents] = useState<EventItem[]>([]);
   const [collaboration, setCollaboration] = useState<Collaboration | null>(null);
   const [context, setContext] = useState<ContextRevision | null>(null);
+  const [dispatchPolicies, setDispatchPolicies] = useState<DispatchPolicy[]>([]);
+  const [dispatchPolicy, setDispatchPolicy] = useState<DispatchPolicy | null>(null);
+  const [dispatchPreview, setDispatchPreview] = useState<DispatchPreview | null>(null);
+  const [dispatchDecisions, setDispatchDecisions] = useState<DispatchDecision[]>([]);
+  const [dispatchCapabilities, setDispatchCapabilities] = useState("");
+  const [dispatchEnabled, setDispatchEnabled] = useState(true);
+  const [dispatchLease, setDispatchLease] = useState(900);
+  const [dispatchBusy, setDispatchBusy] = useState(false);
   const [title, setTitle] = useState("");
   const [priority, setPriority] = useState(0);
   const [error, setError] = useState<string | null>(null);
@@ -158,12 +215,14 @@ export default function App() {
 
   const refreshBase = useCallback(async () => {
     try {
-      const [nextTasks, nextAgents] = await Promise.all([
+      const [nextTasks, nextAgents, nextPolicies] = await Promise.all([
         api<Task[]>("/api/tasks"),
         api<FleetEntry[]>("/api/agent-fleet"),
+        api<DispatchPolicy[]>("/api/dispatch-policies"),
       ]);
       setTasks(nextTasks);
       setAgents(nextAgents);
+      setDispatchPolicies(nextPolicies);
       if (!selectedId && nextTasks.length) setSelectedId(nextTasks[0].id);
       setError(null);
     } catch (e) {
@@ -174,18 +233,24 @@ export default function App() {
   const refreshDetail = useCallback(async () => {
     if (!selectedId) return;
     try {
-      const [nextAssignments, nextRuns, nextEvents, nextContext, nextCollaboration] = await Promise.all([
+      const [nextAssignments, nextRuns, nextEvents, nextContext, nextCollaboration, nextPolicy, nextPreview, nextDispatchDecisions] = await Promise.all([
         api<Assignment[]>(`/api/tasks/${selectedId}/assignments`),
         api<Run[]>(`/api/tasks/${selectedId}/runs`),
         api<EventItem[]>(`/api/tasks/${selectedId}/events`),
         api<ContextRevision>(`/api/tasks/${selectedId}/context`).catch(() => null),
         api<Collaboration>(`/api/tasks/${selectedId}/collaboration`),
+        api<DispatchPolicy>(`/api/tasks/${selectedId}/dispatch-policy/executor`).catch(() => null),
+        api<DispatchPreview>(`/api/tasks/${selectedId}/dispatch-preview/executor`).catch(() => null),
+        api<DispatchDecision[]>(`/api/tasks/${selectedId}/dispatch-decisions`),
       ]);
       setAssignments(nextAssignments);
       setRuns(nextRuns);
       setEvents(nextEvents);
       setContext(nextContext);
       setCollaboration(nextCollaboration);
+      setDispatchPolicy(nextPolicy);
+      setDispatchPreview(nextPreview);
+      setDispatchDecisions(nextDispatchDecisions);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -202,6 +267,89 @@ export default function App() {
     const timer = window.setInterval(() => void refreshDetail(), 3000);
     return () => window.clearInterval(timer);
   }, [refreshDetail]);
+
+  useEffect(() => {
+    if (!selectedId) return;
+    void api<DispatchPolicy>(`/api/tasks/${selectedId}/dispatch-policy/executor`)
+      .then((policy) => {
+        setDispatchCapabilities(policy.required_capabilities.join(", "));
+        setDispatchEnabled(policy.enabled);
+        setDispatchLease(policy.lease_seconds);
+      })
+      .catch(() => {
+        setDispatchCapabilities("");
+        setDispatchEnabled(true);
+        setDispatchLease(900);
+      });
+  }, [selectedId]);
+
+  async function saveDispatchPolicy() {
+    if (!selectedId) return;
+    setDispatchBusy(true);
+    try {
+      const required_capabilities = dispatchCapabilities
+        .split(",")
+        .map((value) => value.trim())
+        .filter(Boolean);
+      await api<DispatchPolicy>(`/api/tasks/${selectedId}/dispatch-policy`, {
+        method: "POST",
+        body: JSON.stringify({
+          role: "executor",
+          required_capabilities,
+          heartbeat_ttl_seconds: 120,
+          capacity_ttl_seconds: 120,
+          lease_seconds: dispatchLease,
+          enabled: dispatchEnabled,
+        }),
+      });
+      await Promise.all([refreshBase(), refreshDetail()]);
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setDispatchBusy(false);
+    }
+  }
+
+  async function previewDispatch() {
+    if (!selectedId) return;
+    setDispatchBusy(true);
+    try {
+      setDispatchPreview(await api<DispatchPreview>(`/api/tasks/${selectedId}/dispatch-preview/executor`));
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setDispatchBusy(false);
+    }
+  }
+
+  async function dispatchSelectedTask() {
+    if (!selectedId) return;
+    setDispatchBusy(true);
+    try {
+      await api(`/api/tasks/${selectedId}/dispatch/executor`, { method: "POST", body: "null" });
+      await Promise.all([refreshBase(), refreshDetail()]);
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setDispatchBusy(false);
+    }
+  }
+
+  async function dispatchNextTask() {
+    setDispatchBusy(true);
+    try {
+      await api("/api/dispatch/next/executor", { method: "POST", body: "null" });
+      await Promise.all([refreshBase(), refreshDetail()]);
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setDispatchBusy(false);
+    }
+  }
 
   async function createTask(event: FormEvent) {
     event.preventDefault();
@@ -273,6 +421,7 @@ export default function App() {
                   title="Priority"
                 />
                 <button type="submit">Create</button>
+                <button type="button" className="secondary" onClick={() => void dispatchNextTask()} disabled={dispatchBusy}>Dispatch next</button>
               </form>
 
               <div className="task-list">
@@ -288,6 +437,7 @@ export default function App() {
                     </div>
                     <div className="task-meta">
                       <StateBadge state={task.state} />
+                      {dispatchPolicies.some((policy) => policy.task_id === task.id && policy.role === "executor" && policy.enabled) && <span className="badge state-online">dispatch</span>}
                       <span>P{task.priority}</span>
                     </div>
                   </button>
@@ -321,6 +471,54 @@ export default function App() {
                       ) : (
                         <div className="empty compact">No context revision yet.</div>
                       )}
+
+                      <h3>Dispatcher</h3>
+                      <div className="dispatch-card">
+                        <div className="dispatch-form">
+                          <label>
+                            <span>Required capabilities</span>
+                            <input value={dispatchCapabilities} onChange={(e) => setDispatchCapabilities(e.target.value)} placeholder="code, rust, review" />
+                          </label>
+                          <label className="dispatch-small">
+                            <span>Lease seconds</span>
+                            <input type="number" min={30} value={dispatchLease} onChange={(e) => setDispatchLease(Number(e.target.value))} />
+                          </label>
+                          <label className="dispatch-check">
+                            <input type="checkbox" checked={dispatchEnabled} onChange={(e) => setDispatchEnabled(e.target.checked)} />
+                            Enabled
+                          </label>
+                        </div>
+                        <div className="dispatch-actions">
+                          <button onClick={() => void saveDispatchPolicy()} disabled={dispatchBusy}>Save policy</button>
+                          <button className="secondary" onClick={() => void previewDispatch()} disabled={dispatchBusy || !dispatchPolicy}>Preview</button>
+                          <button className="secondary" onClick={() => void dispatchSelectedTask()} disabled={dispatchBusy || !dispatchPolicy}>Dispatch</button>
+                        </div>
+                        {dispatchPolicy ? (
+                          <small>executor · heartbeat ≤ {dispatchPolicy.heartbeat_ttl_seconds}s · capacity ≤ {dispatchPolicy.capacity_ttl_seconds}s</small>
+                        ) : <div className="empty compact">No executor dispatch policy.</div>}
+                        {dispatchPreview && <div className="dispatch-preview">
+                          <div className="mini-card-row">
+                            <strong>{dispatchPreview.selected_agent_instance_id ? `Selected ${shortId(dispatchPreview.selected_agent_instance_id)}` : "No eligible agent"}</strong>
+                            <StateBadge state={dispatchPreview.task_dispatchable ? "ready" : "blocked"} />
+                          </div>
+                          {dispatchPreview.task_reasons.length > 0 && <p>Task: {dispatchPreview.task_reasons.join(", ")}</p>}
+                          {dispatchPreview.candidates.slice(0, 6).map((candidate) => (
+                            <div className={`candidate-row ${candidate.eligible ? "candidate-ok" : ""}`} key={candidate.agent_instance_id}>
+                              <div>
+                                <strong>{candidate.agent_name}</strong>
+                                <small>{shortId(candidate.agent_instance_id)} · {candidate.effective_slots} effective slots · {candidate.current_active_assignments} active</small>
+                              </div>
+                              <span>{candidate.eligible ? "eligible" : candidate.reasons.join(", ")}</span>
+                            </div>
+                          ))}
+                        </div>}
+                        {dispatchDecisions.length > 0 && <div className="dispatch-history">
+                          <strong>Decision history</strong>
+                          {dispatchDecisions.slice(0, 4).map((decision) => (
+                            <small key={decision.id}>{decision.outcome} · {decision.selected_agent_instance_id ? shortId(decision.selected_agent_instance_id) : "no agent"} · {age(decision.created_at)}</small>
+                          ))}
+                        </div>}
+                      </div>
 
                       <h3>Assignments</h3>
                       <div className="stack">

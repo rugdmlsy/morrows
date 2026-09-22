@@ -256,3 +256,70 @@ Missing capacity is shown explicitly rather than inferred as zero. M3 tests upgr
 seeded M2.1 database using production migrations, compare all existing collaboration
 rows, exercise the original run owner after migration, verify snapshot durability and
 append-only constraints, and cover registration/ownership/validation through REST/MCP.
+
+## M4 Dispatcher
+
+M4 adds a durable, explainable assignment Dispatcher on top of the M3 identity and
+capacity model. It does not launch, resume, or control external agent processes.
+
+A `TaskDispatchPolicy` is keyed by task and role. It stores required capabilities,
+optional AgentProfile / Account / Machine filters, heartbeat and capacity freshness
+TTLs, assignment lease duration, and an enabled flag. Updating a policy is audited;
+manual `task_claim` remains supported and unchanged.
+
+`dispatch_preview` and actual dispatch use the same evaluator. For an executor task,
+the evaluator requires a dispatchable task state, completed prerequisites, no live
+assignment for that role, and an enabled policy. A candidate must be online, satisfy
+all capability and optional identity filters, and have both a fresh heartbeat and a
+fresh capacity observation. Capacity statuses `blocked`, `throttled`,
+`unavailable`, or `offline` are rejected; quota states `usage_limited`,
+`exhausted`, or `blocked` are also rejected.
+
+CapacitySnapshot remains observation-only. To avoid oversubscribing from a stale but
+still fresh snapshot, Dispatcher reconciles the reported values with current durable
+Assignments:
+
+`added_since_snapshot = max(current_active_assignments - observed_active_assignments, 0)`
+
+`effective_slots = max(reported_available_slots - added_since_snapshot, 0)`
+
+When `max_concurrency` is present, effective slots are additionally capped by
+`max_concurrency - current_active_assignments`. Candidate order is deterministic:
+highest effective slots, then fewest current active assignments, then freshest
+capacity observation, then AgentInstance UUID.
+
+`dispatch_task` and `dispatch_next` execute stale-lease cleanup, re-evaluation,
+selection, Assignment creation, and audit writes inside SQLite `BEGIN IMMEDIATE`.
+This serializes concurrent dispatch attempts so two callers cannot consume the same
+last effective slot. Assignment expiry discovered by Dispatcher emits the same
+`assignment.expired` audit event shape as the lease manager.
+
+Each mutating attempt appends a `DispatchDecision` containing the full preview,
+candidate reasons, outcome, selected instance when applicable, and resulting
+Assignment. Decisions are append-only at the SQLite layer. Preview is read-only.
+`dispatch_next` considers enabled policies by task priority descending, then task
+creation time and UUID, recording no-candidate attempts until the first assignment.
+
+REST additions under `/api`:
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/dispatch-policies` | List durable policies |
+| POST | `/tasks/{id}/dispatch-policy` | Create or replace a policy |
+| GET | `/tasks/{id}/dispatch-policy/{role}` | Read a policy |
+| GET | `/tasks/{id}/dispatch-preview/{role}` | Explain task/candidate eligibility without mutation |
+| POST | `/tasks/{id}/dispatch/{role}` | Atomically select and create an Assignment |
+| GET | `/tasks/{id}/dispatch-decisions` | Read append-only decision history |
+| POST | `/dispatch/next/{role}` | Dispatch the highest-priority eligible task |
+
+MCP exposes the matching `dispatch_policy_list/set/get`, `dispatch_preview`,
+`dispatch_task`, `dispatch_next`, and `dispatch_decisions` tools. These are
+control-plane operations and do not require pretending the dispatcher is the selected
+worker. The resulting Assignment is still owned by the selected AgentInstance, so
+subsequent run mutations retain the existing identity checks.
+
+The Work Queue marks tasks with enabled executor policies. Task Detail can edit the
+basic capability/lease policy, preview concrete candidate rejection reasons, dispatch
+explicitly, and inspect recent decisions. M4 deliberately defers executor launch
+adapters, provider-specific quota parsers, preemption, remote authentication/RBAC, and
+a periodic automatic dispatch loop.

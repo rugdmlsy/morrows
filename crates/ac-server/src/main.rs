@@ -1,4 +1,5 @@
 mod collaboration;
+mod dispatch;
 mod fleet;
 mod mcp;
 
@@ -127,6 +128,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/runs/{id}/checkpoint", post(checkpoint_run))
         .route("/runs/{id}/complete", post(complete_run))
         .merge(collaboration::routes())
+        .merge(dispatch::routes())
         .merge(fleet::routes())
         .with_state(state);
 

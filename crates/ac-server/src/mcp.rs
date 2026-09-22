@@ -162,6 +162,23 @@ pub struct CapacityRequest {
     pub input: ac_core::RecordCapacity,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TaskRoleRequest {
+    pub task_id: String,
+    #[serde(default = "default_role")]
+    pub role: String,
+}
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DispatchPolicyRequest {
+    pub task_id: String,
+    pub input: ac_core::SetDispatchPolicy,
+}
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DispatchNextRequest {
+    #[serde(default = "default_role")]
+    pub role: String,
+}
+
 #[tool_router(router = tool_router)]
 impl AgentCompanyMcp {
     #[tool(
@@ -354,6 +371,94 @@ impl AgentCompanyMcp {
     )]
     async fn agent_fleet(&self) -> Result<String, String> {
         let value = self.store.agent_fleet().await.map_err(|e| e.to_string())?;
+        serde_json::to_string(&value).map_err(|e| e.to_string())
+    }
+
+    #[tool(description = "List durable task dispatch policies.")]
+    async fn dispatch_policy_list(&self) -> Result<String, String> {
+        let value = self
+            .store
+            .list_dispatch_policies()
+            .await
+            .map_err(|e| e.to_string())?;
+        serde_json::to_string(&value).map_err(|e| e.to_string())
+    }
+    #[tool(description = "Create or replace a durable task dispatch policy.")]
+    async fn dispatch_policy_set(
+        &self,
+        Parameters(req): Parameters<DispatchPolicyRequest>,
+    ) -> Result<String, String> {
+        let value = self
+            .store
+            .set_dispatch_policy(parse_id(&req.task_id)?, req.input)
+            .await
+            .map_err(|e| e.to_string())?;
+        serde_json::to_string(&value).map_err(|e| e.to_string())
+    }
+    #[tool(description = "Read a task dispatch policy.")]
+    async fn dispatch_policy_get(
+        &self,
+        Parameters(req): Parameters<TaskRoleRequest>,
+    ) -> Result<String, String> {
+        let value = self
+            .store
+            .get_dispatch_policy(parse_id(&req.task_id)?, &req.role)
+            .await
+            .map_err(|e| e.to_string())?;
+        serde_json::to_string(&value).map_err(|e| e.to_string())
+    }
+    #[tool(
+        description = "Explain task dispatch eligibility and candidate ranking without mutation."
+    )]
+    async fn dispatch_preview(
+        &self,
+        Parameters(req): Parameters<TaskRoleRequest>,
+    ) -> Result<String, String> {
+        let value = self
+            .store
+            .dispatch_preview(parse_id(&req.task_id)?, &req.role)
+            .await
+            .map_err(|e| e.to_string())?;
+        serde_json::to_string(&value).map_err(|e| e.to_string())
+    }
+    #[tool(
+        description = "Atomically select an eligible agent and create its assignment; does not launch a process."
+    )]
+    async fn dispatch_task(
+        &self,
+        Parameters(req): Parameters<TaskRoleRequest>,
+    ) -> Result<String, String> {
+        let value = self
+            .store
+            .dispatch_task(parse_id(&req.task_id)?, &req.role)
+            .await
+            .map_err(|e| e.to_string())?;
+        serde_json::to_string(&value).map_err(|e| e.to_string())
+    }
+    #[tool(
+        description = "Dispatch the highest-priority eligible task with an enabled policy; does not launch a process."
+    )]
+    async fn dispatch_next(
+        &self,
+        Parameters(req): Parameters<DispatchNextRequest>,
+    ) -> Result<String, String> {
+        let value = self
+            .store
+            .dispatch_next(&req.role)
+            .await
+            .map_err(|e| e.to_string())?;
+        serde_json::to_string(&value).map_err(|e| e.to_string())
+    }
+    #[tool(description = "Read append-only dispatch decision history for a task.")]
+    async fn dispatch_decisions(
+        &self,
+        Parameters(req): Parameters<TaskIdRequest>,
+    ) -> Result<String, String> {
+        let value = self
+            .store
+            .task_dispatch_decisions(parse_id(&req.task_id)?)
+            .await
+            .map_err(|e| e.to_string())?;
         serde_json::to_string(&value).map_err(|e| e.to_string())
     }
 
@@ -908,3 +1013,7 @@ mod tests {
 #[cfg(test)]
 #[path = "mcp_fleet_tests.rs"]
 mod fleet_tests;
+
+#[cfg(test)]
+#[path = "mcp_dispatch_tests.rs"]
+mod dispatch_tests;

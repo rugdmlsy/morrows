@@ -716,3 +716,5 @@ fn storage<E: std::fmt::Display>(e: E) -> DomainError {
 mod collaboration;
 
 mod fleet;
+
+mod dispatch;
