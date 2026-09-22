@@ -14,6 +14,36 @@ type Task = {
   updated_at: string;
 };
 
+type Collaboration = {
+  handoffs: {
+    id: string;
+    summary: string;
+    completed: string[];
+    remaining: string[];
+    blockers: string[];
+    context_revision_id: string;
+    status: string;
+    accepted_by_run_id?: string | null;
+  }[];
+  artifacts: { id: string; title: string; uri: string; kind: string; description: string }[];
+  decisions: { id: string; title: string; rationale: string }[];
+  threads: { id: string; title: string }[];
+  messages: {
+    id: string;
+    thread_id: string;
+    body: string;
+    created_by: string;
+    message_type: string;
+    recipient_agent_instance_id?: string | null;
+    recipient_role?: string | null;
+    reply_to_message_id?: string | null;
+    correlation_id?: string | null;
+    requires_response: boolean;
+    status: string;
+  }[];
+  dependencies: { depends_on_task_id: string }[];
+};
+
 type Agent = {
   id: string;
   name: string;
@@ -102,6 +132,7 @@ export default function App() {
   const [assignments, setAssignments] = useState<Assignment[]>([]);
   const [runs, setRuns] = useState<Run[]>([]);
   const [events, setEvents] = useState<EventItem[]>([]);
+  const [collaboration, setCollaboration] = useState<Collaboration | null>(null);
   const [context, setContext] = useState<ContextRevision | null>(null);
   const [title, setTitle] = useState("");
   const [priority, setPriority] = useState(0);
@@ -127,16 +158,18 @@ export default function App() {
   const refreshDetail = useCallback(async () => {
     if (!selectedId) return;
     try {
-      const [nextAssignments, nextRuns, nextEvents, nextContext] = await Promise.all([
+      const [nextAssignments, nextRuns, nextEvents, nextContext, nextCollaboration] = await Promise.all([
         api<Assignment[]>(`/api/tasks/${selectedId}/assignments`),
         api<Run[]>(`/api/tasks/${selectedId}/runs`),
         api<EventItem[]>(`/api/tasks/${selectedId}/events`),
         api<ContextRevision>(`/api/tasks/${selectedId}/context`).catch(() => null),
+        api<Collaboration>(`/api/tasks/${selectedId}/collaboration`),
       ]);
       setAssignments(nextAssignments);
       setRuns(nextRuns);
       setEvents(nextEvents);
       setContext(nextContext);
+      setCollaboration(nextCollaboration);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -298,6 +331,57 @@ export default function App() {
                     </div>
 
                     <div>
+                      {collaboration && <>
+                        <h3>Handoffs</h3>
+                        {collaboration.handoffs.map((handoff) => <div className="context-card" key={handoff.id}>
+                          <div className="mini-card-row">
+                            <strong>{handoff.summary}</strong>
+                            <StateBadge state={handoff.status} />
+                          </div>
+                          <p>Completed: {handoff.completed.join("; ") || "None recorded"}</p>
+                          <p>Remaining: {handoff.remaining.join("; ")}</p>
+                          <p>Blockers: {handoff.blockers.join("; ") || "None"}</p>
+                          <small>
+                            Context {shortId(handoff.context_revision_id)}
+                            {handoff.accepted_by_run_id ? ` · accepted by run ${shortId(handoff.accepted_by_run_id)}` : ""}
+                          </small>
+                        </div>)}
+                        {!collaboration.handoffs.length && <div className="empty compact">No handoffs.</div>}
+                        <h3>Artifacts</h3>
+                        {collaboration.artifacts.map((artifact) => <div className="mini-card" key={artifact.id}>
+                          <div className="mini-card-row"><strong>{artifact.title}</strong><span className="badge">{artifact.kind}</span></div>
+                          <p>{artifact.description}</p><code>{artifact.uri}</code>
+                        </div>)}
+                        {!collaboration.artifacts.length && <div className="empty compact">No artifacts.</div>}
+                        <h3>Decisions</h3>
+                        {collaboration.decisions.map((decision) => <div className="mini-card" key={decision.id}>
+                          <strong>{decision.title}</strong><p>{decision.rationale}</p>
+                        </div>)}
+                        {!collaboration.decisions.length && <div className="empty compact">No decisions.</div>}
+                        <h3>Discussion</h3>
+                        {collaboration.threads.map((thread) => <div className="context-card" key={thread.id}>
+                          <strong>{thread.title}</strong>
+                          {collaboration.messages.filter((message) => message.thread_id === thread.id).map((message) =>
+                            <div className="message-row" key={message.id}>
+                              <small>
+                                {message.message_type} · {shortId(message.created_by)}
+                                {message.recipient_agent_instance_id ? ` → ${shortId(message.recipient_agent_instance_id)}` : ""}
+                                {message.recipient_role ? ` (${message.recipient_role})` : ""}
+                                {message.reply_to_message_id ? ` · reply to ${shortId(message.reply_to_message_id)}` : ""}
+                                {message.requires_response ? " · response required" : ""}
+                              </small>
+                              <p>{message.body}</p>
+                            </div>)}
+                        </div>)}
+                        {!collaboration.threads.length && <div className="empty compact">No discussions.</div>}
+                        <h3>Prerequisites</h3>
+                        {collaboration.dependencies.map((dependency) => <div key={dependency.depends_on_task_id}>
+                          <button onClick={() => setSelectedId(dependency.depends_on_task_id)}>
+                            {tasks.find((task) => task.id === dependency.depends_on_task_id)?.title || shortId(dependency.depends_on_task_id)}
+                          </button>
+                        </div>)}
+                        {!collaboration.dependencies.length && <div className="empty compact">No prerequisites.</div>}
+                      </>}
                       <h3>Event Timeline</h3>
                       <div className="timeline">
                         {events.map((event) => (

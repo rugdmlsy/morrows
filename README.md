@@ -2,7 +2,7 @@
 
 Local-first, agent-native work coordination for humans and multiple AI agent products/accounts.
 
-The M1 vertical slice is intentionally small:
+The current local vertical slice is:
 
 ```
 Human Web UI
@@ -34,9 +34,13 @@ Append-only event timeline
 - Assignment lease renewal and automatic expiry scan
 - Run ownership checks at the store/domain boundary
 - Immutable context revisions
+- Durable Artifact / Decision / MessageThread / Message / Handoff / TaskDependency records
+- Directed agent messages with reply/correlation metadata
+- Atomic handoff creation and explicit acceptance linked to the accepting Run
+- Dependency cycle prevention and executor gating
 - SQLite job/outbox tables reserved for durable automation
 
-Not yet implemented: Handoff, MessageThread, Artifact, Decision, full AgentProfile/Account/Machine split, automatic Dispatcher, executor launch adapters.
+Not yet implemented: full AgentProfile/Account/Machine split, automatic Dispatcher, executor launch adapters, multi-user auth/RBAC, or distributed deployment.
 
 ## Run
 
@@ -94,7 +98,7 @@ X-Agent-Instance-Id: <uuid>
 
 The server obtains actor identity from the transport request instead of trusting an `agent_id` supplied in the tool arguments.
 
-This header is an identity binding mechanism for the local-only M1 daemon, not authentication. A later milestone will replace it with issued credentials/tokens before remote exposure.
+This header is an identity binding mechanism for the local-only daemon, not authentication. A later milestone will replace it with issued credentials/tokens before remote exposure.
 
 ## Core invariant
 
@@ -104,4 +108,11 @@ Task identity is independent of model, account, machine, and conversation/sessio
 - **Assignment**: which AgentInstance currently owns a role, with a lease.
 - **Run**: one concrete execution session.
 - **ContextRevision**: immutable handoff/context snapshot.
+- **Handoff**: explicit transfer from a source Run to a separately accepted target Run.
+- **Message**: durable directed/reply-capable agent communication attached to a task thread.
+- **Artifact / Decision**: durable work evidence and rationale that can be referenced by handoff.
 - **Event**: append-only audit record.
+
+## Live handoff validation
+
+M2.1 was exercised with two separate `codex-personal` CLI sessions and two distinct AgentInstances. Agent A created a typed artifact, decision, directed message, and pending handoff, which released A's assignment and ended A's Run as handed off. Agent B reconstructed the state through MCP only, claimed the task, started a new Run, accepted the handoff, replied in the original thread, checkpointed the recovered state, and completed the task. No Codex session/chat history was shared between A and B.

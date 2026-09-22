@@ -77,8 +77,12 @@ pub struct CreateTask {
     pub priority: i32,
 }
 
-fn default_owner() -> String { "human:local".into() }
-fn default_task_state() -> TaskState { TaskState::Ready }
+fn default_owner() -> String {
+    "human:local".into()
+}
+fn default_task_state() -> TaskState {
+    TaskState::Ready
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentInstance {
@@ -144,7 +148,9 @@ pub struct CreateContextRevision {
     pub created_by_actor_id: String,
 }
 
-fn empty_object() -> Value { serde_json::json!({}) }
+fn empty_object() -> Value {
+    serde_json::json!({})
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Event {
@@ -172,3 +178,6 @@ pub enum DomainError {
     #[error("storage error: {0}")]
     Storage(String),
 }
+
+mod collaboration;
+pub use collaboration::*;

@@ -1,3 +1,4 @@
+mod collaboration;
 mod mcp;
 
 use ac_core::{CreateContextRevision, CreateTask, DomainError, Id};
@@ -16,19 +17,25 @@ use rmcp::transport::{
     streamable_http_server::{session::local::LocalSessionManager, tower::StreamableHttpService},
 };
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{env, net::SocketAddr};
 use tower_http::{cors::CorsLayer, services::ServeDir, trace::TraceLayer};
 use tracing::info;
 use uuid::Uuid;
 
 #[derive(Clone)]
-struct AppState { store: Store }
+struct AppState {
+    store: Store,
+}
 
 #[derive(Debug)]
 struct ApiError(DomainError);
 
-impl From<DomainError> for ApiError { fn from(value: DomainError) -> Self { Self(value) } }
+impl From<DomainError> for ApiError {
+    fn from(value: DomainError) -> Self {
+        Self(value)
+    }
+}
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
@@ -43,7 +50,11 @@ impl IntoResponse for ApiError {
 }
 
 #[derive(Deserialize)]
-struct RegisterAgentBody { name: String, #[serde(default)] capabilities: Vec<String> }
+struct RegisterAgentBody {
+    name: String,
+    #[serde(default)]
+    capabilities: Vec<String>,
+}
 
 #[derive(Deserialize)]
 struct ClaimBody {
@@ -53,14 +64,26 @@ struct ClaimBody {
     #[serde(default = "default_lease")]
     lease_seconds: i64,
 }
-fn default_role() -> String { "executor".into() }
-fn default_lease() -> i64 { 900 }
+fn default_role() -> String {
+    "executor".into()
+}
+fn default_lease() -> i64 {
+    900
+}
 
 #[derive(Deserialize)]
-struct StartRunBody { assignment_id: Id, agent_instance_id: Id, external_session_ref: Option<String> }
+struct StartRunBody {
+    assignment_id: Id,
+    agent_instance_id: Id,
+    external_session_ref: Option<String>,
+}
 
 #[derive(Deserialize)]
-struct RunMutationBody { agent_instance_id: Id, #[serde(default)] payload: Value }
+struct RunMutationBody {
+    agent_instance_id: Id,
+    #[serde(default)]
+    payload: Value,
+}
 
 #[derive(Deserialize)]
 struct RenewAssignmentBody {
@@ -72,13 +95,21 @@ struct RenewAssignmentBody {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "ac_server=info,tower_http=info".into()))
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "ac_server=info,tower_http=info".into()),
+        )
         .init();
 
-    let db_url = env::var("AC_DATABASE_URL").unwrap_or_else(|_| "sqlite://data/agent-company.db".into());
+    let db_url =
+        env::var("AC_DATABASE_URL").unwrap_or_else(|_| "sqlite://data/agent-company.db".into());
     let bind = env::var("AC_BIND").unwrap_or_else(|_| "127.0.0.1:8787".into());
-    let store = Store::connect(&db_url).await.context("open Agent Company database")?;
-    let state = AppState { store: store.clone() };
+    let store = Store::connect(&db_url)
+        .await
+        .context("open Agent Company database")?;
+    let state = AppState {
+        store: store.clone(),
+    };
 
     let api = Router::new()
         .route("/health", get(health))
@@ -94,6 +125,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/runs", post(start_run))
         .route("/runs/{id}/checkpoint", post(checkpoint_run))
         .route("/runs/{id}/complete", post(complete_run))
+        .merge(collaboration::routes())
         .with_state(state);
 
     let mcp_store = store.clone();
@@ -132,68 +164,180 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn health() -> Json<Value> { Json(json!({"ok": true, "service": "agent-company"})) }
+async fn health() -> Json<Value> {
+    Json(json!({"ok": true, "service": "agent-company"}))
+}
 
 async fn list_tasks(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    Ok(Json(serde_json::to_value(state.store.list_tasks().await?).unwrap()))
+    Ok(Json(
+        serde_json::to_value(state.store.list_tasks().await?).unwrap(),
+    ))
 }
 
-async fn create_task(State(state): State<AppState>, Json(body): Json<CreateTask>) -> Result<Json<Value>, ApiError> {
-    Ok(Json(serde_json::to_value(state.store.create_task(body).await?).unwrap()))
+async fn create_task(
+    State(state): State<AppState>,
+    Json(body): Json<CreateTask>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        serde_json::to_value(state.store.create_task(body).await?).unwrap(),
+    ))
 }
 
-async fn get_task(State(state): State<AppState>, Path(id): Path<Uuid>) -> Result<Json<Value>, ApiError> {
-    Ok(Json(serde_json::to_value(state.store.get_task(id).await?).unwrap()))
+async fn get_task(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        serde_json::to_value(state.store.get_task(id).await?).unwrap(),
+    ))
 }
 
-async fn register_agent(State(state): State<AppState>, Json(body): Json<RegisterAgentBody>) -> Result<Json<Value>, ApiError> {
-    Ok(Json(serde_json::to_value(state.store.register_agent(&body.name, &body.capabilities).await?).unwrap()))
+async fn register_agent(
+    State(state): State<AppState>,
+    Json(body): Json<RegisterAgentBody>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        serde_json::to_value(
+            state
+                .store
+                .register_agent(&body.name, &body.capabilities)
+                .await?,
+        )
+        .unwrap(),
+    ))
 }
 
 async fn list_agents(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    Ok(Json(serde_json::to_value(state.store.list_agents().await?).unwrap()))
+    Ok(Json(
+        serde_json::to_value(state.store.list_agents().await?).unwrap(),
+    ))
 }
 
-async fn claim_task(State(state): State<AppState>, Path(id): Path<Uuid>, Json(body): Json<ClaimBody>) -> Result<Json<Value>, ApiError> {
-    Ok(Json(serde_json::to_value(state.store.claim_task(id, body.agent_instance_id, &body.role, body.lease_seconds).await?).unwrap()))
+async fn claim_task(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<ClaimBody>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        serde_json::to_value(
+            state
+                .store
+                .claim_task(id, body.agent_instance_id, &body.role, body.lease_seconds)
+                .await?,
+        )
+        .unwrap(),
+    ))
 }
 
-async fn renew_assignment(State(state): State<AppState>, Path(id): Path<Uuid>, Json(body): Json<RenewAssignmentBody>) -> Result<Json<Value>, ApiError> {
-    Ok(Json(serde_json::to_value(
-        state.store.renew_assignment(id, body.agent_instance_id, body.lease_seconds).await?
-    ).unwrap()))
+async fn renew_assignment(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<RenewAssignmentBody>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        serde_json::to_value(
+            state
+                .store
+                .renew_assignment(id, body.agent_instance_id, body.lease_seconds)
+                .await?,
+        )
+        .unwrap(),
+    ))
 }
 
-async fn start_run(State(state): State<AppState>, Json(body): Json<StartRunBody>) -> Result<Json<Value>, ApiError> {
-    Ok(Json(serde_json::to_value(
-        state.store.start_run(body.assignment_id, body.agent_instance_id, body.external_session_ref).await?
-    ).unwrap()))
+async fn start_run(
+    State(state): State<AppState>,
+    Json(body): Json<StartRunBody>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        serde_json::to_value(
+            state
+                .store
+                .start_run(
+                    body.assignment_id,
+                    body.agent_instance_id,
+                    body.external_session_ref,
+                )
+                .await?,
+        )
+        .unwrap(),
+    ))
 }
 
-async fn checkpoint_run(State(state): State<AppState>, Path(id): Path<Uuid>, Json(body): Json<RunMutationBody>) -> Result<Json<Value>, ApiError> {
-    Ok(Json(serde_json::to_value(state.store.checkpoint_run(id, body.agent_instance_id, body.payload).await?).unwrap()))
+async fn checkpoint_run(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<RunMutationBody>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        serde_json::to_value(
+            state
+                .store
+                .checkpoint_run(id, body.agent_instance_id, body.payload)
+                .await?,
+        )
+        .unwrap(),
+    ))
 }
 
-async fn complete_run(State(state): State<AppState>, Path(id): Path<Uuid>, Json(body): Json<RunMutationBody>) -> Result<Json<Value>, ApiError> {
-    Ok(Json(serde_json::to_value(state.store.complete_run(id, body.agent_instance_id, body.payload).await?).unwrap()))
+async fn complete_run(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<RunMutationBody>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        serde_json::to_value(
+            state
+                .store
+                .complete_run(id, body.agent_instance_id, body.payload)
+                .await?,
+        )
+        .unwrap(),
+    ))
 }
 
-async fn get_context(State(state): State<AppState>, Path(id): Path<Uuid>) -> Result<Json<Value>, ApiError> {
-    Ok(Json(serde_json::to_value(state.store.get_current_context(id).await?).unwrap()))
+async fn get_context(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        serde_json::to_value(state.store.get_current_context(id).await?).unwrap(),
+    ))
 }
 
-async fn create_context(State(state): State<AppState>, Path(id): Path<Uuid>, Json(body): Json<CreateContextRevision>) -> Result<Json<Value>, ApiError> {
-    Ok(Json(serde_json::to_value(state.store.create_context_revision(id, body).await?).unwrap()))
+async fn create_context(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<CreateContextRevision>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        serde_json::to_value(state.store.create_context_revision(id, body).await?).unwrap(),
+    ))
 }
 
-async fn task_assignments(State(state): State<AppState>, Path(id): Path<Uuid>) -> Result<Json<Value>, ApiError> {
-    Ok(Json(serde_json::to_value(state.store.task_assignments(id).await?).unwrap()))
+async fn task_assignments(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        serde_json::to_value(state.store.task_assignments(id).await?).unwrap(),
+    ))
 }
 
-async fn task_runs(State(state): State<AppState>, Path(id): Path<Uuid>) -> Result<Json<Value>, ApiError> {
-    Ok(Json(serde_json::to_value(state.store.task_runs(id).await?).unwrap()))
+async fn task_runs(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        serde_json::to_value(state.store.task_runs(id).await?).unwrap(),
+    ))
 }
 
-async fn task_events(State(state): State<AppState>, Path(id): Path<Uuid>) -> Result<Json<Value>, ApiError> {
-    Ok(Json(serde_json::to_value(state.store.task_events(id).await?).unwrap()))
+async fn task_events(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        serde_json::to_value(state.store.task_events(id).await?).unwrap(),
+    ))
 }
