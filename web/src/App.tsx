@@ -1,6 +1,16 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { FormEvent } from "react";
 import "./App.css";
+import {
+  formatAge,
+  formatDispatchReason,
+  formatOutcome,
+  formatRole,
+  formatState,
+  initialLocale,
+  translate,
+} from "./i18n";
+import type { Locale, TranslationKey } from "./i18n";
 
 type Task = {
   id: string;
@@ -178,18 +188,12 @@ function shortId(id: string) {
   return id.slice(0, 8);
 }
 
-function age(iso: string) {
-  const seconds = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 1000));
-  if (seconds < 60) return `${seconds}s ago`;
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
-  return `${Math.floor(seconds / 3600)}h ago`;
-}
-
-function StateBadge({ state }: { state: string }) {
-  return <span className={`badge state-${state}`}>{state.replaceAll("_", " ")}</span>;
+function StateBadge({ state, locale }: { state: string; locale: Locale }) {
+  return <span className={`badge state-${state}`}>{formatState(locale, state)}</span>;
 }
 
 export default function App() {
+  const [locale, setLocale] = useState<Locale>(initialLocale);
   const [view, setView] = useState<"queue" | "agents">("queue");
   const [tasks, setTasks] = useState<Task[]>([]);
   const [agents, setAgents] = useState<FleetEntry[]>([]);
@@ -212,6 +216,12 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
 
   const selectedTask = useMemo(() => tasks.find((task) => task.id === selectedId) ?? null, [tasks, selectedId]);
+  const t = (key: TranslationKey) => translate(locale, key);
+
+  useEffect(() => {
+    window.localStorage.setItem("agent-company.locale", locale);
+    document.documentElement.lang = locale;
+  }, [locale]);
 
   const refreshBase = useCallback(async () => {
     try {
@@ -375,23 +385,23 @@ export default function App() {
           <div className="brand-mark">AC</div>
           <div>
             <strong>Agent Company</strong>
-            <span>Work OS</span>
+            <span>{t("workOs")}</span>
           </div>
         </div>
 
         <nav>
           <button className={view === "queue" ? "nav-active" : ""} onClick={() => setView("queue")}>
-            Work Queue <span>{tasks.length}</span>
+            {t("workQueue")} <span>{tasks.length}</span>
           </button>
           <button className={view === "agents" ? "nav-active" : ""} onClick={() => setView("agents")}>
-            Agent Fleet <span>{agents.filter((a) => a.instance.status === "online").length}</span>
+            {t("agentFleet")} <span>{agents.filter((a) => a.instance.status === "online").length}</span>
           </button>
         </nav>
 
         <div className="system-card">
           <span className="status-dot" />
           <div>
-            <strong>Local daemon</strong>
+            <strong>{t("localDaemon")}</strong>
             <small>127.0.0.1:8787</small>
           </div>
         </div>
@@ -400,10 +410,20 @@ export default function App() {
       <main>
         <header className="topbar">
           <div>
-            <p className="eyebrow">LOCAL-FIRST CONTROL PLANE</p>
-            <h1>{view === "queue" ? "Work Queue" : "Agent Fleet"}</h1>
+            <p className="eyebrow">{t("localFirstControlPlane")}</p>
+            <h1>{view === "queue" ? t("workQueue") : t("agentFleet")}</h1>
           </div>
-          <div className="mcp-pill">MCP /mcp</div>
+          <div className="topbar-actions">
+            <button
+              type="button"
+              className="language-toggle"
+              title={t("language")}
+              onClick={() => setLocale((current) => current === "zh-CN" ? "en" : "zh-CN")}
+            >
+              {t("switchLanguage")}
+            </button>
+            <div className="mcp-pill">MCP /mcp</div>
+          </div>
         </header>
 
         {error && <div className="error-banner">{error}</div>}
@@ -412,16 +432,16 @@ export default function App() {
           <div className="workspace-grid">
             <section className="panel queue-panel">
               <form className="new-task" onSubmit={createTask}>
-                <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="New task…" />
+                <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder={t("newTask")} />
                 <input
                   className="priority-input"
                   type="number"
                   value={priority}
                   onChange={(e) => setPriority(Number(e.target.value))}
-                  title="Priority"
+                  title={t("priority")}
                 />
-                <button type="submit">Create</button>
-                <button type="button" className="secondary" onClick={() => void dispatchNextTask()} disabled={dispatchBusy}>Dispatch next</button>
+                <button type="submit">{t("create")}</button>
+                <button type="button" className="secondary" onClick={() => void dispatchNextTask()} disabled={dispatchBusy}>{t("dispatchNext")}</button>
               </form>
 
               <div className="task-list">
@@ -436,13 +456,13 @@ export default function App() {
                       <strong>{task.title}</strong>
                     </div>
                     <div className="task-meta">
-                      <StateBadge state={task.state} />
-                      {dispatchPolicies.some((policy) => policy.task_id === task.id && policy.role === "executor" && policy.enabled) && <span className="badge state-online">dispatch</span>}
+                      <StateBadge state={task.state} locale={locale} />
+                      {dispatchPolicies.some((policy) => policy.task_id === task.id && policy.role === "executor" && policy.enabled) && <span className="badge state-online">{t("dispatchEnabled")}</span>}
                       <span>P{task.priority}</span>
                     </div>
                   </button>
                 ))}
-                {!tasks.length && <div className="empty">No tasks yet. Create the first work item above.</div>}
+                {!tasks.length && <div className="empty">{t("noTasks")}</div>}
               </div>
             </section>
 
@@ -454,125 +474,125 @@ export default function App() {
                       <span className="task-id">{selectedTask.id}</span>
                       <h2>{selectedTask.title}</h2>
                     </div>
-                    <StateBadge state={selectedTask.state} />
+                    <StateBadge state={selectedTask.state} locale={locale} />
                   </div>
-                  <p className="description">{selectedTask.description || "No description."}</p>
+                  <p className="description">{selectedTask.description || t("noDescription")}</p>
 
                   <div className="detail-columns">
                     <div>
-                      <h3>Context</h3>
+                      <h3>{t("context")}</h3>
                       {context ? (
                         <div className="context-card">
-                          <div className="section-caption">Revision v{context.version}</div>
-                          <strong>{context.goal || "No explicit goal"}</strong>
-                          <p>{context.current_summary || context.background || "No summary yet."}</p>
-                          <small>{context.created_by_actor_id} · {age(context.created_at)}</small>
+                          <div className="section-caption">{t("revision")} v{context.version}</div>
+                          <strong>{context.goal || t("noExplicitGoal")}</strong>
+                          <p>{context.current_summary || context.background || t("noSummary")}</p>
+                          <small>{context.created_by_actor_id} · {formatAge(locale, context.created_at)}</small>
                         </div>
                       ) : (
-                        <div className="empty compact">No context revision yet.</div>
+                        <div className="empty compact">{t("noContext")}</div>
                       )}
 
-                      <h3>Dispatcher</h3>
+                      <h3>{t("dispatcher")}</h3>
                       <div className="dispatch-card">
                         <div className="dispatch-form">
                           <label>
-                            <span>Required capabilities</span>
+                            <span>{t("requiredCapabilities")}</span>
                             <input value={dispatchCapabilities} onChange={(e) => setDispatchCapabilities(e.target.value)} placeholder="code, rust, review" />
                           </label>
                           <label className="dispatch-small">
-                            <span>Lease seconds</span>
+                            <span>{t("leaseSeconds")}</span>
                             <input type="number" min={30} value={dispatchLease} onChange={(e) => setDispatchLease(Number(e.target.value))} />
                           </label>
                           <label className="dispatch-check">
                             <input type="checkbox" checked={dispatchEnabled} onChange={(e) => setDispatchEnabled(e.target.checked)} />
-                            Enabled
+                            {t("enabled")}
                           </label>
                         </div>
                         <div className="dispatch-actions">
-                          <button onClick={() => void saveDispatchPolicy()} disabled={dispatchBusy}>Save policy</button>
-                          <button className="secondary" onClick={() => void previewDispatch()} disabled={dispatchBusy || !dispatchPolicy}>Preview</button>
-                          <button className="secondary" onClick={() => void dispatchSelectedTask()} disabled={dispatchBusy || !dispatchPolicy}>Dispatch</button>
+                          <button onClick={() => void saveDispatchPolicy()} disabled={dispatchBusy}>{t("savePolicy")}</button>
+                          <button className="secondary" onClick={() => void previewDispatch()} disabled={dispatchBusy || !dispatchPolicy}>{t("preview")}</button>
+                          <button className="secondary" onClick={() => void dispatchSelectedTask()} disabled={dispatchBusy || !dispatchPolicy}>{t("dispatch")}</button>
                         </div>
                         {dispatchPolicy ? (
-                          <small>executor · heartbeat ≤ {dispatchPolicy.heartbeat_ttl_seconds}s · capacity ≤ {dispatchPolicy.capacity_ttl_seconds}s</small>
-                        ) : <div className="empty compact">No executor dispatch policy.</div>}
+                          <small>{t("executor")} · {t("heartbeat")} ≤ {dispatchPolicy.heartbeat_ttl_seconds}s · {t("capacity")} ≤ {dispatchPolicy.capacity_ttl_seconds}s</small>
+                        ) : <div className="empty compact">{t("noDispatchPolicy")}</div>}
                         {dispatchPreview && <div className="dispatch-preview">
                           <div className="mini-card-row">
-                            <strong>{dispatchPreview.selected_agent_instance_id ? `Selected ${shortId(dispatchPreview.selected_agent_instance_id)}` : "No eligible agent"}</strong>
-                            <StateBadge state={dispatchPreview.task_dispatchable ? "ready" : "blocked"} />
+                            <strong>{dispatchPreview.selected_agent_instance_id ? `${t("selected")} ${shortId(dispatchPreview.selected_agent_instance_id)}` : t("noEligibleAgent")}</strong>
+                            <StateBadge state={dispatchPreview.task_dispatchable ? "ready" : "blocked"} locale={locale} />
                           </div>
-                          {dispatchPreview.task_reasons.length > 0 && <p>Task: {dispatchPreview.task_reasons.join(", ")}</p>}
+                          {dispatchPreview.task_reasons.length > 0 && <p>{t("task")}：{dispatchPreview.task_reasons.map((reason) => formatDispatchReason(locale, reason)).join(locale === "zh-CN" ? "、" : ", ")}</p>}
                           {dispatchPreview.candidates.slice(0, 6).map((candidate) => (
                             <div className={`candidate-row ${candidate.eligible ? "candidate-ok" : ""}`} key={candidate.agent_instance_id}>
                               <div>
                                 <strong>{candidate.agent_name}</strong>
-                                <small>{shortId(candidate.agent_instance_id)} · {candidate.effective_slots} effective slots · {candidate.current_active_assignments} active</small>
+                                <small>{shortId(candidate.agent_instance_id)} · {candidate.effective_slots} {t("effectiveSlots")} · {candidate.current_active_assignments} {t("active")}</small>
                               </div>
-                              <span>{candidate.eligible ? "eligible" : candidate.reasons.join(", ")}</span>
+                              <span>{candidate.eligible ? t("eligible") : candidate.reasons.map((reason) => formatDispatchReason(locale, reason)).join(locale === "zh-CN" ? "、" : ", ")}</span>
                             </div>
                           ))}
                         </div>}
                         {dispatchDecisions.length > 0 && <div className="dispatch-history">
-                          <strong>Decision history</strong>
+                          <strong>{t("decisionHistory")}</strong>
                           {dispatchDecisions.slice(0, 4).map((decision) => (
-                            <small key={decision.id}>{decision.outcome} · {decision.selected_agent_instance_id ? shortId(decision.selected_agent_instance_id) : "no agent"} · {age(decision.created_at)}</small>
+                            <small key={decision.id}>{formatOutcome(locale, decision.outcome)} · {decision.selected_agent_instance_id ? shortId(decision.selected_agent_instance_id) : t("noAgent")} · {formatAge(locale, decision.created_at)}</small>
                           ))}
                         </div>}
                       </div>
 
-                      <h3>Assignments</h3>
+                      <h3>{t("assignments")}</h3>
                       <div className="stack">
                         {assignments.map((item) => (
                           <div className="mini-card" key={item.id}>
-                            <div><strong>{item.role}</strong><StateBadge state={item.status} /></div>
+                            <div><strong>{formatRole(locale, item.role)}</strong><StateBadge state={item.status} locale={locale} /></div>
                             <code>{shortId(item.agent_instance_id)}</code>
-                            <small>lease → {new Date(item.expires_at).toLocaleTimeString()}</small>
+                            <small>{t("leaseUntil")} → {new Date(item.expires_at).toLocaleTimeString(locale)}</small>
                           </div>
                         ))}
-                        {!assignments.length && <div className="empty compact">Unassigned.</div>}
+                        {!assignments.length && <div className="empty compact">{t("unassigned")}</div>}
                       </div>
 
-                      <h3>Runs</h3>
+                      <h3>{t("runs")}</h3>
                       <div className="stack">
                         {runs.map((run) => (
                           <div className="mini-card" key={run.id}>
-                            <div><code>{shortId(run.id)}</code><StateBadge state={run.status} /></div>
-                            <small>{run.external_session_ref || "no external session"} · {age(run.started_at)}</small>
+                            <div><code>{shortId(run.id)}</code><StateBadge state={run.status} locale={locale} /></div>
+                            <small>{run.external_session_ref || t("noExternalSession")} · {formatAge(locale, run.started_at)}</small>
                           </div>
                         ))}
-                        {!runs.length && <div className="empty compact">No runs yet.</div>}
+                        {!runs.length && <div className="empty compact">{t("noRuns")}</div>}
                       </div>
                     </div>
 
                     <div>
                       {collaboration && <>
-                        <h3>Handoffs</h3>
+                        <h3>{t("handoffs")}</h3>
                         {collaboration.handoffs.map((handoff) => <div className="context-card" key={handoff.id}>
                           <div className="mini-card-row">
                             <strong>{handoff.summary}</strong>
-                            <StateBadge state={handoff.status} />
+                            <StateBadge state={handoff.status} locale={locale} />
                           </div>
-                          <p>Completed: {handoff.completed.join("; ") || "None recorded"}</p>
-                          <p>Remaining: {handoff.remaining.join("; ")}</p>
-                          <p>Blockers: {handoff.blockers.join("; ") || "None"}</p>
+                          <p>{t("completed")}：{handoff.completed.join("; ") || t("noneRecorded")}</p>
+                          <p>{t("remaining")}：{handoff.remaining.join("; ")}</p>
+                          <p>{t("blockers")}：{handoff.blockers.join("; ") || t("none")}</p>
                           <small>
-                            Context {shortId(handoff.context_revision_id)}
-                            {handoff.accepted_by_run_id ? ` · accepted by run ${shortId(handoff.accepted_by_run_id)}` : ""}
+                            {t("context")} {shortId(handoff.context_revision_id)}
+                            {handoff.accepted_by_run_id ? ` · ${t("acceptedByRun")} ${shortId(handoff.accepted_by_run_id)}` : ""}
                           </small>
                         </div>)}
-                        {!collaboration.handoffs.length && <div className="empty compact">No handoffs.</div>}
-                        <h3>Artifacts</h3>
+                        {!collaboration.handoffs.length && <div className="empty compact">{t("noHandoffs")}</div>}
+                        <h3>{t("artifacts")}</h3>
                         {collaboration.artifacts.map((artifact) => <div className="mini-card" key={artifact.id}>
                           <div className="mini-card-row"><strong>{artifact.title}</strong><span className="badge">{artifact.kind}</span></div>
                           <p>{artifact.description}</p><code>{artifact.uri}</code>
                         </div>)}
-                        {!collaboration.artifacts.length && <div className="empty compact">No artifacts.</div>}
-                        <h3>Decisions</h3>
+                        {!collaboration.artifacts.length && <div className="empty compact">{t("noArtifacts")}</div>}
+                        <h3>{t("decisions")}</h3>
                         {collaboration.decisions.map((decision) => <div className="mini-card" key={decision.id}>
                           <strong>{decision.title}</strong><p>{decision.rationale}</p>
                         </div>)}
-                        {!collaboration.decisions.length && <div className="empty compact">No decisions.</div>}
-                        <h3>Discussion</h3>
+                        {!collaboration.decisions.length && <div className="empty compact">{t("noDecisions")}</div>}
+                        <h3>{t("discussion")}</h3>
                         {collaboration.threads.map((thread) => <div className="context-card" key={thread.id}>
                           <strong>{thread.title}</strong>
                           {collaboration.messages.filter((message) => message.thread_id === thread.id).map((message) =>
@@ -580,23 +600,23 @@ export default function App() {
                               <small>
                                 {message.message_type} · {shortId(message.created_by)}
                                 {message.recipient_agent_instance_id ? ` → ${shortId(message.recipient_agent_instance_id)}` : ""}
-                                {message.recipient_role ? ` (${message.recipient_role})` : ""}
-                                {message.reply_to_message_id ? ` · reply to ${shortId(message.reply_to_message_id)}` : ""}
-                                {message.requires_response ? " · response required" : ""}
+                                {message.recipient_role ? ` (${formatRole(locale, message.recipient_role)})` : ""}
+                                {message.reply_to_message_id ? ` · ${t("replyTo")} ${shortId(message.reply_to_message_id)}` : ""}
+                                {message.requires_response ? ` · ${t("responseRequired")}` : ""}
                               </small>
                               <p>{message.body}</p>
                             </div>)}
                         </div>)}
-                        {!collaboration.threads.length && <div className="empty compact">No discussions.</div>}
-                        <h3>Prerequisites</h3>
+                        {!collaboration.threads.length && <div className="empty compact">{t("noDiscussions")}</div>}
+                        <h3>{t("prerequisites")}</h3>
                         {collaboration.dependencies.map((dependency) => <div key={dependency.depends_on_task_id}>
                           <button onClick={() => setSelectedId(dependency.depends_on_task_id)}>
                             {tasks.find((task) => task.id === dependency.depends_on_task_id)?.title || shortId(dependency.depends_on_task_id)}
                           </button>
                         </div>)}
-                        {!collaboration.dependencies.length && <div className="empty compact">No prerequisites.</div>}
+                        {!collaboration.dependencies.length && <div className="empty compact">{t("noPrerequisites")}</div>}
                       </>}
-                      <h3>Event Timeline</h3>
+                      <h3>{t("eventTimeline")}</h3>
                       <div className="timeline">
                         {events.map((event) => (
                           <div className="timeline-item" key={event.id}>
@@ -604,17 +624,17 @@ export default function App() {
                             <div>
                               <strong>{event.event_type}</strong>
                               <p>{event.actor_type}:{event.actor_id}</p>
-                              <small>{new Date(event.created_at).toLocaleString()}</small>
+                              <small>{new Date(event.created_at).toLocaleString(locale)}</small>
                             </div>
                           </div>
                         ))}
-                        {!events.length && <div className="empty compact">No events.</div>}
+                        {!events.length && <div className="empty compact">{t("noEvents")}</div>}
                       </div>
                     </div>
                   </div>
                 </>
               ) : (
-                <div className="empty large">Select a task.</div>
+                <div className="empty large">{t("selectTask")}</div>
               )}
             </section>
           </div>
@@ -628,28 +648,28 @@ export default function App() {
                     <h2>{agent.name}</h2>
                     <code>{shortId(agent.id)}</code>
                   </div>
-                  <StateBadge state={agent.status} />
+                  <StateBadge state={agent.status} locale={locale} />
                 </div>
                 <dl className="fleet-identity">
-                  <div><dt>Profile</dt><dd>{profile.name} · {profile.provider || "unknown provider"}{profile.kind ? ` · ${profile.kind}` : ""}</dd></div>
-                  <div><dt>Account</dt><dd>{account ? `${account.label} · ${account.provider || "unknown provider"} · ${account.status}` : "Not linked"}</dd></div>
-                  <div><dt>Machine</dt><dd>{machine ? `${machine.name} · ${machine.hostname} · ${machine.os} ${machine.arch}` : "Not linked"}</dd></div>
+                  <div><dt>{t("profile")}</dt><dd>{profile.name} · {profile.provider || t("unknownProvider")}{profile.kind ? ` · ${profile.kind}` : ""}</dd></div>
+                  <div><dt>{t("account")}</dt><dd>{account ? `${account.label} · ${account.provider || t("unknownProvider")} · ${formatState(locale, account.status)}` : t("notLinked")}</dd></div>
+                  <div><dt>{t("machine")}</dt><dd>{machine ? `${machine.name} · ${machine.hostname} · ${machine.os} ${machine.arch}` : t("notLinked")}</dd></div>
                 </dl>
                 <div className="capability-list">
-                  {agent.capabilities.length ? agent.capabilities.map((cap) => <span key={cap}>{cap}</span>) : <span>general</span>}
+                  {agent.capabilities.length ? agent.capabilities.map((cap) => <span key={cap}>{cap}</span>) : <span>{t("general")}</span>}
                 </div>
-                <small title={new Date(agent.last_heartbeat_at).toLocaleString()}>Heartbeat {age(agent.last_heartbeat_at)}</small>
+                <small title={new Date(agent.last_heartbeat_at).toLocaleString(locale)}>{t("heartbeat")} {formatAge(locale, agent.last_heartbeat_at)}</small>
                 <div className="fleet-capacity">
                   {capacity ? <>
-                    <div className="mini-card-row"><strong>Capacity</strong><StateBadge state={capacity.status} /></div>
-                    <p>{capacity.available_slots} available slots{capacity.max_concurrency !== null ? ` / ${capacity.max_concurrency} max` : " · max not reported"}</p>
-                    <p>{capacity.active_assignments} active assignments · {capacity.active_runs} active runs</p>
-                    <small>Quota: {capacity.quota_state ?? "not reported"} · observed {age(capacity.observed_at)}</small>
-                  </> : <p>No capacity reported.</p>}
+                    <div className="mini-card-row"><strong>{t("capacity")}</strong><StateBadge state={capacity.status} locale={locale} /></div>
+                    <p>{capacity.available_slots} {t("availableSlots")}{capacity.max_concurrency !== null ? ` / ${capacity.max_concurrency} ${t("max")}` : ` · ${t("maxNotReported")}`}</p>
+                    <p>{capacity.active_assignments} {t("activeAssignments")} · {capacity.active_runs} {t("activeRuns")}</p>
+                    <small>{t("quota")}：{capacity.quota_state ? formatState(locale, capacity.quota_state) : t("notReported")} · {t("observed")} {formatAge(locale, capacity.observed_at)}</small>
+                  </> : <p>{t("noCapacity")}</p>}
                 </div>
               </article>
             ))}
-            {!agents.length && <div className="empty large">No agent instances registered yet.</div>}
+            {!agents.length && <div className="empty large">{t("noAgents")}</div>}
           </section>
         )}
       </main>

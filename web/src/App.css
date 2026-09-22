@@ -62,6 +62,19 @@ main { padding: 28px; min-width: 0; }
 h1 { font-size: 24px; letter-spacing: -0.03em; margin: 0; }
 h2 { letter-spacing: -0.025em; }
 h3 { color: #8c96a8; text-transform: uppercase; letter-spacing: .09em; font-size: 10px; margin: 25px 0 10px; }
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.language-toggle {
+  min-width: 76px;
+  background: transparent;
+  color: var(--text);
+  border: 1px solid #303744;
+}
+
 .mcp-pill { color: #8d97a8; border: 1px solid #28303c; border-radius: 999px; padding: 7px 11px; font: 11px ui-monospace, SFMono-Regular, monospace; }
 
 .workspace-grid { display: grid; grid-template-columns: minmax(340px, 42%) minmax(520px, 1fr); gap: 14px; height: calc(100vh - 120px); }
