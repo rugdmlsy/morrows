@@ -205,3 +205,139 @@ async fn one_semantic_event_can_have_multiple_execution_evidence_refs() {
         "running"
     );
 }
+
+#[tokio::test]
+async fn unbound_lsm_run_recovers_after_launcher_restart() {
+    let (store, assignment_id, profile_id) = prepared().await;
+    let attempt = store
+        .enqueue_launch(input(json!({
+            "assignment_id": assignment_id, "launch_profile_id": profile_id
+        })))
+        .await
+        .unwrap();
+    store.claim_launch_job().await.unwrap().unwrap();
+    let execution = store
+        .begin_launch_attempt_with_lsm(attempt.id, Some("shared-runtime"))
+        .await
+        .unwrap();
+    let run_id = execution.run.id;
+    assert_eq!(
+        store
+            .run_lsm_provisioning_subject(run_id)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("shared-runtime")
+    );
+    assert!(store.run_lsm_binding(run_id).await.unwrap().is_none());
+
+    // The LSM POST may already have succeeded when the Morrows process dies.
+    // Startup recovery must retain the Run and its Assignment for keyed replay.
+    assert_eq!(store.recover_launch_jobs_after_restart().await.unwrap(), 1);
+    assert_eq!(store.get_run(run_id).await.unwrap().status, "interrupted");
+    assert_eq!(
+        store.get_assignment(assignment_id).await.unwrap().status,
+        "active"
+    );
+    assert_eq!(store.unbound_lsm_runs().await.unwrap(), vec![run_id]);
+    store.renew_interrupted_assignments().await.unwrap();
+    let recovered = store.bind_run_lsm(run_id, "s_replayed").await.unwrap();
+    assert!(recovered.restart_deadline_at.is_some());
+    assert!(
+        store
+            .get_assignment(assignment_id)
+            .await
+            .unwrap()
+            .expires_at
+            >= recovered.restart_deadline_at.unwrap()
+    );
+    let restart = store.enqueue_run_restart(run_id).await.unwrap();
+    assert_eq!(restart.restart_run_id, Some(run_id));
+    assert_eq!(
+        store
+            .run_lsm_binding(run_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .logical_session_id,
+        "s_replayed"
+    );
+}
+
+#[tokio::test]
+async fn cancellation_intent_persists_before_an_unbound_session_is_recovered() {
+    let (store, assignment_id, profile_id) = prepared().await;
+    let attempt = store
+        .enqueue_launch(input(json!({
+            "assignment_id": assignment_id, "launch_profile_id": profile_id
+        })))
+        .await
+        .unwrap();
+    store.claim_launch_job().await.unwrap().unwrap();
+    let execution = store
+        .begin_launch_attempt_with_lsm(attempt.id, Some("shared-runtime"))
+        .await
+        .unwrap();
+    let run_id = execution.run.id;
+    assert_eq!(
+        store.request_run_cancel(run_id).await.unwrap().status,
+        "cancelling"
+    );
+    assert_eq!(
+        store.pending_lsm_cleanup_runs().await.unwrap(),
+        vec![run_id]
+    );
+    store
+        .finish_launch_attempt(attempt.id, None, None, Some("cancel requested".into()))
+        .await
+        .unwrap();
+    store
+        .bind_run_lsm(run_id, "s_recovered_for_cleanup")
+        .await
+        .unwrap();
+    assert_eq!(
+        store.complete_lsm_cleanup(run_id).await.unwrap().status,
+        "cancelled"
+    );
+}
+
+#[tokio::test]
+async fn repeated_restart_uses_the_latest_known_codex_conversation() {
+    let (store, assignment_id, profile_id) = prepared().await;
+    let first = store
+        .enqueue_launch(input(json!({
+            "assignment_id": assignment_id, "launch_profile_id": profile_id
+        })))
+        .await
+        .unwrap();
+    store.claim_launch_job().await.unwrap().unwrap();
+    let execution = store
+        .begin_launch_attempt_with_lsm(first.id, Some("shared-runtime"))
+        .await
+        .unwrap();
+    store
+        .bind_run_lsm(execution.run.id, "s_same_run")
+        .await
+        .unwrap();
+    store
+        .finish_launch_attempt(
+            first.id,
+            Some(7),
+            Some("codex-conversation".into()),
+            Some("first crash".into()),
+        )
+        .await
+        .unwrap();
+
+    let restart_one = store.enqueue_run_restart(execution.run.id).await.unwrap();
+    assert_eq!(restart_one.resume_from_attempt_id, Some(first.id));
+    store.claim_launch_job().await.unwrap().unwrap();
+    store.begin_launch_attempt(restart_one.id).await.unwrap();
+    store
+        .finish_launch_attempt(restart_one.id, Some(7), None, Some("second crash".into()))
+        .await
+        .unwrap();
+
+    let restart_two = store.enqueue_run_restart(execution.run.id).await.unwrap();
+    assert_eq!(restart_two.resume_from_attempt_id, Some(first.id));
+}

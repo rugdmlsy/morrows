@@ -73,7 +73,7 @@ async fn launch_stop(
     Path(id): Path<Id>,
 ) -> Result<Json<Value>, ApiError> {
     if let Some(run_id) = s.store.get_launch_attempt(id).await?.run_id
-        && s.store.run_lsm_binding(run_id).await?.is_some()
+        && s.store.has_lsm_runtime(run_id).await?
     {
         return Err(ApiError(DomainError::Conflict(
             "LSM-bound Runs must be cancelled through /runs/{id}/cancel".into(),
@@ -86,6 +86,27 @@ async fn run_restart(
     State(s): State<AppState>,
     Path(id): Path<Id>,
 ) -> Result<Json<Value>, ApiError> {
+    let run = s.store.get_run(id).await?;
+    if run.status != "interrupted" {
+        return Err(ApiError(DomainError::Conflict(format!(
+            "Run is {}",
+            run.status
+        ))));
+    }
+    if s.store.run_lsm_binding(id).await?.is_none() && s.store.has_lsm_runtime(id).await? {
+        let control = LsmControl::from_env()
+            .map_err(|err| ApiError(DomainError::Storage(err.to_string())))?
+            .ok_or_else(|| {
+                ApiError(DomainError::Conflict(
+                    "LSM control is not configured".into(),
+                ))
+            })?;
+        let task = s.store.get_task(run.task_id).await?;
+        control
+            .provision_run(&s.store, id, &task.title)
+            .await
+            .map_err(|err| ApiError(DomainError::Storage(err.to_string())))?;
+    }
     Ok(Json(json!(s.store.enqueue_run_restart(id).await?)))
 }
 
@@ -93,18 +114,19 @@ async fn run_cancel(
     State(s): State<AppState>,
     Path(id): Path<Id>,
 ) -> Result<Json<Value>, ApiError> {
-    let control = LsmControl::from_env()
-        .map_err(|err| ApiError(DomainError::Storage(err.to_string())))?
-        .ok_or_else(|| {
-            ApiError(DomainError::Conflict(
-                "LSM control is not configured".into(),
-            ))
-        })?;
-    control
-        .revoke_for_run(&s.store, id)
-        .await
-        .map_err(|err| ApiError(DomainError::Storage(err.to_string())))?;
-    Ok(Json(json!(s.store.request_run_cancel(id).await?)))
+    // Persist cancellation first. Revocation and cleanup are retryable side effects
+    // of that durable intent, including when LSM is temporarily unavailable.
+    let run = s.store.request_run_cancel(id).await?;
+    match LsmControl::from_env() {
+        Ok(Some(control)) => {
+            if let Err(err) = control.revoke_for_run(&s.store, id).await {
+                tracing::warn!(%id, %err, "capability revocation pending after Run cancel");
+            }
+        }
+        Ok(None) => tracing::warn!(%id, "LSM control is not configured; Run cleanup pending"),
+        Err(err) => tracing::warn!(%id, %err, "LSM control is invalid; Run cleanup pending"),
+    }
+    Ok(Json(json!(run)))
 }
 
 async fn run_execution(
@@ -192,6 +214,27 @@ pub async fn runtime_sweep(store: Store) {
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
     loop {
         interval.tick().await;
+        if let Ok(runs) = store.unbound_lsm_runs().await {
+            for run_id in runs {
+                let run = match store.get_run(run_id).await {
+                    Ok(run) => run,
+                    Err(err) => {
+                        tracing::warn!(%run_id, %err, "cannot read unbound LSM Run");
+                        continue;
+                    }
+                };
+                let task = match store.get_task(run.task_id).await {
+                    Ok(task) => task,
+                    Err(err) => {
+                        tracing::warn!(%run_id, %err, "cannot read LSM Run Task");
+                        continue;
+                    }
+                };
+                if let Err(err) = control.provision_run(&store, run_id, &task.title).await {
+                    tracing::warn!(%run_id, %err, "LSM provisioning replay remains pending");
+                }
+            }
+        }
         if let Err(err) = store.renew_interrupted_assignments().await {
             tracing::error!(%err, "failed renewing interrupted Assignments");
         }
@@ -225,7 +268,10 @@ pub async fn runtime_sweep(store: Store) {
                     tracing::warn!(%run_id, %err, "failed revoking Agent capability before cleanup");
                     continue;
                 }
-                match control.cleanup(&binding.logical_session_id, false).await {
+                match control
+                    .cleanup_run(&store, run_id, &binding.logical_session_id, false)
+                    .await
+                {
                     Ok(true) => {
                         if let Err(err) = store.complete_lsm_cleanup(run_id).await {
                             tracing::error!(%run_id, %err, "failed recording completed cleanup");
@@ -252,7 +298,10 @@ pub async fn runtime_sweep(store: Store) {
                     tracing::warn!(%run_id, %err, "failed revoking completed Agent capability");
                     continue;
                 }
-                match control.cleanup(&binding.logical_session_id, true).await {
+                match control
+                    .cleanup_run(&store, run_id, &binding.logical_session_id, true)
+                    .await
+                {
                     Ok(true) => {
                         if let Err(err) = store.mark_lsm_terminalized(run_id).await {
                             tracing::error!(%run_id, %err, "failed recording Session finish");
@@ -372,7 +421,11 @@ pub async fn worker_loop(store: Store) {
 }
 
 async fn execute_claimed_launch(store: Store, job: ClaimedLaunchJob) -> anyhow::Result<()> {
-    let execution = match store.begin_launch_attempt(job.attempt.id).await {
+    let control = LsmControl::from_env()?;
+    let execution = match store
+        .begin_launch_attempt_with_lsm(job.attempt.id, control.as_ref().map(LsmControl::subject))
+        .await
+    {
         Ok(value) => value,
         Err(err) => {
             let _ = store
@@ -849,6 +902,48 @@ mod tests {
         let status = response.status();
         let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
         (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    #[tokio::test]
+    async fn cancel_rest_persists_intent_before_lsm_revoke() {
+        let store = Store::connect("sqlite::memory:").await.unwrap();
+        let agent = make_agent(&store).await;
+        let task = store
+            .create_task(input(json!({"title":"cancel before LSM binding"})))
+            .await
+            .unwrap();
+        let assignment = store
+            .claim_task(task.id, agent.id, "executor", 600)
+            .await
+            .unwrap();
+        let profile = store
+            .register_launch_profile(input(json!({
+                "name":"cancel test codex", "adapter":"codex_cli",
+                "agent_instance_id":agent.id, "program":"/bin/echo",
+                "default_cwd":std::env::temp_dir()
+            })))
+            .await
+            .unwrap();
+        let attempt = store
+            .enqueue_launch(input(json!({
+                "assignment_id":assignment.id, "launch_profile_id":profile.id
+            })))
+            .await
+            .unwrap();
+        store.claim_launch_job().await.unwrap().unwrap();
+        let run = store
+            .begin_launch_attempt_with_lsm(attempt.id, Some("shared-runtime"))
+            .await
+            .unwrap()
+            .run;
+        let app = routes().with_state(AppState {
+            store: store.clone(),
+        });
+        let (status, response) =
+            request(&app, "POST", &format!("/runs/{}/cancel", run.id), json!({})).await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        assert_eq!(response["status"], "cancelling");
+        assert_eq!(store.get_run(run.id).await.unwrap().status, "cancelling");
     }
 
     #[tokio::test]

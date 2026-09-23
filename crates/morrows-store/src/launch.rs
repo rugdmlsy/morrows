@@ -324,6 +324,16 @@ impl Store {
     }
 
     pub async fn begin_launch_attempt(&self, id: Id) -> Result<LaunchExecution, DomainError> {
+        self.begin_launch_attempt_with_lsm(id, None).await
+    }
+
+    /// Persist the LSM provisioning intent in the same transaction that creates
+    /// the Run, before any external Session request can succeed or be lost.
+    pub async fn begin_launch_attempt_with_lsm(
+        &self,
+        id: Id,
+        lsm_subject: Option<&str>,
+    ) -> Result<LaunchExecution, DomainError> {
         let now = Utc::now();
         let mut tx = self
             .pool
@@ -424,6 +434,14 @@ impl Store {
             .execute(&mut *tx)
             .await
             .map_err(storage)?;
+            sqlx::query(
+                "UPDATE run_lsm_provisioning SET restart_deadline_at=NULL,updated_at=? WHERE run_id=?",
+            )
+            .bind(now.to_rfc3339())
+            .bind(run_id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?;
             run_id
         } else {
             let run_id = Uuid::new_v4();
@@ -439,6 +457,19 @@ impl Store {
             .execute(&mut *tx)
             .await
             .map_err(storage)?;
+            if let Some(subject) = lsm_subject {
+                sqlx::query(
+                    "INSERT INTO run_lsm_provisioning(run_id,subject,created_at,updated_at)
+                     VALUES(?,?,?,?)",
+                )
+                .bind(run_id.to_string())
+                .bind(subject)
+                .bind(now.to_rfc3339())
+                .bind(now.to_rfc3339())
+                .execute(&mut *tx)
+                .await
+                .map_err(storage)?;
+            }
             run_id
         };
         sqlx::query(
@@ -622,14 +653,16 @@ impl Store {
                 }
             }
             if matches!(run_status.as_deref(), Some("running") | Some("paused")) {
-                let lsm_bound: bool = sqlx::query_scalar(
-                    "SELECT EXISTS(SELECT 1 FROM run_lsm_bindings WHERE run_id=?)",
+                let lsm_bound_or_pending: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM run_lsm_bindings WHERE run_id=?)
+                         OR EXISTS(SELECT 1 FROM run_lsm_provisioning WHERE run_id=?)",
                 )
+                .bind(run_id.to_string())
                 .bind(run_id.to_string())
                 .fetch_one(&mut *tx)
                 .await
                 .map_err(storage)?;
-                if lsm_bound {
+                if lsm_bound_or_pending {
                     let deadline = now + Duration::seconds(agent_restart_grace_seconds());
                     let reason = error
                         .clone()
@@ -637,6 +670,9 @@ impl Store {
                     sqlx::query("UPDATE runs SET status='interrupted',stop_reason=?,ended_at=NULL WHERE id=?")
                         .bind(&reason).bind(run_id.to_string()).execute(&mut *tx).await.map_err(storage)?;
                     sqlx::query("UPDATE run_lsm_bindings SET restart_deadline_at=?,updated_at=? WHERE run_id=?")
+                        .bind(deadline.to_rfc3339()).bind(now.to_rfc3339()).bind(run_id.to_string())
+                        .execute(&mut *tx).await.map_err(storage)?;
+                    sqlx::query("UPDATE run_lsm_provisioning SET restart_deadline_at=?,updated_at=? WHERE run_id=?")
                         .bind(deadline.to_rfc3339()).bind(now.to_rfc3339()).bind(run_id.to_string())
                         .execute(&mut *tx).await.map_err(storage)?;
                     sqlx::query("UPDATE assignments SET expires_at=MAX(expires_at,?),renewed_at=? WHERE id=? AND status='active'")

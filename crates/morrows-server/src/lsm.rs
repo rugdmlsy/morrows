@@ -19,6 +19,10 @@ pub struct AgentBinding {
 }
 
 impl LsmControl {
+    pub fn subject(&self) -> &str {
+        &self.subject
+    }
+
     pub fn from_env() -> anyhow::Result<Option<Self>> {
         let Ok(configured) = std::env::var("MORROWS_LSM_CONTROL_URL") else {
             return Ok(None);
@@ -94,21 +98,27 @@ impl LsmControl {
         Ok(value)
     }
 
-    pub async fn provision_agent(
+    /// Replay the Run key before issuing any Agent credential. A lost HTTP
+    /// response or failed Morrows binding write can therefore be reconciled.
+    pub async fn provision_run(
         &self,
         store: &Store,
         run_id: Id,
         task_title: &str,
-    ) -> anyhow::Result<AgentBinding> {
+    ) -> anyhow::Result<String> {
         let session_id = if let Some(existing) = store.run_lsm_binding(run_id).await? {
             existing.logical_session_id
         } else {
+            let subject = store
+                .run_lsm_provisioning_subject(run_id)
+                .await?
+                .unwrap_or_else(|| self.subject.clone());
             let response = self
                 .request(
                     "POST",
                     "/sessions",
                     json!({
-                        "subject": self.subject,
+                        "subject": subject,
                         "idempotency_key": format!("morrows:run:{run_id}"),
                         "label": format!("Morrows: {task_title}"),
                         "objective": task_title,
@@ -122,11 +132,25 @@ impl LsmControl {
             store.bind_run_lsm(run_id, &session_id).await?;
             session_id
         };
+        Ok(session_id)
+    }
+
+    pub async fn provision_agent(
+        &self,
+        store: &Store,
+        run_id: Id,
+        task_title: &str,
+    ) -> anyhow::Result<AgentBinding> {
+        let session_id = self.provision_run(store, run_id, task_title).await?;
+        let subject = store
+            .run_lsm_provisioning_subject(run_id)
+            .await?
+            .unwrap_or_else(|| self.subject.clone());
         let issued = self
             .request(
                 "POST",
                 &format!("/sessions/{session_id}/capabilities"),
-                json!({"subject":self.subject}),
+                json!({"subject":subject}),
             )
             .await?;
         let capability = issued["capability"]
@@ -161,12 +185,22 @@ impl LsmControl {
         Ok(())
     }
 
-    pub async fn cleanup(&self, session_id: &str, finish: bool) -> anyhow::Result<bool> {
+    pub async fn cleanup_run(
+        &self,
+        store: &Store,
+        run_id: Id,
+        session_id: &str,
+        finish: bool,
+    ) -> anyhow::Result<bool> {
+        let subject = store
+            .run_lsm_provisioning_subject(run_id)
+            .await?
+            .unwrap_or_else(|| self.subject.clone());
         let response = self
             .request(
                 "POST",
                 &format!("/sessions/{session_id}/cleanup"),
-                json!({"subject":self.subject,"wait_seconds":30,
+                json!({"subject":subject,"wait_seconds":30,
                    "terminal_action":if finish {"finish"} else {"cancel"}}),
             )
             .await?;
