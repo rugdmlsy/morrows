@@ -771,7 +771,7 @@ impl Store {
         self.get_agent(agent_id).await?;
         let rows = sqlx::query(
             "SELECT a.* FROM launch_attempts a JOIN launch_profiles p ON p.id=a.launch_profile_id
-             WHERE a.agent_instance_id=? AND p.adapter IN ('lsm_external','antigravity_external','gemini_external')
+             WHERE a.agent_instance_id=? AND p.adapter IN ('lsm_external','antigravity_external','gemini_external','codebuddy_external')
                AND a.status IN ('awaiting_agent','running') ORDER BY a.created_at,a.id",
         )
         .bind(agent_id.to_string())
@@ -1143,7 +1143,7 @@ impl Store {
             "SELECT a.id,a.run_id,r.status AS run_status,s.status AS assignment_status,s.expires_at
              FROM launch_attempts a JOIN launch_profiles p ON p.id=a.launch_profile_id
              LEFT JOIN runs r ON r.id=a.run_id JOIN assignments s ON s.id=a.assignment_id
-             WHERE p.adapter IN ('lsm_external','antigravity_external','gemini_external')
+             WHERE p.adapter IN ('lsm_external','antigravity_external','gemini_external','codebuddy_external')
                AND a.status IN ('awaiting_agent','running')",
         )
         .fetch_all(&self.pool)
@@ -1336,6 +1336,6 @@ fn row_to_launch_attempt(row: sqlx::sqlite::SqliteRow) -> Result<LaunchAttempt, 
 fn is_external_adapter(adapter: &str) -> bool {
     matches!(
         adapter,
-        "lsm_external" | "antigravity_external" | "gemini_external"
+        "lsm_external" | "antigravity_external" | "gemini_external" | "codebuddy_external"
     )
 }

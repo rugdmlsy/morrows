@@ -308,6 +308,30 @@ async fn launch_profile_must_match_assignment_agent_and_executor_role() {
 }
 
 #[tokio::test]
+async fn supported_external_adapters_register_without_local_process() {
+    let store = Store::connect("sqlite::memory:").await.unwrap();
+    let worker = agent(&store, "external-worker").await;
+
+    for adapter in [
+        "lsm_external",
+        "antigravity_external",
+        "gemini_external",
+        "codebuddy_external",
+    ] {
+        let profile = store
+            .register_launch_profile(input(json!({
+                "name": adapter,
+                "adapter": adapter,
+                "agent_instance_id": worker.id
+            })))
+            .await
+            .unwrap();
+        assert_eq!(profile.adapter, adapter);
+        assert!(profile.program.is_empty());
+    }
+}
+
+#[tokio::test]
 async fn external_agent_accepts_only_its_own_assignment_and_completes_durably() {
     let store = Store::connect("sqlite::memory:").await.unwrap();
     let worker = agent(&store, "lsm-worker").await;

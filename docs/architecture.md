@@ -348,7 +348,7 @@ and kills its child. On restart, the daemon marks interrupted local attempts fai
 and restores claimed jobs whose attempts had not started. It cannot safely identify
 and kill an orphan process after an unclean OS crash.
 
-`lsm_external`, `antigravity_external`, and `gemini_external` profiles contain no
+`lsm_external`, `antigravity_external`, `gemini_external`, and `codebuddy_external` profiles contain no
 executable or workspace. Enqueue writes an `awaiting_agent` attempt. The bound agent
 polls `external_launch_list` over MCP and calls `external_launch_accept` with its
 external session reference. Acceptance creates its Run atomically. The agent then

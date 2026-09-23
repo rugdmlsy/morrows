@@ -127,7 +127,7 @@ process exit without `run_complete` returns the task to `ready` in legacy launch
 With LSM integration enabled, an unexpected exit interrupts the same Run for an explicit
 restart within the configured grace period. See [LSM runtime integration](docs/lsm-runtime.md).
 
-`lsm_external`, `antigravity_external`, and `gemini_external` have no executable path. Enqueue
+`lsm_external`, `antigravity_external`, `gemini_external`, and `codebuddy_external` have no executable path. Enqueue
 creates an `awaiting_agent` invitation. The matching AgentInstance reads
 `external_launch_list` through MCP, calls `external_launch_accept` with its session reference,
 then uses the existing Run checkpoint/complete tools. It can read new instructions with

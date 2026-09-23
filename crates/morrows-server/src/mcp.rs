@@ -83,6 +83,7 @@ pub struct RenewAssignmentRequest {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct CheckpointRunRequest {
     pub run_id: String,
+    #[schemars(with = "std::collections::BTreeMap<String, Value>")]
     pub checkpoint: Value,
 }
 
@@ -90,6 +91,7 @@ pub struct CheckpointRunRequest {
 pub struct CompleteRunRequest {
     pub run_id: String,
     #[serde(default)]
+    #[schemars(with = "std::collections::BTreeMap<String, Value>")]
     pub result: Value,
 }
 
@@ -101,6 +103,7 @@ pub struct ReviseContextRequest {
     #[serde(default)]
     pub background: String,
     #[serde(default)]
+    #[schemars(with = "std::collections::BTreeMap<String, Value>")]
     pub constraints: Value,
     #[serde(default)]
     pub current_summary: String,
@@ -483,7 +486,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Register an operator-controlled launch profile: codex_cli or lsm_external, antigravity_external, gemini_external."
+        description = "Register an operator-controlled launch profile: codex_cli or lsm_external, antigravity_external, gemini_external, codebuddy_external."
     )]
     async fn launch_profile_register(
         &self,
@@ -1048,6 +1051,30 @@ mod tests {
         }
         req.body(()).unwrap().into_parts().0
     }
+
+    #[test]
+    fn arbitrary_json_mcp_fields_use_object_property_schemas() {
+        for (schema, field) in [
+            (
+                serde_json::to_value(rmcp::schemars::schema_for!(CheckpointRunRequest)).unwrap(),
+                "checkpoint",
+            ),
+            (
+                serde_json::to_value(rmcp::schemars::schema_for!(CompleteRunRequest)).unwrap(),
+                "result",
+            ),
+            (
+                serde_json::to_value(rmcp::schemars::schema_for!(ReviseContextRequest)).unwrap(),
+                "constraints",
+            ),
+        ] {
+            assert!(
+                schema["properties"][field].is_object(),
+                "{field} must be an object JSON Schema for strict MCP clients"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn mcp_tools_expose_collaboration_and_enforce_header_identity() {
         let store = Store::connect("sqlite::memory:").await.unwrap();
