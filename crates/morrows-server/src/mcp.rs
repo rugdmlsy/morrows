@@ -1,8 +1,5 @@
 use axum::http::request::Parts;
-use morrows_core::{
-    AcceptExternalLaunch, CreateArtifact, CreateDecision, CreateHandoff, CreateMessage,
-    CreateThread, SendLaunchInstruction,
-};
+use morrows_core::{CreateArtifact, CreateDecision, CreateHandoff, CreateMessage, CreateThread};
 use morrows_core::{CreateContextRevision, CreateTask, Id, TaskState};
 use morrows_store::Store;
 use rmcp::{
@@ -29,13 +26,33 @@ impl MorrowsMcp {
             tool_router: Self::tool_router(),
         }
     }
-}
 
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct RegisterAgentRequest {
-    pub name: String,
-    #[serde(default)]
-    pub capabilities: Vec<String>,
+    async fn ensure_task_access(&self, task_id: Id, agent_id: Id) -> Result<(), String> {
+        self.store
+            .get_agent(agent_id)
+            .await
+            .map_err(|e| e.to_string())?;
+        let task = self
+            .store
+            .get_task(task_id)
+            .await
+            .map_err(|e| e.to_string())?;
+        if task.owner_actor_id == format!("agent:{agent_id}") {
+            return Ok(());
+        }
+        let assignments = self
+            .store
+            .task_assignments(task_id)
+            .await
+            .map_err(|e| e.to_string())?;
+        if assignments
+            .iter()
+            .any(|assignment| assignment.agent_instance_id == agent_id)
+        {
+            return Ok(());
+        }
+        Err("task is not owned by or assigned to the authenticated agent instance".into())
+    }
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -44,33 +61,14 @@ pub struct TaskIdRequest {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct CreateTaskRequest {
+pub struct WorkRequestSubmitRequest {
     pub title: String,
     #[serde(default)]
     pub description: String,
-    #[serde(default)]
-    pub priority: i32,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct ClaimTaskRequest {
-    pub task_id: String,
-    #[serde(default = "default_role")]
-    pub role: String,
-    #[serde(default = "default_lease")]
-    pub lease_seconds: i64,
-}
-fn default_role() -> String {
-    "executor".into()
-}
 fn default_lease() -> i64 {
     900
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct StartRunRequest {
-    pub assignment_id: String,
-    pub external_session_ref: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -126,6 +124,7 @@ pub struct CreateThreadRequest {
 }
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct CreateMessageRequest {
+    pub task_id: String,
     pub thread_id: String,
     pub input: CreateMessage,
 }
@@ -143,498 +142,22 @@ pub struct AcceptHandoffRequest {
 pub struct HandoffIdRequest {
     pub handoff_id: String,
 }
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct DependencyRequest {
-    pub task_id: String,
-    pub depends_on_task_id: String,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct FleetIdRequest {
-    pub id: String,
-}
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct InstanceIdRequest {
-    pub agent_instance_id: String,
-}
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct HeartbeatRequest {
-    pub agent_instance_id: String,
-    pub input: morrows_core::AgentHeartbeat,
-}
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct CapacityRequest {
-    pub agent_instance_id: String,
-    pub input: morrows_core::RecordCapacity,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct TaskRoleRequest {
-    pub task_id: String,
-    #[serde(default = "default_role")]
-    pub role: String,
-}
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct DispatchPolicyRequest {
-    pub task_id: String,
-    pub input: morrows_core::SetDispatchPolicy,
-}
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct DispatchNextRequest {
-    #[serde(default = "default_role")]
-    pub role: String,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct LaunchProfileIdRequest {
-    pub launch_profile_id: String,
-}
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct RegisterLaunchProfileRequest {
-    pub input: morrows_core::RegisterLaunchProfile,
-}
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct EnqueueLaunchRequest {
-    pub input: morrows_core::EnqueueLaunch,
-}
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct LaunchAttemptIdRequest {
-    pub launch_attempt_id: String,
-}
-
 #[tool_router(router = tool_router)]
 impl MorrowsMcp {
     #[tool(
-        description = "Register or reuse a profile identity by its natural key. Existing rows are returned unchanged."
+        description = "Read management instructions for a work item owned by or assigned to the authenticated employee. Requires X-Agent-Instance-Id."
     )]
-    async fn agent_profile_register(
-        &self,
-        Parameters(input): Parameters<morrows_core::RegisterProfile>,
-    ) -> Result<String, String> {
-        let value = self
-            .store
-            .register_profile(input)
-            .await
-            .map_err(|e| e.to_string())?;
-        serde_json::to_string(&value).map_err(|e| e.to_string())
-    }
-    #[tool(description = "List profile identities.")]
-    async fn agent_profile_list(&self) -> Result<String, String> {
-        let value = self
-            .store
-            .list_profiles()
-            .await
-            .map_err(|e| e.to_string())?;
-        serde_json::to_string(&value).map_err(|e| e.to_string())
-    }
-    #[tool(description = "Get a profile identity by UUID.")]
-    async fn agent_profile_get(
-        &self,
-        Parameters(req): Parameters<FleetIdRequest>,
-    ) -> Result<String, String> {
-        let value = self
-            .store
-            .get_profile(parse_id(&req.id)?)
-            .await
-            .map_err(|e| e.to_string())?;
-        serde_json::to_string(&value).map_err(|e| e.to_string())
-    }
-    #[tool(
-        description = "Register or reuse a account identity by its natural key. Existing rows are returned unchanged."
-    )]
-    async fn account_register(
-        &self,
-        Parameters(input): Parameters<morrows_core::RegisterAccount>,
-    ) -> Result<String, String> {
-        let value = self
-            .store
-            .register_account(input)
-            .await
-            .map_err(|e| e.to_string())?;
-        serde_json::to_string(&value).map_err(|e| e.to_string())
-    }
-    #[tool(description = "List account identities.")]
-    async fn account_list(&self) -> Result<String, String> {
-        let value = self
-            .store
-            .list_accounts()
-            .await
-            .map_err(|e| e.to_string())?;
-        serde_json::to_string(&value).map_err(|e| e.to_string())
-    }
-    #[tool(description = "Get a account identity by UUID.")]
-    async fn account_get(
-        &self,
-        Parameters(req): Parameters<FleetIdRequest>,
-    ) -> Result<String, String> {
-        let value = self
-            .store
-            .get_account(parse_id(&req.id)?)
-            .await
-            .map_err(|e| e.to_string())?;
-        serde_json::to_string(&value).map_err(|e| e.to_string())
-    }
-    #[tool(
-        description = "Register or reuse a machine identity by its natural key. Existing rows are returned unchanged."
-    )]
-    async fn machine_register(
-        &self,
-        Parameters(input): Parameters<morrows_core::RegisterMachine>,
-    ) -> Result<String, String> {
-        let value = self
-            .store
-            .register_machine(input)
-            .await
-            .map_err(|e| e.to_string())?;
-        serde_json::to_string(&value).map_err(|e| e.to_string())
-    }
-    #[tool(description = "List machine identities.")]
-    async fn machine_list(&self) -> Result<String, String> {
-        let value = self
-            .store
-            .list_machines()
-            .await
-            .map_err(|e| e.to_string())?;
-        serde_json::to_string(&value).map_err(|e| e.to_string())
-    }
-    #[tool(description = "Get a machine identity by UUID.")]
-    async fn machine_get(
-        &self,
-        Parameters(req): Parameters<FleetIdRequest>,
-    ) -> Result<String, String> {
-        let value = self
-            .store
-            .get_machine(parse_id(&req.id)?)
-            .await
-            .map_err(|e| e.to_string())?;
-        serde_json::to_string(&value).map_err(|e| e.to_string())
-    }
-    #[tool(
-        description = "Register an instance with explicit profile and optional account/machine links. Omitted capabilities inherit profile defaults."
-    )]
-    async fn agent_instance_register(
-        &self,
-        Parameters(input): Parameters<morrows_core::RegisterAgentInstance>,
-    ) -> Result<String, String> {
-        let value = self
-            .store
-            .register_agent_instance(input)
-            .await
-            .map_err(|e| e.to_string())?;
-        serde_json::to_string(&value).map_err(|e| e.to_string())
-    }
-    #[tool(
-        description = "Update own heartbeat/status and optionally append capacity atomically. Requires X-Agent-Instance-Id."
-    )]
-    async fn agent_heartbeat(
-        &self,
-        Parameters(req): Parameters<HeartbeatRequest>,
-        Extension(parts): Extension<Parts>,
-    ) -> Result<String, String> {
-        let value = self
-            .store
-            .agent_heartbeat(
-                parse_id(&req.agent_instance_id)?,
-                authenticated_agent(&parts)?,
-                req.input,
-            )
-            .await
-            .map_err(|e| e.to_string())?;
-        serde_json::to_string(&value).map_err(|e| e.to_string())
-    }
-    #[tool(
-        description = "Append a capacity observation for own instance. Requires X-Agent-Instance-Id."
-    )]
-    async fn capacity_record(
-        &self,
-        Parameters(req): Parameters<CapacityRequest>,
-        Extension(parts): Extension<Parts>,
-    ) -> Result<String, String> {
-        let value = self
-            .store
-            .capacity_record(
-                parse_id(&req.agent_instance_id)?,
-                authenticated_agent(&parts)?,
-                req.input,
-            )
-            .await
-            .map_err(|e| e.to_string())?;
-        serde_json::to_string(&value).map_err(|e| e.to_string())
-    }
-    #[tool(
-        description = "Read capacity latest for an instance. History is newest first; latest is null before any observation."
-    )]
-    async fn capacity_latest(
-        &self,
-        Parameters(req): Parameters<InstanceIdRequest>,
-    ) -> Result<String, String> {
-        let value = self
-            .store
-            .capacity_latest(parse_id(&req.agent_instance_id)?)
-            .await
-            .map_err(|e| e.to_string())?;
-        serde_json::to_string(&value).map_err(|e| e.to_string())
-    }
-    #[tool(
-        description = "Read capacity history for an instance. History is newest first; latest is null before any observation."
-    )]
-    async fn capacity_history(
-        &self,
-        Parameters(req): Parameters<InstanceIdRequest>,
-    ) -> Result<String, String> {
-        let value = self
-            .store
-            .capacity_history(parse_id(&req.agent_instance_id)?)
-            .await
-            .map_err(|e| e.to_string())?;
-        serde_json::to_string(&value).map_err(|e| e.to_string())
-    }
-    #[tool(
-        description = "List instances with their profile, account, machine and latest observed capacity."
-    )]
-    async fn agent_fleet(&self) -> Result<String, String> {
-        let value = self.store.agent_fleet().await.map_err(|e| e.to_string())?;
-        serde_json::to_string(&value).map_err(|e| e.to_string())
-    }
-
-    #[tool(description = "List durable task dispatch policies.")]
-    async fn dispatch_policy_list(&self) -> Result<String, String> {
-        let value = self
-            .store
-            .list_dispatch_policies()
-            .await
-            .map_err(|e| e.to_string())?;
-        serde_json::to_string(&value).map_err(|e| e.to_string())
-    }
-    #[tool(description = "Create or replace a durable task dispatch policy.")]
-    async fn dispatch_policy_set(
-        &self,
-        Parameters(req): Parameters<DispatchPolicyRequest>,
-    ) -> Result<String, String> {
-        let value = self
-            .store
-            .set_dispatch_policy(parse_id(&req.task_id)?, req.input)
-            .await
-            .map_err(|e| e.to_string())?;
-        serde_json::to_string(&value).map_err(|e| e.to_string())
-    }
-    #[tool(description = "Read a task dispatch policy.")]
-    async fn dispatch_policy_get(
-        &self,
-        Parameters(req): Parameters<TaskRoleRequest>,
-    ) -> Result<String, String> {
-        let value = self
-            .store
-            .get_dispatch_policy(parse_id(&req.task_id)?, &req.role)
-            .await
-            .map_err(|e| e.to_string())?;
-        serde_json::to_string(&value).map_err(|e| e.to_string())
-    }
-    #[tool(
-        description = "Explain task dispatch eligibility and candidate ranking without mutation."
-    )]
-    async fn dispatch_preview(
-        &self,
-        Parameters(req): Parameters<TaskRoleRequest>,
-    ) -> Result<String, String> {
-        let value = self
-            .store
-            .dispatch_preview(parse_id(&req.task_id)?, &req.role)
-            .await
-            .map_err(|e| e.to_string())?;
-        serde_json::to_string(&value).map_err(|e| e.to_string())
-    }
-    #[tool(
-        description = "Atomically select an eligible agent and create its assignment; does not launch a process."
-    )]
-    async fn dispatch_task(
-        &self,
-        Parameters(req): Parameters<TaskRoleRequest>,
-    ) -> Result<String, String> {
-        let value = self
-            .store
-            .dispatch_task(parse_id(&req.task_id)?, &req.role)
-            .await
-            .map_err(|e| e.to_string())?;
-        serde_json::to_string(&value).map_err(|e| e.to_string())
-    }
-    #[tool(
-        description = "Dispatch the highest-priority eligible task with an enabled policy; does not launch a process."
-    )]
-    async fn dispatch_next(
-        &self,
-        Parameters(req): Parameters<DispatchNextRequest>,
-    ) -> Result<String, String> {
-        let value = self
-            .store
-            .dispatch_next(&req.role)
-            .await
-            .map_err(|e| e.to_string())?;
-        serde_json::to_string(&value).map_err(|e| e.to_string())
-    }
-    #[tool(description = "Read append-only dispatch decision history for a task.")]
-    async fn dispatch_decisions(
+    async fn instructions_get(
         &self,
         Parameters(req): Parameters<TaskIdRequest>,
-    ) -> Result<String, String> {
-        let value = self
-            .store
-            .task_dispatch_decisions(parse_id(&req.task_id)?)
-            .await
-            .map_err(|e| e.to_string())?;
-        serde_json::to_string(&value).map_err(|e| e.to_string())
-    }
-
-    #[tool(
-        description = "Register an operator-controlled launch profile: codex_cli or lsm_external, antigravity_external, gemini_external, codebuddy_external."
-    )]
-    async fn launch_profile_register(
-        &self,
-        Parameters(req): Parameters<RegisterLaunchProfileRequest>,
-    ) -> Result<String, String> {
-        let value = self
-            .store
-            .register_launch_profile(req.input)
-            .await
-            .map_err(|e| e.to_string())?;
-        serde_json::to_string(&value).map_err(|e| e.to_string())
-    }
-    #[tool(description = "List configured executor launch profiles.")]
-    async fn launch_profile_list(&self) -> Result<String, String> {
-        let value = self
-            .store
-            .list_launch_profiles()
-            .await
-            .map_err(|e| e.to_string())?;
-        serde_json::to_string(&value).map_err(|e| e.to_string())
-    }
-    #[tool(description = "Get an executor launch profile by UUID.")]
-    async fn launch_profile_get(
-        &self,
-        Parameters(req): Parameters<LaunchProfileIdRequest>,
-    ) -> Result<String, String> {
-        let value = self
-            .store
-            .get_launch_profile(parse_id(&req.launch_profile_id)?)
-            .await
-            .map_err(|e| e.to_string())?;
-        serde_json::to_string(&value).map_err(|e| e.to_string())
-    }
-    #[tool(
-        description = "Queue an explicit executor launch for an active executor Assignment. This does not accept task-supplied commands."
-    )]
-    async fn launch_enqueue(
-        &self,
-        Parameters(req): Parameters<EnqueueLaunchRequest>,
-    ) -> Result<String, String> {
-        let value = self
-            .store
-            .enqueue_launch(req.input)
-            .await
-            .map_err(|e| e.to_string())?;
-        serde_json::to_string(&value).map_err(|e| e.to_string())
-    }
-    #[tool(description = "Get a durable executor launch attempt by UUID.")]
-    async fn launch_attempt_get(
-        &self,
-        Parameters(req): Parameters<LaunchAttemptIdRequest>,
-    ) -> Result<String, String> {
-        let value = self
-            .store
-            .get_launch_attempt(parse_id(&req.launch_attempt_id)?)
-            .await
-            .map_err(|e| e.to_string())?;
-        serde_json::to_string(&value).map_err(|e| e.to_string())
-    }
-    #[tool(description = "List executor launch attempts for a task, newest first.")]
-    async fn task_launch_attempts(
-        &self,
-        Parameters(req): Parameters<TaskIdRequest>,
-    ) -> Result<String, String> {
-        let value = self
-            .store
-            .task_launch_attempts(parse_id(&req.task_id)?)
-            .await
-            .map_err(|e| e.to_string())?;
-        serde_json::to_string(&value).map_err(|e| e.to_string())
-    }
-
-    #[tool(
-        description = "List pending or running external launches for the authenticated AgentInstance."
-    )]
-    async fn external_launch_list(
-        &self,
         Extension(parts): Extension<Parts>,
     ) -> Result<String, String> {
+        let task_id = parse_id(&req.task_id)?;
+        let agent_id = authenticated_agent(&parts)?;
+        self.ensure_task_access(task_id, agent_id).await?;
         let value = self
             .store
-            .pending_external_launches(authenticated_agent(&parts)?)
-            .await
-            .map_err(|e| e.to_string())?;
-        serde_json::to_string(&value).map_err(|e| e.to_string())
-    }
-    #[tool(
-        description = "Accept an external launch and create its Run. Requires the assigned AgentInstance header and a session reference."
-    )]
-    async fn external_launch_accept(
-        &self,
-        Parameters(input): Parameters<AcceptExternalLaunch>,
-        Extension(parts): Extension<Parts>,
-    ) -> Result<String, String> {
-        let value = self
-            .store
-            .accept_external_launch(input, authenticated_agent(&parts)?)
-            .await
-            .map_err(|e| e.to_string())?;
-        serde_json::to_string(&value).map_err(|e| e.to_string())
-    }
-    #[tool(
-        description = "Send a durable instruction to an active launch attempt. Requires X-Agent-Instance-Id."
-    )]
-    async fn launch_instruction_send(
-        &self,
-        Parameters(input): Parameters<SendLaunchInstruction>,
-        Extension(parts): Extension<Parts>,
-    ) -> Result<String, String> {
-        let value = self
-            .store
-            .send_launch_instruction(input, Some(authenticated_agent(&parts)?))
-            .await
-            .map_err(|e| e.to_string())?;
-        serde_json::to_string(&value).map_err(|e| e.to_string())
-    }
-    #[tool(description = "Read durable instructions for a launch attempt.")]
-    async fn launch_instructions(
-        &self,
-        Parameters(req): Parameters<LaunchAttemptIdRequest>,
-    ) -> Result<String, String> {
-        let value = self
-            .store
-            .launch_instructions(parse_id(&req.launch_attempt_id)?)
-            .await
-            .map_err(|e| e.to_string())?;
-        serde_json::to_string(&value).map_err(|e| e.to_string())
-    }
-    #[tool(
-        description = "Stop a launch owned by the authenticated AgentInstance and release its assignment."
-    )]
-    async fn launch_stop(
-        &self,
-        Parameters(req): Parameters<LaunchAttemptIdRequest>,
-        Extension(parts): Extension<Parts>,
-    ) -> Result<String, String> {
-        let id = parse_id(&req.launch_attempt_id)?;
-        let attempt = self
-            .store
-            .get_launch_attempt(id)
-            .await
-            .map_err(|e| e.to_string())?;
-        if attempt.agent_instance_id != authenticated_agent(&parts)? {
-            return Err("launch belongs to another agent instance".into());
-        }
-        let value = self
-            .store
-            .stop_launch_attempt(id)
+            .task_launch_instructions(task_id)
             .await
             .map_err(|e| e.to_string())?;
         serde_json::to_string(&value).map_err(|e| e.to_string())
@@ -666,13 +189,12 @@ impl MorrowsMcp {
         Parameters(req): Parameters<CreateArtifactRequest>,
         Extension(parts): Extension<Parts>,
     ) -> Result<String, String> {
+        let task_id = parse_id(&req.task_id)?;
+        let agent_id = authenticated_agent(&parts)?;
+        self.ensure_task_access(task_id, agent_id).await?;
         let value = self
             .store
-            .create_artifact(
-                parse_id(&req.task_id)?,
-                authenticated_agent(&parts)?,
-                req.input,
-            )
+            .create_artifact(task_id, agent_id, req.input)
             .await
             .map_err(|e| e.to_string())?;
         serde_json::to_string(&value).map_err(|e| e.to_string())
@@ -683,13 +205,12 @@ impl MorrowsMcp {
         Parameters(req): Parameters<CreateDecisionRequest>,
         Extension(parts): Extension<Parts>,
     ) -> Result<String, String> {
+        let task_id = parse_id(&req.task_id)?;
+        let agent_id = authenticated_agent(&parts)?;
+        self.ensure_task_access(task_id, agent_id).await?;
         let value = self
             .store
-            .create_decision(
-                parse_id(&req.task_id)?,
-                authenticated_agent(&parts)?,
-                req.input,
-            )
+            .create_decision(task_id, agent_id, req.input)
             .await
             .map_err(|e| e.to_string())?;
         serde_json::to_string(&value).map_err(|e| e.to_string())
@@ -700,13 +221,12 @@ impl MorrowsMcp {
         Parameters(req): Parameters<CreateThreadRequest>,
         Extension(parts): Extension<Parts>,
     ) -> Result<String, String> {
+        let task_id = parse_id(&req.task_id)?;
+        let agent_id = authenticated_agent(&parts)?;
+        self.ensure_task_access(task_id, agent_id).await?;
         let value = self
             .store
-            .create_thread(
-                parse_id(&req.task_id)?,
-                authenticated_agent(&parts)?,
-                req.input,
-            )
+            .create_thread(task_id, agent_id, req.input)
             .await
             .map_err(|e| e.to_string())?;
         serde_json::to_string(&value).map_err(|e| e.to_string())
@@ -717,13 +237,21 @@ impl MorrowsMcp {
         Parameters(req): Parameters<CreateMessageRequest>,
         Extension(parts): Extension<Parts>,
     ) -> Result<String, String> {
+        let task_id = parse_id(&req.task_id)?;
+        let thread_id = parse_id(&req.thread_id)?;
+        let agent_id = authenticated_agent(&parts)?;
+        self.ensure_task_access(task_id, agent_id).await?;
+        let threads = self
+            .store
+            .task_threads(task_id)
+            .await
+            .map_err(|e| e.to_string())?;
+        if !threads.iter().any(|thread| thread.id == thread_id) {
+            return Err("thread does not belong to the supplied task".into());
+        }
         let value = self
             .store
-            .create_message(
-                parse_id(&req.thread_id)?,
-                authenticated_agent(&parts)?,
-                req.input,
-            )
+            .create_message(thread_id, agent_id, req.input)
             .await
             .map_err(|e| e.to_string())?;
         serde_json::to_string(&value).map_err(|e| e.to_string())
@@ -753,10 +281,14 @@ impl MorrowsMcp {
     async fn task_collaboration(
         &self,
         Parameters(req): Parameters<TaskIdRequest>,
+        Extension(parts): Extension<Parts>,
     ) -> Result<String, String> {
+        let task_id = parse_id(&req.task_id)?;
+        let agent_id = authenticated_agent(&parts)?;
+        self.ensure_task_access(task_id, agent_id).await?;
         let value = self
             .store
-            .task_collaboration(parse_id(&req.task_id)?)
+            .task_collaboration(task_id)
             .await
             .map_err(|e| e.to_string())?;
         serde_json::to_string(&value).map_err(|e| e.to_string())
@@ -767,122 +299,64 @@ impl MorrowsMcp {
     async fn handoff_get(
         &self,
         Parameters(req): Parameters<HandoffIdRequest>,
+        Extension(parts): Extension<Parts>,
     ) -> Result<String, String> {
+        let agent_id = authenticated_agent(&parts)?;
         let value = self
             .store
             .get_handoff(parse_id(&req.handoff_id)?)
             .await
             .map_err(|e| e.to_string())?;
-        serde_json::to_string(&value).map_err(|e| e.to_string())
-    }
-    #[tool(description = "add a task prerequisite. Rejects cycles. Requires X-Agent-Instance-Id.")]
-    async fn dependency_add(
-        &self,
-        Parameters(req): Parameters<DependencyRequest>,
-        Extension(parts): Extension<Parts>,
-    ) -> Result<String, String> {
-        let value = self
-            .store
-            .add_dependency(
-                parse_id(&req.task_id)?,
-                parse_id(&req.depends_on_task_id)?,
-                authenticated_agent(&parts)?,
-            )
-            .await
-            .map_err(|e| e.to_string())?;
-        serde_json::to_string(&value).map_err(|e| e.to_string())
-    }
-    #[tool(
-        description = "remove a task prerequisite. Rejects cycles. Requires X-Agent-Instance-Id."
-    )]
-    async fn dependency_remove(
-        &self,
-        Parameters(req): Parameters<DependencyRequest>,
-        Extension(parts): Extension<Parts>,
-    ) -> Result<String, String> {
-        let value = self
-            .store
-            .remove_dependency(
-                parse_id(&req.task_id)?,
-                parse_id(&req.depends_on_task_id)?,
-                authenticated_agent(&parts)?,
-            )
-            .await
-            .map_err(|e| e.to_string())?;
+        self.ensure_task_access(value.handoff.task_id, agent_id)
+            .await?;
         serde_json::to_string(&value).map_err(|e| e.to_string())
     }
 
     #[tool(
-        description = "Register or refresh an agent instance. Returns its instance id. After registering, configure X-Agent-Instance-Id on subsequent MCP requests."
+        description = "Read a work item owned by or assigned to the authenticated employee. Requires X-Agent-Instance-Id."
     )]
-    async fn agent_register(
+    async fn task_get(
         &self,
-        Parameters(req): Parameters<RegisterAgentRequest>,
+        Parameters(req): Parameters<TaskIdRequest>,
+        Extension(parts): Extension<Parts>,
     ) -> Result<String, String> {
-        let agent = self
-            .store
-            .register_agent(&req.name, &req.capabilities)
-            .await
-            .map_err(|e| e.to_string())?;
-        serde_json::to_string(&agent).map_err(|e| e.to_string())
-    }
-
-    #[tool(description = "List all tasks in the work queue.")]
-    async fn task_list(&self) -> Result<String, String> {
-        let tasks = self.store.list_tasks().await.map_err(|e| e.to_string())?;
-        serde_json::to_string(&tasks).map_err(|e| e.to_string())
-    }
-
-    #[tool(description = "Get a task by id.")]
-    async fn task_get(&self, Parameters(req): Parameters<TaskIdRequest>) -> Result<String, String> {
+        let task_id = parse_id(&req.task_id)?;
+        let agent_id = authenticated_agent(&parts)?;
+        self.ensure_task_access(task_id, agent_id).await?;
         let task = self
             .store
-            .get_task(parse_id(&req.task_id)?)
+            .get_task(task_id)
             .await
             .map_err(|e| e.to_string())?;
         serde_json::to_string(&task).map_err(|e| e.to_string())
     }
 
-    #[tool(description = "Create a new task. New tasks are ready by default.")]
-    async fn task_create(
+    #[tool(
+        description = "Submit a work request to Morrows for company scheduling. The caller becomes the request owner; employees cannot set dispatch priority or claim the work themselves. Requires X-Agent-Instance-Id."
+    )]
+    async fn work_request_submit(
         &self,
-        Parameters(req): Parameters<CreateTaskRequest>,
+        Parameters(req): Parameters<WorkRequestSubmitRequest>,
+        Extension(parts): Extension<Parts>,
     ) -> Result<String, String> {
+        let agent_id = authenticated_agent(&parts)?;
+        self.store
+            .get_agent(agent_id)
+            .await
+            .map_err(|e| e.to_string())?;
         let task = self
             .store
             .create_task(CreateTask {
                 project_id: None,
                 title: req.title,
                 description: req.description,
-                owner_actor_id: "human:local".into(),
+                owner_actor_id: format!("agent:{agent_id}"),
                 state: TaskState::Ready,
-                priority: req.priority,
+                priority: 0,
             })
             .await
             .map_err(|e| e.to_string())?;
         serde_json::to_string(&task).map_err(|e| e.to_string())
-    }
-
-    #[tool(
-        description = "Claim a task role for the authenticated agent instance. Requires X-Agent-Instance-Id header."
-    )]
-    async fn task_claim(
-        &self,
-        Parameters(req): Parameters<ClaimTaskRequest>,
-        Extension(parts): Extension<Parts>,
-    ) -> Result<String, String> {
-        let agent_id = authenticated_agent(&parts)?;
-        let assignment = self
-            .store
-            .claim_task(
-                parse_id(&req.task_id)?,
-                agent_id,
-                &req.role,
-                req.lease_seconds,
-            )
-            .await
-            .map_err(|e| e.to_string())?;
-        serde_json::to_string(&assignment).map_err(|e| e.to_string())
     }
 
     #[tool(
@@ -900,27 +374,6 @@ impl MorrowsMcp {
             .await
             .map_err(|e| e.to_string())?;
         serde_json::to_string(&assignment).map_err(|e| e.to_string())
-    }
-
-    #[tool(
-        description = "Start a run for an assignment owned by the authenticated agent instance."
-    )]
-    async fn run_start(
-        &self,
-        Parameters(req): Parameters<StartRunRequest>,
-        Extension(parts): Extension<Parts>,
-    ) -> Result<String, String> {
-        let agent_id = authenticated_agent(&parts)?;
-        let run = self
-            .store
-            .start_run(
-                parse_id(&req.assignment_id)?,
-                agent_id,
-                req.external_session_ref,
-            )
-            .await
-            .map_err(|e| e.to_string())?;
-        serde_json::to_string(&run).map_err(|e| e.to_string())
     }
 
     #[tool(
@@ -957,35 +410,68 @@ impl MorrowsMcp {
         serde_json::to_string(&run).map_err(|e| e.to_string())
     }
 
-    #[tool(description = "Get the current immutable context revision for a task.")]
-    async fn context_get(
+    #[tool(
+        description = "Pull the current durable working memory for a work item owned by or assigned to the authenticated employee. Requires X-Agent-Instance-Id."
+    )]
+    async fn memory_get(
         &self,
         Parameters(req): Parameters<TaskIdRequest>,
+        Extension(parts): Extension<Parts>,
     ) -> Result<String, String> {
-        let context = self
+        let task_id = parse_id(&req.task_id)?;
+        let agent_id = authenticated_agent(&parts)?;
+        self.ensure_task_access(task_id, agent_id).await?;
+        let task = self
             .store
-            .get_current_context(parse_id(&req.task_id)?)
+            .get_task(task_id)
             .await
             .map_err(|e| e.to_string())?;
-        serde_json::to_string(&context).map_err(|e| e.to_string())
+        let context = match task.current_context_revision_id {
+            Some(_) => Some(
+                self.store
+                    .get_current_context(task_id)
+                    .await
+                    .map_err(|e| e.to_string())?,
+            ),
+            None => None,
+        };
+        let collaboration = self
+            .store
+            .task_collaboration(task_id)
+            .await
+            .map_err(|e| e.to_string())?;
+        let my_runs = self
+            .store
+            .task_runs(task_id)
+            .await
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .filter(|run| run.agent_instance_id == agent_id)
+            .collect::<Vec<_>>();
+        serde_json::to_string(&json!({
+            "task": task,
+            "context": context,
+            "collaboration": collaboration,
+            "my_runs": my_runs,
+        }))
+        .map_err(|e| e.to_string())
     }
 
-    #[tool(description = "Create a new immutable context revision for a task.")]
-    async fn context_revise(
+    #[tool(
+        description = "Write a new immutable working-memory revision for a work item owned by or assigned to the authenticated employee. Requires X-Agent-Instance-Id."
+    )]
+    async fn memory_revise(
         &self,
         Parameters(req): Parameters<ReviseContextRequest>,
         Extension(parts): Extension<Parts>,
     ) -> Result<String, String> {
-        let actor = parts
-            .headers
-            .get("x-agent-instance-id")
-            .and_then(|v| v.to_str().ok())
-            .map(|v| format!("agent:{v}"))
-            .unwrap_or_else(|| "human:local".into());
+        let task_id = parse_id(&req.task_id)?;
+        let agent_id = authenticated_agent(&parts)?;
+        self.ensure_task_access(task_id, agent_id).await?;
         let context = self
             .store
             .create_context_revision(
-                parse_id(&req.task_id)?,
+                task_id,
                 CreateContextRevision {
                     goal: req.goal,
                     background: req.background,
@@ -995,7 +481,7 @@ impl MorrowsMcp {
                         req.constraints
                     },
                     current_summary: req.current_summary,
-                    created_by_actor_id: actor,
+                    created_by_actor_id: format!("agent:{agent_id}"),
                 },
             )
             .await
@@ -1003,14 +489,20 @@ impl MorrowsMcp {
         serde_json::to_string(&context).map_err(|e| e.to_string())
     }
 
-    #[tool(description = "List the append-only event timeline for a task.")]
+    #[tool(
+        description = "Read the append-only event timeline for a work item owned by or assigned to the authenticated employee. Requires X-Agent-Instance-Id."
+    )]
     async fn task_events(
         &self,
         Parameters(req): Parameters<TaskIdRequest>,
+        Extension(parts): Extension<Parts>,
     ) -> Result<String, String> {
+        let task_id = parse_id(&req.task_id)?;
+        let agent_id = authenticated_agent(&parts)?;
+        self.ensure_task_access(task_id, agent_id).await?;
         let events = self
             .store
-            .task_events(parse_id(&req.task_id)?)
+            .task_events(task_id)
             .await
             .map_err(|e| e.to_string())?;
         serde_json::to_string(&events).map_err(|e| e.to_string())
@@ -1022,7 +514,7 @@ impl ServerHandler for MorrowsMcp {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_instructions(
-                "Morrows. Register an agent instance, then send X-Agent-Instance-Id on claim/run mutation requests. Tasks are independent of agent accounts and sessions."
+                "Morrows employee interface. The company control plane owns registration, fleet state, dispatch, assignment, Run creation, launch, cancellation, and scheduling. Employees may access only work they own or have been assigned, pull/update working memory, receive instructions, collaborate, hand off work, renew an existing lease, and report progress or completion. Send X-Agent-Instance-Id on every MCP tool call."
             )
     }
 }
@@ -1076,6 +568,106 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mcp_surface_is_employee_only() {
+        let store = Store::connect("sqlite::memory:").await.unwrap();
+        let mcp = MorrowsMcp::new(store);
+        for name in [
+            "work_request_submit",
+            "task_get",
+            "memory_get",
+            "memory_revise",
+            "instructions_get",
+            "artifact_create",
+            "decision_create",
+            "thread_create",
+            "message_create",
+            "handoff_create",
+            "handoff_get",
+            "handoff_accept",
+            "task_collaboration",
+            "assignment_renew",
+            "run_checkpoint",
+            "run_complete",
+            "task_events",
+        ] {
+            assert!(
+                mcp.tool_router.get(name).is_some(),
+                "missing employee tool {name}"
+            );
+        }
+        for name in [
+            "agent_profile_register",
+            "agent_profile_list",
+            "account_register",
+            "machine_register",
+            "agent_instance_register",
+            "agent_register",
+            "agent_heartbeat",
+            "capacity_record",
+            "agent_fleet",
+            "dispatch_policy_set",
+            "dispatch_preview",
+            "dispatch_task",
+            "dispatch_next",
+            "launch_profile_register",
+            "launch_enqueue",
+            "launch_stop",
+            "external_launch_list",
+            "external_launch_accept",
+            "launch_instruction_send",
+            "task_list",
+            "task_create",
+            "task_claim",
+            "run_start",
+            "dependency_add",
+            "dependency_remove",
+        ] {
+            assert!(
+                mcp.tool_router.get(name).is_none(),
+                "control-plane tool leaked into employee MCP: {name}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn work_request_submit_uses_employee_identity_without_priority_control() {
+        let store = Store::connect("sqlite::memory:").await.unwrap();
+        let employee = store.register_agent("employee", &[]).await.unwrap();
+        let mcp = MorrowsMcp::new(store.clone());
+        assert!(
+            mcp.work_request_submit(
+                Parameters(WorkRequestSubmitRequest {
+                    title: "Need review".into(),
+                    description: "Please review this change".into(),
+                }),
+                Extension(parts(None)),
+            )
+            .await
+            .is_err()
+        );
+        let task: Value = serde_json::from_str(
+            &mcp.work_request_submit(
+                Parameters(WorkRequestSubmitRequest {
+                    title: "Need review".into(),
+                    description: "Please review this change".into(),
+                }),
+                Extension(parts(Some(employee.id))),
+            )
+            .await
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(task["owner_actor_id"], format!("agent:{}", employee.id));
+        assert_eq!(task["priority"], 0);
+        let events = store
+            .task_events(parse_id(task["id"].as_str().unwrap()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(events[0].actor_type, "agent_instance");
+        assert_eq!(events[0].actor_id, employee.id.to_string());
+    }
+
+    #[tokio::test]
     async fn mcp_tools_expose_collaboration_and_enforce_header_identity() {
         let store = Store::connect("sqlite::memory:").await.unwrap();
         let a = store.register_agent("mcp-a", &[]).await.unwrap();
@@ -1106,8 +698,6 @@ mod tests {
             "handoff_get",
             "handoff_accept",
             "task_collaboration",
-            "dependency_add",
-            "dependency_remove",
         ] {
             assert!(mcp.tool_router.get(name).is_some(), "missing tool {name}");
         }
@@ -1158,9 +748,12 @@ mod tests {
         )
         .unwrap();
         let recovered: Value = serde_json::from_str(
-            &mcp.handoff_get(Parameters(HandoffIdRequest {
-                handoff_id: h["id"].as_str().unwrap().into(),
-            }))
+            &mcp.handoff_get(
+                Parameters(HandoffIdRequest {
+                    handoff_id: h["id"].as_str().unwrap().into(),
+                }),
+                Extension(parts(Some(a.id))),
+            )
             .await
             .unwrap(),
         )
@@ -1203,23 +796,14 @@ mod tests {
 
         assert_eq!(recovered["artifacts"][0]["id"], artifact["id"]);
         assert!(
-            mcp.task_collaboration(Parameters(TaskIdRequest {
-                task_id: "bad-id".into()
-            }))
+            mcp.task_collaboration(
+                Parameters(TaskIdRequest {
+                    task_id: "bad-id".into()
+                }),
+                Extension(parts(Some(a.id))),
+            )
             .await
             .is_err()
         );
     }
 }
-
-#[cfg(test)]
-#[path = "mcp_fleet_tests.rs"]
-mod fleet_tests;
-
-#[cfg(test)]
-#[path = "mcp_dispatch_tests.rs"]
-mod dispatch_tests;
-
-#[cfg(test)]
-#[path = "mcp_launch_tests.rs"]
-mod launch_tests;

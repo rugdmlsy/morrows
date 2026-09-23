@@ -60,10 +60,15 @@ impl Store {
         .bind(now.to_rfc3339())
         .bind(now.to_rfc3339())
         .execute(&mut *tx).await.map_err(storage)?;
+        let (actor_type, actor_id) = input
+            .owner_actor_id
+            .strip_prefix("agent:")
+            .map(|id| ("agent_instance", id))
+            .unwrap_or(("human", input.owner_actor_id.as_str()));
         append_event_tx(
             &mut tx,
-            "human",
-            &input.owner_actor_id,
+            actor_type,
+            actor_id,
             "task",
             id,
             "task.created",

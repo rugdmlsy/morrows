@@ -3,21 +3,19 @@
 ## Local architecture
 
 ```
-                       ┌──────────────┐
-                       │ React Web UI │
-                       └──────┬───────┘
-                              │ REST
+┌──────────────────┐   ┌──────────────┐       ┌─────────────┐
+│ Control clients  │──▶│ morrows-server│──────▶│ morrows-store│
+│ Web UI / REST    │   │ Axum + rmcp  │       │ SQLx/SQLite │
+└──────────────────┘   └──────┬───────┘       └─────────────┘
+                              │ employee MCP
                               ▼
-┌─────────────┐       ┌──────────────┐       ┌─────────────┐
-│ MCP clients │──────▶│ morrows-server    │──────▶│ morrows-store    │
-└─────────────┘       │ Axum + rmcp  │       │ SQLx/SQLite │
-                      └──────┬───────┘       └─────────────┘
-                             │
-                             ▼
-                       Domain invariants
+                         Managed agents
 ```
 
-REST and MCP call the same store/domain operations. MCP is not implemented as an HTTP-to-HTTP adapter.
+REST is the company control plane: registry, fleet, dispatch, Assignment/Run lifecycle,
+launch, cancellation, and provider adapters. MCP is an employee-facing interface backed
+by the same store/domain invariants, but exposes only work access, memory, collaboration,
+handoff, and progress/completion reporting. MCP is not an HTTP-to-HTTP adapter.
 
 ## Implemented entities
 
@@ -99,19 +97,21 @@ All new REST mutations require `X-Agent-Instance-Id` identifying a registered in
 matching the existing MCP identity convention. This local identity header is not a new
 credential/authentication system. M1 REST payload conventions remain compatible.
 
-MCP exposes `artifact_create`, `decision_create`, `thread_create`, `message_create`,
-`handoff_create`, `handoff_get`, `handoff_accept`, `task_collaboration`, `dependency_add`, and
-`dependency_remove`. Create tools accept the relevant `task_id`, `thread_id`, or `run_id`
-and a typed `input` object matching the REST body. Dependency tools take `task_id` and
-`depends_on_task_id`; `handoff_get` takes `handoff_id`. Mutations use the same identity
-header and store operations as REST. The Task Detail UI displays all six entity types.
+The employee MCP exposes collaboration tools such as `artifact_create`, `decision_create`,
+`thread_create`, `message_create`, `handoff_create`, `handoff_get`, `handoff_accept`,
+and `task_collaboration`. It does not expose dependency graph administration, claiming,
+or Run creation. Task-scoped operations require `X-Agent-Instance-Id` and verify that the
+caller owns or has been assigned the Task. The Task Detail UI displays all collaboration
+entities.
 
 Continuation sequence:
 
-1. Agent A claims a task, starts a run, and writes a checkpoint and task context.
+1. The control plane assigns Agent A and creates its Run. A reads `task_get` /
+   `memory_get`, then reports checkpoints.
 2. A creates artifacts/decisions and calls `handoff_create` with remaining work.
-3. Agent B calls `task_collaboration`, then `handoff_get` to recover the pinned context.
-4. B claims the same role, starts a new run, accepts with `handoff_accept(handoff_id, target_run_id)`, and completes the remaining work.
+3. The control plane assigns Agent B and creates B's Run. B calls `task_collaboration`,
+   then `handoff_get` to recover durable state.
+4. B accepts with `handoff_accept(handoff_id, target_run_id)` and completes the remaining work.
 
 Integration tests cover this sequence across database reopen, rollback on invalid references,
 concurrent handoffs and reverse dependency edges, stale ownership, dependency gating,
@@ -135,8 +135,8 @@ The additive 0003 migration preserves existing M2 records with the defaults abov
 M2.1 was validated against the persistent local daemon with two independent `codex-personal`
 CLI sessions bound to two different AgentInstance identities. Agent A created collaboration
 records and a pending handoff, ending its Run and releasing its Assignment. Agent B had no
-access to A's Codex conversation; it recovered the task via `task_get`, `context_get`,
-`task_collaboration`, and `handoff_get`, then claimed executor, started a distinct Run,
+access to A's Codex conversation; after the control plane assigned it a distinct Run, it
+recovered the task via `task_get`, `memory_get`, `task_collaboration`, and `handoff_get`,
 accepted the handoff, replied to A's directed message with the same correlation ID, checkpointed
 the reconstructed state, and completed the task. The persisted handoff's
 `accepted_by_run_id` points to B's Run, and the reply's `reply_to_message_id` points to A's
@@ -222,33 +222,10 @@ registration remains available before a caller has an instance ID. Missing/inval
 headers and invalid counts return 400; cross-instance mutation returns 409; missing
 identities return 404. Nullable account/machine links appear as `null` in fleet results.
 
-MCP exposes `agent_profile_register/list/get`, `account_register/list/get`,
-`machine_register/list/get`, `agent_instance_register`, `agent_heartbeat`,
-`capacity_record/latest/history`, and `agent_fleet` (slash notation lists separate
-tools). Identity registrations take the fields directly, and identity get tools take
-`{id}`. Heartbeat/capacity recording takes `{agent_instance_id, input}` where `input`
-matches the REST body. Capacity reads take `{agent_instance_id}`; lists and fleet have
-no arguments. The request header supplies the actor, independently of the target ID.
-
-Example heartbeat MCP arguments, using the returned instance UUID and matching header:
-
-```json
-{
-  "agent_instance_id": "<instance-uuid>",
-  "input": {
-    "status": "online",
-    "capacity": {
-      "status": "available",
-      "available_slots": 1,
-      "active_assignments": 0,
-      "active_runs": 0,
-      "max_concurrency": 1,
-      "quota_state": "unknown",
-      "details": {"source": "worker-report"}
-    }
-  }
-}
-```
+Agent/profile/account/machine registration, heartbeat, capacity, and fleet inspection are
+control-plane operations exposed through REST and the Web UI. They are intentionally absent
+from employee MCP. A provider worker or Morrows-owned bridge reports heartbeat/capacity on
+behalf of the managed runtime; an employee agent cannot register or advertise itself through MCP.
 
 The Fleet UI polls the joined endpoint and shows profile, account, machine, instance
 status, capabilities, heartbeat age, and latest capacity with its own observation age.
@@ -312,11 +289,10 @@ REST additions under `/api`:
 | GET | `/tasks/{id}/dispatch-decisions` | Read append-only decision history |
 | POST | `/dispatch/next/{role}` | Dispatch the highest-priority eligible task |
 
-MCP exposes the matching `dispatch_policy_list/set/get`, `dispatch_preview`,
-`dispatch_task`, `dispatch_next`, and `dispatch_decisions` tools. These are
-control-plane operations and do not require pretending the dispatcher is the selected
-worker. The resulting Assignment is still owned by the selected AgentInstance, so
-subsequent run mutations retain the existing identity checks.
+Dispatcher policy, preview, dispatch, and decision history are control-plane REST/Web UI
+operations. They are intentionally absent from employee MCP. The resulting Assignment is
+owned by the selected AgentInstance; employee MCP can only renew that existing Assignment
+and report on its Run.
 
 The Work Queue marks tasks with enabled executor policies. Task Detail can edit the
 basic capability/lease policy, preview concrete candidate rejection reasons, dispatch
@@ -348,18 +324,17 @@ and kills its child. On restart, the daemon marks interrupted local attempts fai
 and restores claimed jobs whose attempts had not started. It cannot safely identify
 and kill an orphan process after an unclean OS crash.
 
-`lsm_external`, `antigravity_external`, `gemini_external`, and `codebuddy_external` profiles contain no
-executable or workspace. Enqueue writes an `awaiting_agent` attempt. The bound agent
-polls `external_launch_list` over MCP and calls `external_launch_accept` with its
-external session reference. Acceptance creates its Run atomically. The agent then
-reads `task_get`, `context_get`, and `launch_instructions`, checkpoints progress,
-and calls `run_complete` when done. The worker reconciles terminal Runs and expired
-assignments. These adapters do not open a product UI or start a provider process.
+`lsm_external`, `antigravity_external`, `gemini_external`, and `codebuddy_external`
+profiles contain no executable or workspace. Enqueue writes an `awaiting_agent` attempt.
+Listing/accepting those invitations is now a control-plane REST/provider-bridge
+responsibility rather than an employee MCP operation. Once Morrows has created the
+Assignment and Run, the agent uses `task_get`, `memory_get`, `instructions_get`,
+checkpoints progress, and calls `run_complete` when done. These compatibility adapters
+still do not open a product UI or start a provider process.
 
-`launch_instruction_send` creates a durable, ordered mailbox entry and audit event.
-Agents read it with `launch_instructions`; a running Codex process must poll the MCP
-tool, since the CLI has no live turn injection in this adapter. On resume, all
-instructions are included in the new prompt.
+`launch_instruction_send` remains a control-plane mailbox operation. Employees read the
+ordered task instruction history with `instructions_get`; on resume, launch adapters also
+include prior instructions in the new prompt.
 
 Process exit is distinct from semantic completion. `run_complete` wins if already
 committed. A zero exit without it pauses the Run, releases the Assignment, and
@@ -380,8 +355,8 @@ REST additions under `/api`:
 | GET | `/tasks/{id}/launch-attempts` | Task launch history |
 | GET | `/tasks/{id}/launch-instructions` | Task instruction history |
 
-MCP exposes the corresponding profile, attempt, instruction, stop, external list,
-and external accept tools. The Web Task Detail view supports launch/invite, resume,
-instruction send, stop, and status. Dispatch and launch remain explicit separate
-actions. Authentication and remote process launch belong to the later deployment
-milestone.
+Launch profiles, attempts, enqueue/stop, instruction sending, and external invitation
+acceptance are control-plane REST/Web UI operations and are intentionally absent from
+employee MCP. The Web Task Detail view supports launch/invite, resume, instruction send,
+stop, and status. Dispatch and launch remain explicit separate actions. Authentication
+and remote process launch belong to the later deployment milestone.

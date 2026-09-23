@@ -2,24 +2,20 @@
 
 Local-first, agent-native work coordination for humans and multiple AI agent products/accounts.
 
-The current local vertical slice is:
+The current local vertical slice separates company control from employee operations:
 
 ```
-Human Web UI
-    ↓
-Task
-    ↓
-MCP Agent
-    ↓
-Assignment lease
-    ↓
-Run
-    ↓
-Checkpoint
-    ↓
-Complete
-    ↓
-Append-only event timeline
+Human / Web UI / automation
+          ↓ REST
+   Morrows control plane
+   ├─ registry / fleet
+   ├─ dispatcher
+   ├─ assignment / Run lifecycle
+   └─ provider launch adapters
+          ↓
+        Agent
+          ↓ employee MCP
+   work / memory / collaboration / reporting
 ```
 
 ## Current implementation
@@ -44,7 +40,7 @@ Append-only event timeline
 - Explainable capacity-aware Dispatcher with atomic Assignment creation
 - Durable executor LaunchProfile / LaunchAttempt records and background launch jobs
 - Safe Codex CLI launch, session resume, stop, and Run/session reconciliation
-- Durable launch instructions, visible in the Web UI and over MCP
+- Durable launch instructions, visible in the Web UI and over the employee MCP
 - External handoff adapters for LSM, Antigravity, and Gemini with owned accept/status
 - Startup recovery for interrupted local launch jobs
 - Optional LSM Run integration: one durable Logical Session per Run, scoped Codex MCP access, separate control API, execution evidence, explicit restart and bounded cleanup
@@ -101,43 +97,37 @@ or:
 
 ## MCP
 
-Streamable HTTP endpoint:
+Morrows exposes a Streamable HTTP MCP endpoint for **employee operations**, not for company administration:
 
 ```
 http://127.0.0.1:8787/mcp
 ```
 
-Register explicit identities with `agent_profile_register`, `account_register`, and `machine_register`, then use `agent_instance_register` to link a worker. Legacy `agent_register(name, capabilities)` remains supported and returns the same AgentInstance UUID on refresh. See [M3 identity and capacity](docs/architecture.md#m3-identity-and-capacity) for fields, REST routes, and compatibility details. For mutation tools such as `task_claim`, `assignment_renew`, `run_start`, `run_checkpoint`, and `run_complete`, send the returned UUID in:
+Every MCP call uses the already-provisioned employee identity:
 
 ```
 X-Agent-Instance-Id: <uuid>
 ```
 
-The server obtains actor identity from the transport request instead of trusting an `agent_id` supplied in the tool arguments.
+The MCP surface intentionally does **not** expose agent/profile/account/machine registration, fleet state, capacity, dispatch policy, dispatch, assignment claiming, Run creation, launch profile management, launch/cancel operations, or dependency graph administration. Those remain control-plane responsibilities through REST/store/provider adapters.
 
-M4 adds `dispatch_policy_list/set/get`, `dispatch_preview`, `dispatch_task`, `dispatch_next`, and `dispatch_decisions`. Dispatch creates an Assignment only; it deliberately does not start or resume an external agent process.
+Employee MCP tools currently cover:
 
-M5 keeps that boundary and adds explicit launch operations: `launch_profile_register/list/get`,
-`launch_enqueue`, `launch_attempt_get`, `task_launch_attempts`, `launch_stop`,
-`launch_instruction_send`, and `launch_instructions`. The `codex_cli` adapter uses an
-operator-controlled program and workspace, sends task text through stdin, captures logs and
-session IDs, and can resume a previous finished attempt for the same task/agent/profile.
-Stopping revokes the assignment and kills the child process owned by this daemon. A normal
-process exit without `run_complete` returns the task to `ready` in legacy launcher mode.
-With LSM integration enabled, an unexpected exit interrupts the same Run for an explicit
-restart within the configured grace period. See [LSM runtime integration](docs/lsm-runtime.md).
+- `work_request_submit`: submit a new work request without choosing priority, assignee, or launcher.
+- `task_get`: read work owned by or assigned to the caller.
+- `memory_get` / `memory_revise`: pull or revise durable task working memory. `memory_get` includes current context, collaboration records, and the caller's Run history.
+- `instructions_get`: read management instructions attached to the caller's work.
+- `artifact_create`, `decision_create`, `thread_create`, `message_create`: record work products and collaboration.
+- `handoff_create`, `handoff_get`, `handoff_accept`, `task_collaboration`: continue work across employees without sharing provider chat history.
+- `assignment_renew`, `run_checkpoint`, `run_complete`, `task_events`: maintain an existing assignment and report progress/completion.
 
-`lsm_external`, `antigravity_external`, `gemini_external`, and `codebuddy_external` have no executable path. Enqueue
-creates an `awaiting_agent` invitation. The matching AgentInstance reads
-`external_launch_list` through MCP, calls `external_launch_accept` with its session reference,
-then uses the existing Run checkpoint/complete tools. It can read new instructions with
-`launch_instructions`; the daemon reconciles completed Runs and expired assignments. These
-adapters track work across product accounts and sessions without claiming a provider-specific
-automation interface that is not available.
+Task-scoped MCP reads and collaboration writes verify that the caller owns the submitted request or has an Assignment history for that Task. MCP can report or collaborate on work, but it cannot create its own Assignment or Run.
+
+External adapters such as `lsm_external`, `antigravity_external`, `gemini_external`, and `codebuddy_external` remain compatibility launch backends. Their lifecycle endpoints are control-plane REST operations; they are no longer exposed as employee MCP tools. Provider-specific active launch adapters should be preferred when an automation API/CLI exists.
 
 `MORROWS_*` settings take precedence; the former `AC_*` settings remain accepted during migration.
 
-This header is an identity binding mechanism for the local-only daemon, not authentication. A later milestone will replace it with issued credentials/tokens before remote exposure.
+`X-Agent-Instance-Id` is still only an identity binding mechanism for the current local-only daemon, not remote authentication. A later milestone will replace it with issued credentials/tokens before remote exposure.
 
 ## Core invariant
 
@@ -154,4 +144,4 @@ Task identity is independent of model, account, machine, and conversation/sessio
 
 ## Live handoff validation
 
-M2.1 was exercised with two separate `codex-personal` CLI sessions and two distinct AgentInstances. Agent A created a typed artifact, decision, directed message, and pending handoff, which released A's assignment and ended A's Run as handed off. Agent B reconstructed the state through MCP only, claimed the task, started a new Run, accepted the handoff, replied in the original thread, checkpointed the recovered state, and completed the task. No Codex session/chat history was shared between A and B.
+M2.1 was exercised with two separate `codex-personal` CLI sessions and two distinct AgentInstances. Agent A created a typed artifact, decision, directed message, and pending handoff, which released A's assignment and ended A's Run as handed off. After the control plane assigned Agent B and created its Run, B reconstructed the state through employee MCP only, accepted the handoff, replied in the original thread, checkpointed the recovered state, and completed the task. No Codex session/chat history was shared between A and B.
