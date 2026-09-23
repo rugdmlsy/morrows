@@ -2,6 +2,7 @@ mod collaboration;
 mod dispatch;
 mod fleet;
 mod launch;
+mod lsm;
 mod mcp;
 
 use anyhow::Context;
@@ -167,6 +168,10 @@ async fn main() -> anyhow::Result<()> {
     let launch_store = store.clone();
     tokio::spawn(async move {
         launch::worker_loop(launch_store).await;
+    });
+    let runtime_store = store.clone();
+    tokio::spawn(async move {
+        launch::runtime_sweep(runtime_store).await;
     });
 
     let web_dir = env::var("MORROWS_WEB_DIR")

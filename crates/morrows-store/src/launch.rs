@@ -377,9 +377,10 @@ impl Store {
             ));
         }
         let running: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM runs WHERE assignment_id=? AND status IN ('running','paused'))",
+            "SELECT EXISTS(SELECT 1 FROM runs WHERE assignment_id=? AND status IN ('running','paused','interrupted','cleanup_pending','cancelling') AND id!=COALESCE(?,'') )",
         )
         .bind(assignment.id.to_string())
+        .bind(attempt.restart_run_id.map(|id| id.to_string()))
         .fetch_one(&mut *tx)
         .await
         .map_err(storage)?;
@@ -389,19 +390,57 @@ impl Store {
             ));
         }
 
-        let run_id = Uuid::new_v4();
-        sqlx::query(
-            "INSERT INTO runs(id,task_id,assignment_id,agent_instance_id,status,started_at)
-             VALUES(?,?,?,?,'running',?)",
-        )
-        .bind(run_id.to_string())
-        .bind(assignment.task_id.to_string())
-        .bind(assignment.id.to_string())
-        .bind(assignment.agent_instance_id.to_string())
-        .bind(now.to_rfc3339())
-        .execute(&mut *tx)
-        .await
-        .map_err(storage)?;
+        let run_id = if let Some(run_id) = attempt.restart_run_id {
+            let deadline: Option<String> = sqlx::query_scalar(
+                "SELECT restart_deadline_at FROM run_lsm_bindings WHERE run_id=?",
+            )
+            .bind(run_id.to_string())
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(storage)?
+            .ok_or_else(|| DomainError::Conflict("restart requires an LSM-bound Run".into()))?;
+            let resumed = sqlx::query(
+                "UPDATE runs SET status='running',stop_reason=NULL WHERE id=? AND assignment_id=? AND status='interrupted'",
+            )
+            .bind(run_id.to_string())
+            .bind(assignment.id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?;
+            if resumed.rows_affected() != 1
+                || deadline
+                    .as_deref()
+                    .is_none_or(|value| value <= now.to_rfc3339().as_str())
+            {
+                return Err(DomainError::Conflict(
+                    "Run restart window has expired".into(),
+                ));
+            }
+            sqlx::query(
+                "UPDATE run_lsm_bindings SET restart_deadline_at=NULL,updated_at=? WHERE run_id=?",
+            )
+            .bind(now.to_rfc3339())
+            .bind(run_id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?;
+            run_id
+        } else {
+            let run_id = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO runs(id,task_id,assignment_id,agent_instance_id,status,started_at)
+                 VALUES(?,?,?,?,'running',?)",
+            )
+            .bind(run_id.to_string())
+            .bind(assignment.task_id.to_string())
+            .bind(assignment.id.to_string())
+            .bind(assignment.agent_instance_id.to_string())
+            .bind(now.to_rfc3339())
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?;
+            run_id
+        };
         sqlx::query(
             "UPDATE launch_attempts SET status='starting',run_id=?,started_at=? WHERE id=? AND status='queued'",
         )
@@ -417,7 +456,7 @@ impl Store {
             "launcher",
             "run",
             run_id,
-            "run.started",
+            if attempt.restart_run_id.is_some() { "run.restarted" } else { "run.started" },
             json!({"task_id":assignment.task_id,"assignment_id":assignment.id,"launch_attempt_id":id}),
             None,
         )
@@ -568,24 +607,61 @@ impl Store {
                     .fetch_optional(&mut *tx)
                     .await
                     .map_err(storage)?;
-            if matches!(run_status.as_deref(), Some("running") | Some("paused")) {
-                let new_run_status = if success { "paused" } else { "failed" };
-                let stop_reason = if success {
-                    "launcher_process_exited_without_completion".to_owned()
-                } else {
-                    error
-                        .clone()
-                        .unwrap_or_else(|| format!("launcher_exit_{}", exit_code.unwrap_or(-1)))
-                };
-                sqlx::query("UPDATE runs SET status=?,stop_reason=?,ended_at=? WHERE id=?")
-                    .bind(new_run_status)
-                    .bind(&stop_reason)
-                    .bind(now.to_rfc3339())
-                    .bind(run_id.to_string())
+            if run_status.as_deref() == Some("cancelling") {
+                sqlx::query("UPDATE launch_attempts SET status='cancelled' WHERE id=?")
+                    .bind(id.to_string())
                     .execute(&mut *tx)
                     .await
                     .map_err(storage)?;
-                append_event_tx(
+                if let Some(job_id) = attempt.job_id {
+                    sqlx::query("UPDATE jobs SET status='cancelled' WHERE id=?")
+                        .bind(job_id.to_string())
+                        .execute(&mut *tx)
+                        .await
+                        .map_err(storage)?;
+                }
+            }
+            if matches!(run_status.as_deref(), Some("running") | Some("paused")) {
+                let lsm_bound: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM run_lsm_bindings WHERE run_id=?)",
+                )
+                .bind(run_id.to_string())
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(storage)?;
+                if lsm_bound {
+                    let deadline = now + Duration::seconds(agent_restart_grace_seconds());
+                    let reason = error
+                        .clone()
+                        .unwrap_or_else(|| format!("launcher_exit_{}", exit_code.unwrap_or(-1)));
+                    sqlx::query("UPDATE runs SET status='interrupted',stop_reason=?,ended_at=NULL WHERE id=?")
+                        .bind(&reason).bind(run_id.to_string()).execute(&mut *tx).await.map_err(storage)?;
+                    sqlx::query("UPDATE run_lsm_bindings SET restart_deadline_at=?,updated_at=? WHERE run_id=?")
+                        .bind(deadline.to_rfc3339()).bind(now.to_rfc3339()).bind(run_id.to_string())
+                        .execute(&mut *tx).await.map_err(storage)?;
+                    sqlx::query("UPDATE assignments SET expires_at=MAX(expires_at,?),renewed_at=? WHERE id=? AND status='active'")
+                        .bind(deadline.to_rfc3339()).bind(now.to_rfc3339()).bind(attempt.assignment_id.to_string())
+                        .execute(&mut *tx).await.map_err(storage)?;
+                    append_event_tx(&mut tx,"system","launcher","run",run_id,"run.interrupted",
+                        json!({"launch_attempt_id":id,"restart_deadline_at":deadline,"reason":reason}),None).await?;
+                } else {
+                    let new_run_status = if success { "paused" } else { "failed" };
+                    let stop_reason = if success {
+                        "launcher_process_exited_without_completion".to_owned()
+                    } else {
+                        error
+                            .clone()
+                            .unwrap_or_else(|| format!("launcher_exit_{}", exit_code.unwrap_or(-1)))
+                    };
+                    sqlx::query("UPDATE runs SET status=?,stop_reason=?,ended_at=? WHERE id=?")
+                        .bind(new_run_status)
+                        .bind(&stop_reason)
+                        .bind(now.to_rfc3339())
+                        .bind(run_id.to_string())
+                        .execute(&mut *tx)
+                        .await
+                        .map_err(storage)?;
+                    append_event_tx(
                     &mut tx,
                     "system",
                     "launcher",
@@ -596,19 +672,20 @@ impl Store {
                     None,
                 )
                 .await?;
-                release_launcher_assignment_tx(
-                    &mut tx,
-                    attempt.assignment_id,
-                    attempt.task_id,
-                    attempt.agent_instance_id,
-                    if success {
-                        "launcher_process_exited"
-                    } else {
-                        "launcher_failed"
-                    },
-                    now,
-                )
-                .await?;
+                    release_launcher_assignment_tx(
+                        &mut tx,
+                        attempt.assignment_id,
+                        attempt.task_id,
+                        attempt.agent_instance_id,
+                        if success {
+                            "launcher_process_exited"
+                        } else {
+                            "launcher_failed"
+                        },
+                        now,
+                    )
+                    .await?;
+                }
             }
         } else if !success {
             release_launcher_assignment_tx(
@@ -923,6 +1000,19 @@ impl Store {
                 .map_err(storage)?
                 .ok_or_else(|| DomainError::NotFound("launch attempt".into()))?,
         )?;
+        if let Some(run_id) = attempt.run_id {
+            let lsm_bound: bool =
+                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM run_lsm_bindings WHERE run_id=?)")
+                    .bind(run_id.to_string())
+                    .fetch_one(&mut *tx)
+                    .await
+                    .map_err(storage)?;
+            if lsm_bound {
+                return Err(DomainError::Conflict(
+                    "LSM-bound Run must use Run cancellation".into(),
+                ));
+            }
+        }
         if matches!(
             attempt.status.as_str(),
             "completed" | "failed" | "cancelled"
@@ -988,11 +1078,14 @@ impl Store {
     }
 
     pub async fn launch_stop_requested(&self, id: Id) -> Result<bool, DomainError> {
-        let status: String = sqlx::query_scalar("SELECT status FROM launch_attempts WHERE id=?")
-            .bind(id.to_string())
-            .fetch_one(&self.pool)
-            .await
-            .map_err(storage)?;
+        let status: String = sqlx::query_scalar(
+            "SELECT CASE WHEN r.status='cancelling' THEN 'cancelled' ELSE a.status END
+             FROM launch_attempts a LEFT JOIN runs r ON r.id=a.run_id WHERE a.id=?",
+        )
+        .bind(id.to_string())
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage)?;
         Ok(status == "cancelled")
     }
 
@@ -1064,6 +1157,14 @@ impl Store {
         .map_err(storage)?;
         Ok(rows.len())
     }
+}
+
+fn agent_restart_grace_seconds() -> i64 {
+    std::env::var("MORROWS_AGENT_RESTART_GRACE_SECONDS")
+        .ok()
+        .and_then(|value| value.parse::<i64>().ok())
+        .filter(|seconds| *seconds > 0)
+        .unwrap_or(600)
 }
 
 async fn release_launcher_assignment_tx(
@@ -1170,6 +1271,7 @@ fn row_to_launch_attempt(row: sqlx::sqlite::SqliteRow) -> Result<LaunchAttempt, 
         resume_from_attempt_id: parse_opt_id(
             row.try_get("resume_from_attempt_id").map_err(storage)?,
         )?,
+        restart_run_id: parse_opt_id(row.try_get("restart_run_id").map_err(storage)?)?,
         status: row.try_get("status").map_err(storage)?,
         cwd: row.try_get("cwd").map_err(storage)?,
         external_session_ref: row.try_get("external_session_ref").map_err(storage)?,

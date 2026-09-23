@@ -119,6 +119,7 @@ pub struct Run {
     pub external_session_ref: Option<String>,
     pub status: String,
     pub stop_reason: Option<String>,
+    pub failure_reason: Option<String>,
     pub checkpoint: Option<Value>,
     pub result: Option<Value>,
     pub started_at: DateTime<Utc>,

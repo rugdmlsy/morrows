@@ -395,6 +395,13 @@ async fn evaluate_dispatch_conn(
     if state != "ready" && state != "in_progress" {
         task_reasons.push(format!("task_state:{state}"));
     }
+    let cleanup_blocked: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM runs WHERE task_id=? AND status IN ('interrupted','cleanup_pending','cancelling'))",
+    )
+    .bind(task_id.to_string()).fetch_one(&mut *conn).await.map_err(storage)?;
+    if cleanup_blocked {
+        task_reasons.push("runtime_cleanup_pending".into());
+    }
     if !policy.enabled {
         task_reasons.push("policy_disabled".into());
     }
@@ -594,7 +601,9 @@ async fn expire_stale_tx(
 ) -> Result<(), DomainError> {
     let rows = sqlx::query(
         "SELECT id,task_id,agent_instance_id FROM assignments
-         WHERE status='active' AND expires_at<=?",
+         WHERE status='active' AND expires_at<=?
+           AND NOT EXISTS(SELECT 1 FROM runs WHERE runs.assignment_id=assignments.id
+                           AND runs.status IN ('interrupted','cleanup_pending','cancelling'))",
     )
     .bind(now.to_rfc3339())
     .fetch_all(&mut **tx)

@@ -56,6 +56,7 @@ pub struct LaunchAttempt {
     pub run_id: Option<Id>,
     pub job_id: Option<Id>,
     pub resume_from_attempt_id: Option<Id>,
+    pub restart_run_id: Option<Id>,
     pub status: String,
     pub cwd: Option<String>,
     pub external_session_ref: Option<String>,
@@ -67,6 +68,36 @@ pub struct LaunchAttempt {
     pub created_at: DateTime<Utc>,
     pub started_at: Option<DateTime<Utc>>,
     pub ended_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunLsmBinding {
+    pub run_id: Id,
+    pub logical_session_id: String,
+    pub capability_id: Option<String>,
+    pub restart_deadline_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AttachExecutionEvidence {
+    #[schemars(with = "Option<String>")]
+    pub event_id: Option<Id>,
+    pub kind: String,
+    pub reference: String,
+    pub start_seq: Option<i64>,
+    pub end_seq: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunExecutionEvidence {
+    pub id: Id,
+    pub run_id: Id,
+    pub event_id: Option<Id>,
+    pub kind: String,
+    pub reference: String,
+    pub start_seq: Option<i64>,
+    pub end_seq: Option<i64>,
+    pub created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

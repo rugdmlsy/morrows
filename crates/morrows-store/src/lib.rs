@@ -11,6 +11,8 @@ use sqlx::{
 use std::{str::FromStr, time::Duration as StdDuration};
 use uuid::Uuid;
 
+mod runtime;
+
 #[derive(Clone)]
 pub struct Store {
     pool: SqlitePool,
@@ -117,6 +119,15 @@ impl Store {
                     "task has unfinished dependencies".into(),
                 ));
             }
+        }
+        let cleanup_blocked: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM runs WHERE task_id=? AND status IN ('interrupted','cleanup_pending','cancelling'))",
+        )
+        .bind(task_id.to_string()).fetch_one(&mut *tx).await.map_err(storage)?;
+        if cleanup_blocked {
+            return Err(DomainError::Conflict(
+                "Task has an interrupted or cleaning Run".into(),
+            ));
         }
 
         // BEGIN IMMEDIATE keeps prerequisite checks and the role claim atomic.
@@ -275,7 +286,8 @@ impl Store {
 
     pub async fn expire_stale_assignments(&self) -> Result<u64, DomainError> {
         let now = Utc::now();
-        let rows=sqlx::query("SELECT id,task_id,agent_instance_id FROM assignments WHERE status='active' AND expires_at<=?")
+        let rows=sqlx::query("SELECT id,task_id,agent_instance_id FROM assignments WHERE status='active' AND expires_at<=?
+            AND NOT EXISTS(SELECT 1 FROM runs WHERE runs.assignment_id=assignments.id AND runs.status IN ('interrupted','cleanup_pending','cancelling'))")
             .bind(now.to_rfc3339()).fetch_all(&self.pool).await.map_err(storage)?;
         if rows.is_empty() {
             return Ok(0);
@@ -643,14 +655,21 @@ fn row_to_assignment(row: sqlx::sqlite::SqliteRow) -> Result<Assignment, DomainE
 }
 
 fn row_to_run(row: sqlx::sqlite::SqliteRow) -> Result<Run, DomainError> {
+    let status: String = row.try_get("status").map_err(storage)?;
+    let stop_reason: Option<String> = row.try_get("stop_reason").map_err(storage)?;
     Ok(Run {
         id: parse_id(row.try_get("id").map_err(storage)?)?,
         task_id: parse_id(row.try_get("task_id").map_err(storage)?)?,
         assignment_id: parse_id(row.try_get("assignment_id").map_err(storage)?)?,
         agent_instance_id: parse_id(row.try_get("agent_instance_id").map_err(storage)?)?,
         external_session_ref: row.try_get("external_session_ref").map_err(storage)?,
-        status: row.try_get("status").map_err(storage)?,
-        stop_reason: row.try_get("stop_reason").map_err(storage)?,
+        failure_reason: if status == "failed" {
+            stop_reason.clone()
+        } else {
+            None
+        },
+        status,
+        stop_reason,
         checkpoint: parse_opt_json(row.try_get("checkpoint_json").map_err(storage)?)?,
         result: parse_opt_json(row.try_get("result_json").map_err(storage)?)?,
         started_at: parse_dt(row.try_get("started_at").map_err(storage)?)?,

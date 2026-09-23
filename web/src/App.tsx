@@ -96,10 +96,26 @@ type Run = {
   external_session_ref?: string | null;
   status: string;
   stop_reason?: string | null;
+  failure_reason?: string | null;
   checkpoint?: unknown;
   result?: unknown;
   started_at: string;
   ended_at?: string | null;
+};
+
+type RunExecution = {
+  binding: {
+    logical_session_id: string;
+    restart_deadline_at?: string | null;
+  } | null;
+  observation: {
+    error?: string;
+    session?: { status: string; machines_touched: string[]; in_flight_calls: number };
+    jobs?: { jobs: { job_id: string; name: string; status: string; machine: string; exit_code?: number | null }[]; complete: boolean; unreachable_machines: string[] };
+    shells?: { shells: { session_id: string; machine: string; backend?: string }[]; complete: boolean; unreachable_machines: string[] };
+    audit?: { entries: { id: string; tool?: string; event: string; status?: string; ts: number; input?: unknown; output?: unknown }[] };
+  } | null;
+  evidence?: { id: string; event_id?: string | null; kind: string; reference: string; start_seq?: number | null; end_seq?: number | null }[];
 };
 
 type ContextRevision = {
@@ -246,6 +262,9 @@ export default function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [assignments, setAssignments] = useState<Assignment[]>([]);
   const [runs, setRuns] = useState<Run[]>([]);
+  const [openRunId, setOpenRunId] = useState<string | null>(null);
+  const [runExecutions, setRunExecutions] = useState<Record<string, RunExecution>>({});
+  const [jobOutputs, setJobOutputs] = useState<Record<string, string>>({});
   const [events, setEvents] = useState<EventItem[]>([]);
   const [collaboration, setCollaboration] = useState<Collaboration | null>(null);
   const [context, setContext] = useState<ContextRevision | null>(null);
@@ -318,10 +337,15 @@ export default function App() {
       setDispatchDecisions(nextDispatchDecisions);
       setLaunchAttempts(nextLaunchAttempts);
       setLaunchInstructions(nextLaunchInstructions);
+      if (openRunId && nextRuns.some((run) => run.id === openRunId)) {
+        void api<RunExecution>(`/api/runs/${openRunId}/execution`)
+          .then((execution) => setRunExecutions((current) => ({ ...current, [openRunId]: execution })))
+          .catch(() => {});
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
-  }, [selectedId]);
+  }, [selectedId, openRunId]);
 
   useEffect(() => {
     void refreshBase();
@@ -467,6 +491,43 @@ export default function App() {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLaunchBusy(false);
+    }
+  }
+
+  async function toggleRunExecution(runId: string) {
+    if (openRunId === runId) {
+      setOpenRunId(null);
+      return;
+    }
+    setOpenRunId(runId);
+    try {
+      const execution = await api<RunExecution>(`/api/runs/${runId}/execution`);
+      setRunExecutions((current) => ({ ...current, [runId]: execution }));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  async function mutateRun(runId: string, action: "restart" | "cancel") {
+    setLaunchBusy(true);
+    try {
+      await api(`/api/runs/${runId}/${action}`, { method: "POST", body: "null" });
+      await Promise.all([refreshBase(), refreshDetail()]);
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLaunchBusy(false);
+    }
+  }
+
+  async function loadJobOutput(runId: string, jobId: string, machine: string) {
+    const key = `${runId}:${jobId}`;
+    try {
+      const result = await api<{ output: string }>(`/api/runs/${runId}/jobs/${jobId}/output?machine=${encodeURIComponent(machine)}`);
+      setJobOutputs((current) => ({ ...current, [key]: result.output || "" }));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -745,12 +806,63 @@ export default function App() {
 
                       <h3>{t("runs")}</h3>
                       <div className="stack">
-                        {runs.map((run) => (
-                          <div className="mini-card" key={run.id}>
-                            <div><code>{shortId(run.id)}</code><StateBadge state={run.status} locale={locale} /></div>
+                        {runs.map((run) => {
+                          const execution = runExecutions[run.id];
+                          const observation = execution?.observation;
+                          return <div className="mini-card run-card" key={run.id}>
+                            <div className="mini-card-row"><code>{shortId(run.id)}</code><StateBadge state={run.status} locale={locale} /></div>
                             <small>{run.external_session_ref || t("noExternalSession")} · {formatAge(locale, run.started_at)}</small>
-                          </div>
-                        ))}
+                            {(run.failure_reason || run.stop_reason) && <small>{formatState(locale, run.failure_reason || run.stop_reason || "")}</small>}
+                            <div className="run-actions">
+                              <button className="secondary" onClick={() => void toggleRunExecution(run.id)}>
+                                {openRunId === run.id ? t("hideExecution") : t("inspectExecution")}
+                              </button>
+                              {run.status === "interrupted" && <button className="secondary" disabled={launchBusy}
+                                onClick={() => void mutateRun(run.id, "restart")}>{t("restartRun")}</button>}
+                              {["running", "interrupted"].includes(run.status) && <button className="secondary" disabled={launchBusy}
+                                onClick={() => void mutateRun(run.id, "cancel")}>{t("cancelRun")}</button>}
+                            </div>
+                            {openRunId === run.id && <div className="run-execution">
+                              {!execution && <small>{t("executionUnavailable")}</small>}
+                              {execution?.binding && <>
+                                <small>{t("lsmSession")} · <code>{execution.binding.logical_session_id}</code></small>
+                                {execution.binding.restart_deadline_at && <small>{t("restartDeadline")} · {new Date(execution.binding.restart_deadline_at).toLocaleString(locale)}</small>}
+                              </>}
+                              {observation?.error && <p className="launch-error">{t("executionUnavailable")}：{observation.error}</p>}
+                              {observation?.session && <small>{t("executionNodes")} · {observation.session.machines_touched.join(", ") || "local"}</small>}
+                              {observation?.jobs && <section>
+                                <h4>{t("executionJobs")}</h4>
+                                {observation.jobs.jobs.length ? observation.jobs.jobs.map((job) => <div className="evidence-row" key={job.job_id}>
+                                  <span><code>{job.job_id}</code> · {job.name} · {job.machine} · {formatState(locale, job.status)}</span>
+                                  <button className="secondary" onClick={() => void loadJobOutput(run.id, job.job_id, job.machine)}>{t("showJobOutput")}</button>
+                                  {jobOutputs[`${run.id}:${job.job_id}`] !== undefined && <pre>{jobOutputs[`${run.id}:${job.job_id}`]}</pre>}
+                                </div>) : <small>{t("noExecutionEvidence")}</small>}
+                                {!observation.jobs.complete && <small>{t("partialExecution")}：{observation.jobs.unreachable_machines.join(", ")}</small>}
+                              </section>}
+                              {observation?.shells && <section>
+                                <h4>{t("executionShells")}</h4>
+                                {observation.shells.shells.map((shell) => <div className="evidence-row" key={shell.session_id}>
+                                  <code>{shell.session_id}</code> · {shell.machine} · {shell.backend || "shell"}
+                                </div>)}
+                                {!observation.shells.complete && <small>{t("partialExecution")}：{observation.shells.unreachable_machines.join(", ")}</small>}
+                              </section>}
+                              {execution?.evidence && <section>
+                                <h4>{t("linkedEvidence")}</h4>
+                                {execution.evidence.map((item) => <div className="evidence-row" key={item.id}>
+                                  <code>{item.event_id ? shortId(item.event_id) : shortId(run.id)}</code> · {item.kind} · {item.reference}
+                                  {item.start_seq !== null && item.start_seq !== undefined && ` · ${item.start_seq}–${item.end_seq ?? item.start_seq}`}
+                                </div>)}
+                              </section>}
+                              {observation?.audit && <section>
+                                <h4>{t("executionAudit")}</h4>
+                                {observation.audit.entries.slice(0, 30).map((entry) => <details className="evidence-row" key={entry.id}>
+                                  <summary>{entry.tool || entry.event} · {entry.status || ""} · {new Date(entry.ts * 1000).toLocaleString(locale)}</summary>
+                                  <pre>{JSON.stringify({ input: entry.input, output: entry.output }, null, 2)}</pre>
+                                </details>)}
+                              </section>}
+                            </div>}
+                          </div>;
+                        })}
                         {!runs.length && <div className="empty compact">{t("noRuns")}</div>}
                       </div>
                     </div>

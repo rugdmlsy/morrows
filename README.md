@@ -47,6 +47,7 @@ Append-only event timeline
 - Durable launch instructions, visible in the Web UI and over MCP
 - External handoff adapters for LSM, Antigravity, and Gemini with owned accept/status
 - Startup recovery for interrupted local launch jobs
+- Optional LSM Run integration: one durable Logical Session per Run, scoped Codex MCP access, separate control API, execution evidence, explicit restart and bounded cleanup
 - Chinese/English Web UI with Chinese as the first-visit default
 - SQLite durable jobs for launcher work; outbox remains reserved for later delivery automation
 
@@ -78,6 +79,11 @@ MORROWS_DATABASE_URL=sqlite://data/morrows.db
 MORROWS_BIND=127.0.0.1:8787
 MORROWS_WEB_DIR=web/dist
 MORROWS_LAUNCH_DIR=data/launches
+# Optional loopback LSM integration
+MORROWS_LSM_CONTROL_URL=http://127.0.0.1:8765
+MORROWS_LSM_CONTROL_KEY=<same value as LOCAL_SHELL_MCP_CONTROL_API_KEY>
+MORROWS_LSM_SUBJECT=local-mcp-client
+MORROWS_AGENT_RESTART_GRACE_SECONDS=600
 ```
 
 ## Test
@@ -117,7 +123,9 @@ M5 keeps that boundary and adds explicit launch operations: `launch_profile_regi
 operator-controlled program and workspace, sends task text through stdin, captures logs and
 session IDs, and can resume a previous finished attempt for the same task/agent/profile.
 Stopping revokes the assignment and kills the child process owned by this daemon. A normal
-process exit without `run_complete` returns the task to `ready`.
+process exit without `run_complete` returns the task to `ready` in legacy launcher mode.
+With LSM integration enabled, an unexpected exit interrupts the same Run for an explicit
+restart within the configured grace period. See [LSM runtime integration](docs/lsm-runtime.md).
 
 `lsm_external`, `antigravity_external`, and `gemini_external` have no executable path. Enqueue
 creates an `awaiting_agent` invitation. The matching AgentInstance reads

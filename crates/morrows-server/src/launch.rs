@@ -1,4 +1,6 @@
 use super::*;
+use crate::lsm::{AgentBinding, LsmControl};
+use axum::extract::Query;
 use morrows_core::*;
 use std::{
     path::{Path as FsPath, PathBuf},
@@ -13,6 +15,14 @@ pub fn routes() -> Router<AppState> {
         .route("/launch-attempts/enqueue", post(launch_enqueue))
         .route("/launch-attempts/{id}", get(launch_get))
         .route("/launch-attempts/{id}/stop", post(launch_stop))
+        .route("/runs/{id}/restart", post(run_restart))
+        .route("/runs/{id}/cancel", post(run_cancel))
+        .route("/runs/{id}/execution", get(run_execution))
+        .route(
+            "/runs/{id}/evidence",
+            get(run_evidence).post(attach_run_evidence),
+        )
+        .route("/runs/{id}/jobs/{job_id}/output", get(run_job_output))
         .route(
             "/launch-attempts/{id}/instructions",
             get(instruction_list).post(instruction_send),
@@ -62,7 +72,200 @@ async fn launch_stop(
     State(s): State<AppState>,
     Path(id): Path<Id>,
 ) -> Result<Json<Value>, ApiError> {
+    if let Some(run_id) = s.store.get_launch_attempt(id).await?.run_id
+        && s.store.run_lsm_binding(run_id).await?.is_some()
+    {
+        return Err(ApiError(DomainError::Conflict(
+            "LSM-bound Runs must be cancelled through /runs/{id}/cancel".into(),
+        )));
+    }
     Ok(Json(json!(s.store.stop_launch_attempt(id).await?)))
+}
+
+async fn run_restart(
+    State(s): State<AppState>,
+    Path(id): Path<Id>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(json!(s.store.enqueue_run_restart(id).await?)))
+}
+
+async fn run_cancel(
+    State(s): State<AppState>,
+    Path(id): Path<Id>,
+) -> Result<Json<Value>, ApiError> {
+    let control = LsmControl::from_env()
+        .map_err(|err| ApiError(DomainError::Storage(err.to_string())))?
+        .ok_or_else(|| {
+            ApiError(DomainError::Conflict(
+                "LSM control is not configured".into(),
+            ))
+        })?;
+    control
+        .revoke_for_run(&s.store, id)
+        .await
+        .map_err(|err| ApiError(DomainError::Storage(err.to_string())))?;
+    Ok(Json(json!(s.store.request_run_cancel(id).await?)))
+}
+
+async fn run_execution(
+    State(s): State<AppState>,
+    Path(id): Path<Id>,
+) -> Result<Json<Value>, ApiError> {
+    let binding = s.store.run_lsm_binding(id).await?;
+    let Some(binding) = binding else {
+        return Ok(Json(json!({"binding":null,"observation":null})));
+    };
+    let observation = match LsmControl::from_env() {
+        Ok(Some(control)) => match control.observe(&binding.logical_session_id).await {
+            Ok(data) => data,
+            Err(err) => json!({"error":err.to_string()}),
+        },
+        Ok(None) => json!({"error":"LSM control is not configured"}),
+        Err(err) => json!({"error":err.to_string()}),
+    };
+    let evidence = s.store.run_execution_evidence(id).await?;
+    Ok(Json(
+        json!({"binding":binding,"observation":observation,"evidence":evidence}),
+    ))
+}
+
+async fn run_evidence(
+    State(s): State<AppState>,
+    Path(id): Path<Id>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(json!(s.store.run_execution_evidence(id).await?)))
+}
+
+async fn attach_run_evidence(
+    State(s): State<AppState>,
+    Path(id): Path<Id>,
+    Json(input): Json<AttachExecutionEvidence>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(json!(
+        s.store.attach_run_execution_evidence(id, input).await?
+    )))
+}
+
+#[derive(Deserialize)]
+struct JobOutputQuery {
+    machine: Option<String>,
+}
+
+async fn run_job_output(
+    State(s): State<AppState>,
+    Path((id, job_id)): Path<(Id, String)>,
+    Query(query): Query<JobOutputQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let binding = s
+        .store
+        .run_lsm_binding(id)
+        .await?
+        .ok_or_else(|| ApiError(DomainError::NotFound("Run LSM binding".into())))?;
+    let control = LsmControl::from_env()
+        .map_err(|err| ApiError(DomainError::Storage(err.to_string())))?
+        .ok_or_else(|| {
+            ApiError(DomainError::Conflict(
+                "LSM control is not configured".into(),
+            ))
+        })?;
+    let output = control
+        .job_tail(
+            &binding.logical_session_id,
+            &job_id,
+            query.machine.as_deref().unwrap_or("local"),
+        )
+        .await
+        .map_err(|err| ApiError(DomainError::Storage(err.to_string())))?;
+    Ok(Json(output))
+}
+
+pub async fn runtime_sweep(store: Store) {
+    let Some(control) = (match LsmControl::from_env() {
+        Ok(control) => control,
+        Err(err) => {
+            tracing::error!(%err, "LSM control configuration is invalid");
+            return;
+        }
+    }) else {
+        return;
+    };
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+    loop {
+        interval.tick().await;
+        if let Err(err) = store.renew_interrupted_assignments().await {
+            tracing::error!(%err, "failed renewing interrupted Assignments");
+        }
+        if let Ok(runs) = store.interrupted_lsm_runs().await {
+            for run_id in runs {
+                if let Err(err) = control.revoke_for_run(&store, run_id).await {
+                    tracing::warn!(%run_id, %err, "failed revoking interrupted Agent capability");
+                }
+            }
+        }
+        if let Ok(runs) = store.due_interrupted_runs().await {
+            for run_id in runs {
+                if let Err(err) = store.begin_expired_cleanup(run_id).await {
+                    tracing::error!(%run_id, %err, "failed entering runtime cleanup");
+                }
+            }
+        }
+        if let Ok(runs) = store.pending_lsm_cleanup_runs().await {
+            for run_id in runs {
+                if store
+                    .has_active_launch_attempt(run_id)
+                    .await
+                    .unwrap_or(true)
+                {
+                    continue;
+                }
+                let Some(binding) = store.run_lsm_binding(run_id).await.ok().flatten() else {
+                    continue;
+                };
+                if let Err(err) = control.revoke_for_run(&store, run_id).await {
+                    tracing::warn!(%run_id, %err, "failed revoking Agent capability before cleanup");
+                    continue;
+                }
+                match control.cleanup(&binding.logical_session_id, false).await {
+                    Ok(true) => {
+                        if let Err(err) = store.complete_lsm_cleanup(run_id).await {
+                            tracing::error!(%run_id, %err, "failed recording completed cleanup");
+                        }
+                    }
+                    Ok(false) => tracing::warn!(%run_id, "LSM cleanup remains pending"),
+                    Err(err) => tracing::warn!(%run_id, %err, "LSM cleanup failed; will retry"),
+                }
+            }
+        }
+        if let Ok(runs) = store.completed_lsm_runs().await {
+            for run_id in runs {
+                if store
+                    .has_active_launch_attempt(run_id)
+                    .await
+                    .unwrap_or(true)
+                {
+                    continue;
+                }
+                let Some(binding) = store.run_lsm_binding(run_id).await.ok().flatten() else {
+                    continue;
+                };
+                if let Err(err) = control.revoke_for_run(&store, run_id).await {
+                    tracing::warn!(%run_id, %err, "failed revoking completed Agent capability");
+                    continue;
+                }
+                match control.cleanup(&binding.logical_session_id, true).await {
+                    Ok(true) => {
+                        if let Err(err) = store.mark_lsm_terminalized(run_id).await {
+                            tracing::error!(%run_id, %err, "failed recording Session finish");
+                        }
+                    }
+                    Ok(false) => tracing::warn!(%run_id, "LSM Session finish remains pending"),
+                    Err(err) => {
+                        tracing::warn!(%run_id, %err, "LSM Session finish failed; will retry")
+                    }
+                }
+            }
+        }
+    }
 }
 
 async fn instruction_list(
@@ -226,6 +429,17 @@ async fn execute_codex_with_root(
         anyhow::bail!("CODEX_HOME does not exist or is not a directory: {home}");
     }
 
+    let control = LsmControl::from_env()?;
+    let agent_binding = if let Some(control) = &control {
+        Some(
+            control
+                .provision_agent(&store, execution.run.id, &execution.task.title)
+                .await?,
+        )
+    } else {
+        None
+    };
+
     let dir = root.join(execution.attempt.id.to_string());
     fs::create_dir_all(&dir).await?;
     let stdout_path = dir.join("stdout.jsonl");
@@ -243,12 +457,15 @@ async fn execute_codex_with_root(
         None
     };
 
-    let args = codex_args(
+    let mut args = codex_args(
         &execution.profile,
         &cwd,
         last_message_path.to_string_lossy().as_ref(),
         resume_session.as_deref(),
     );
+    if let Some(binding) = &agent_binding {
+        inject_lsm_config(&mut args, binding);
+    }
     let mut command = Command::new(&execution.profile.program);
     command
         .args(&args)
@@ -257,6 +474,11 @@ async fn execute_codex_with_root(
         .stdout(Stdio::from(stdout_file))
         .stderr(Stdio::from(stderr_file))
         .kill_on_drop(true);
+    command.env_remove("MORROWS_LSM_CONTROL_KEY");
+    command.env_remove("LOCAL_SHELL_MCP_CONTROL_API_KEY");
+    if let Some(binding) = &agent_binding {
+        command.env("MORROWS_LSM_CAPABILITY", &binding.capability);
+    }
     if let Some(home) = execution.profile.codex_home.as_deref() {
         command.env("CODEX_HOME", home);
     }
@@ -275,7 +497,13 @@ async fn execute_codex_with_root(
         return Err(err.into());
     }
 
-    let prompt = build_prompt(&execution);
+    let mut prompt = build_prompt(&execution);
+    if let Some(binding) = &agent_binding {
+        prompt.push_str(&format!(
+            "\nLSM execution context: {}. Use only this Logical Session for LSM calls. Morrows owns Session lifecycle; do not start, finish, cancel, or delete it. LSM will reject old Session IDs from resumed conversation history.\n",
+            binding.logical_session_id,
+        ));
+    }
     if let Some(mut stdin) = child.stdin.take() {
         if let Err(err) = stdin.write_all(prompt.as_bytes()).await {
             let _ = child.kill().await;
@@ -296,6 +524,11 @@ async fn execute_codex_with_root(
             _ = poll.tick() => {
                 if store.launch_stop_requested(execution.attempt.id).await? {
                     let _ = child.kill().await;
+                    if let Some(control) = &control {
+                        control.revoke_for_run(&store, execution.run.id).await?;
+                    }
+                    store.finish_launch_attempt(execution.attempt.id, None, None,
+                        Some("run_cancel_requested".into())).await?;
                     return Ok(());
                 }
             }
@@ -326,10 +559,25 @@ async fn execute_codex_with_root(
                 .unwrap_or_else(|| "signal".into())
         ))
     };
+    if let Some(control) = &control {
+        control.revoke_for_run(&store, execution.run.id).await?;
+    }
     store
         .finish_launch_attempt(execution.attempt.id, exit_code, session_ref, error)
         .await?;
     Ok(())
+}
+
+fn inject_lsm_config(args: &mut Vec<String>, binding: &AgentBinding) {
+    let overrides = [
+        format!("mcp_servers.lsm.url=\"{}\"", binding.mcp_url),
+        "mcp_servers.lsm.env_http_headers.X-LSM-Session-Capability=\"MORROWS_LSM_CAPABILITY\""
+            .to_owned(),
+    ];
+    for value in overrides.into_iter().rev() {
+        args.insert(1, value);
+        args.insert(1, "-c".into());
+    }
 }
 
 fn launch_root() -> anyhow::Result<PathBuf> {
