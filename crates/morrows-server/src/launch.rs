@@ -707,7 +707,7 @@ AgentInstance: {agent}\n\
 Task ID: {task_id}\n\
 Assignment ID: {assignment_id}\n\
 Run ID: {run_id}\n\
-\nUse the configured Morrows MCP server as the durable source of truth. The Assignment and Run already exist; do not claim the task or start another Run. Before substantial work, read task_get and memory_get for Task ID {task_id}. Read instructions_get for management updates. Checkpoint meaningful progress to Run ID {run_id}. If the task is fully complete, call run_complete for Run ID {run_id}. If blocked or incomplete, checkpoint the blocker/progress and exit without calling run_complete.\n\
+\nUse the configured Morrows MCP server as the durable source of truth. The Assignment and Run already exist; do not claim the task or start another Run. Before substantial work, read task_get and memory_get for Task ID {task_id}. Read instructions_get for management updates. Also check conversation_inbox for direct company messages addressed to this AgentInstance; load a selected conversation with conversation_get and reply with conversation_reply when appropriate. Checkpoint meaningful progress to Run ID {run_id}. If the task is fully complete, call run_complete for Run ID {run_id}. If blocked or incomplete, checkpoint the blocker/progress and exit without calling run_complete.\n\
 \nTask title:\n{title}\n\
 \nTask description:\n{description}\n\
 \nContext goal:\n{goal}\n\

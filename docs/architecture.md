@@ -31,6 +31,9 @@ Task
  │     └── Message*
  ├── TaskDependency*
  └── Event*
+
+Conversation
+ └── ConversationMessage*
 ```
 
 AgentInstance remains the worker identity referenced by M1/M2 work. M3 links each instance to an AgentProfile and optional independent Account and Machine identities, with append-only CapacitySnapshots.
@@ -46,6 +49,42 @@ AgentInstance remains the worker identity referenced by M1/M2 work. M3 links eac
 7. Important actions append Events in the same transaction as state changes.
 8. A successful `executor` Run may mark its Task done; non-executor roles do not.
 9. Daemon restart does not erase Tasks, Runs, checkpoints, or pending durable jobs.
+10. Conversation list reads return summary metadata only; message history is a separate paged read.
+11. Direct conversation MCP access is scoped to the addressed AgentInstance.
+
+## Direct Agent conversations
+
+Direct human↔Agent chat is intentionally separate from Task collaboration. A
+`Conversation` belongs to one AgentInstance and stores only conversation metadata; its
+`ConversationMessage` rows are paged independently. This keeps the WebUI startup path
+lightweight and prevents opening the application from materializing every chat history.
+
+Control-plane REST:
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/conversations` | Summary list only: title, Agent, counts, last-message preview/time |
+| POST | `/conversations` | Create a direct conversation for an AgentInstance |
+| GET | `/conversations/{id}` | Conversation metadata |
+| GET | `/conversations/{id}/messages?limit=&before=&after=` | Lazy/paged history; before loads older, after loads newer |
+| POST | `/conversations/{id}/messages` | Queue a human message |
+
+The WebUI keeps an in-memory cache keyed by Conversation ID. Initial navigation fetches
+only summaries. Selecting a conversation fetches the latest page (currently 80 messages);
+switching away and back reuses the cache, the selected conversation alone polls with an
+`after` anchor, and earlier history is loaded only when requested with `before`.
+
+Employee MCP exposes `conversation_inbox`, `conversation_get`, and
+`conversation_reply`. Inbox returns only conversations that still have queued human
+messages for the authenticated AgentInstance. `conversation_get` enforces the target
+Agent identity and supports the same paging anchors. A reply atomically marks queued
+human messages in that conversation delivered and appends the Agent reply.
+
+Conversation messaging is durable but does not require an always-running Agent. If the
+target Agent already has a `starting` or `running` launch, Morrows writes a small
+launch instruction telling it to inspect that conversation. Otherwise the message remains
+queued and is picked up through `conversation_inbox` when the Agent next runs. This
+preserves the non-daemon Agent model while still enabling direct chat from the WebUI.
 
 ## Collaboration continuation
 

@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { FormEvent } from "react";
 import "./App.css";
+import AgentChat from "./AgentChat";
+import { api } from "./api";
 import {
   formatAge,
   formatDispatchReason,
@@ -234,18 +236,6 @@ type LaunchInstruction = {
   created_at: string;
 };
 
-async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, {
-    ...init,
-    headers: { "Content-Type": "application/json", ...(init?.headers || {}) },
-  });
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(text || `${response.status} ${response.statusText}`);
-  }
-  return response.json();
-}
-
 function shortId(id: string) {
   return id.slice(0, 8);
 }
@@ -256,7 +246,7 @@ function StateBadge({ state, locale }: { state: string; locale: Locale }) {
 
 export default function App() {
   const [locale, setLocale] = useState<Locale>(initialLocale);
-  const [view, setView] = useState<"queue" | "agents">("queue");
+  const [view, setView] = useState<"conversations" | "queue" | "agents">("conversations");
   const [tasks, setTasks] = useState<Task[]>([]);
   const [agents, setAgents] = useState<FleetEntry[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -283,6 +273,7 @@ export default function App() {
   const [dispatchBusy, setDispatchBusy] = useState(false);
   const [title, setTitle] = useState("");
   const [priority, setPriority] = useState(0);
+  const [chatAgentId, setChatAgentId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const selectedTask = useMemo(() => tasks.find((task) => task.id === selectedId) ?? null, [tasks, selectedId]);
@@ -293,16 +284,23 @@ export default function App() {
     document.documentElement.lang = locale;
   }, [locale]);
 
-  const refreshBase = useCallback(async () => {
+  const refreshFleet = useCallback(async () => {
     try {
-      const [nextTasks, nextAgents, nextPolicies, nextLaunchProfiles] = await Promise.all([
+      setAgents(await api<FleetEntry[]>("/api/agent-fleet"));
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }, []);
+
+  const refreshQueueBase = useCallback(async () => {
+    try {
+      const [nextTasks, nextPolicies, nextLaunchProfiles] = await Promise.all([
         api<Task[]>("/api/tasks"),
-        api<FleetEntry[]>("/api/agent-fleet"),
         api<DispatchPolicy[]>("/api/dispatch-policies"),
         api<LaunchProfile[]>("/api/launch-profiles"),
       ]);
       setTasks(nextTasks);
-      setAgents(nextAgents);
       setDispatchPolicies(nextPolicies);
       setLaunchProfiles(nextLaunchProfiles);
       if (!selectedId && nextTasks.length) setSelectedId(nextTasks[0].id);
@@ -313,7 +311,7 @@ export default function App() {
   }, [selectedId]);
 
   const refreshDetail = useCallback(async () => {
-    if (!selectedId) return;
+    if (view !== "queue" || !selectedId) return;
     try {
       const [nextAssignments, nextRuns, nextEvents, nextContext, nextCollaboration, nextPolicy, nextPreview, nextDispatchDecisions, nextLaunchAttempts, nextLaunchInstructions] = await Promise.all([
         api<Assignment[]>(`/api/tasks/${selectedId}/assignments`),
@@ -345,13 +343,20 @@ export default function App() {
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
-  }, [selectedId, openRunId]);
+  }, [view, selectedId, openRunId]);
 
   useEffect(() => {
-    void refreshBase();
-    const timer = window.setInterval(() => void refreshBase(), 3000);
+    void refreshFleet();
+    const timer = window.setInterval(() => void refreshFleet(), 5000);
     return () => window.clearInterval(timer);
-  }, [refreshBase]);
+  }, [refreshFleet]);
+
+  useEffect(() => {
+    if (view !== "queue") return;
+    void refreshQueueBase();
+    const timer = window.setInterval(() => void refreshQueueBase(), 3000);
+    return () => window.clearInterval(timer);
+  }, [view, refreshQueueBase]);
 
   useEffect(() => {
     void refreshDetail();
@@ -360,7 +365,7 @@ export default function App() {
   }, [refreshDetail]);
 
   useEffect(() => {
-    if (!selectedId) return;
+    if (view !== "queue" || !selectedId) return;
     void api<DispatchPolicy>(`/api/tasks/${selectedId}/dispatch-policy/executor`)
       .then((policy) => {
         setDispatchCapabilities(policy.required_capabilities.join(", "));
@@ -372,7 +377,7 @@ export default function App() {
         setDispatchEnabled(true);
         setDispatchLease(900);
       });
-  }, [selectedId]);
+  }, [view, selectedId]);
 
   async function saveDispatchPolicy() {
     if (!selectedId) return;
@@ -393,7 +398,7 @@ export default function App() {
           enabled: dispatchEnabled,
         }),
       });
-      await Promise.all([refreshBase(), refreshDetail()]);
+      await Promise.all([refreshQueueBase(), refreshDetail()]);
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -420,7 +425,7 @@ export default function App() {
     setDispatchBusy(true);
     try {
       await api(`/api/tasks/${selectedId}/dispatch/executor`, { method: "POST", body: "null" });
-      await Promise.all([refreshBase(), refreshDetail()]);
+      await Promise.all([refreshQueueBase(), refreshDetail()]);
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -433,7 +438,7 @@ export default function App() {
     setDispatchBusy(true);
     try {
       await api("/api/dispatch/next/executor", { method: "POST", body: "null" });
-      await Promise.all([refreshBase(), refreshDetail()]);
+      await Promise.all([refreshQueueBase(), refreshDetail()]);
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -453,7 +458,7 @@ export default function App() {
           resume_from_attempt_id: resumeFromAttemptId,
         }),
       });
-      await Promise.all([refreshBase(), refreshDetail()]);
+      await Promise.all([refreshQueueBase(), refreshDetail()]);
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -485,7 +490,7 @@ export default function App() {
     setLaunchBusy(true);
     try {
       await api(`/api/launch-attempts/${attemptId}/stop`, { method: "POST", body: "null" });
-      await Promise.all([refreshBase(), refreshDetail()]);
+      await Promise.all([refreshQueueBase(), refreshDetail()]);
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -512,7 +517,7 @@ export default function App() {
     setLaunchBusy(true);
     try {
       await api(`/api/runs/${runId}/${action}`, { method: "POST", body: "null" });
-      await Promise.all([refreshBase(), refreshDetail()]);
+      await Promise.all([refreshQueueBase(), refreshDetail()]);
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -542,7 +547,7 @@ export default function App() {
       setTitle("");
       setPriority(0);
       setSelectedId(created.id);
-      await refreshBase();
+      await refreshQueueBase();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -560,6 +565,9 @@ export default function App() {
         </div>
 
         <nav>
+          <button className={view === "conversations" ? "nav-active" : ""} onClick={() => setView("conversations")}>
+            {t("conversations")}
+          </button>
           <button className={view === "queue" ? "nav-active" : ""} onClick={() => setView("queue")}>
             {t("workQueue")} <span>{tasks.length}</span>
           </button>
@@ -581,7 +589,7 @@ export default function App() {
         <header className="topbar">
           <div>
             <p className="eyebrow">{t("localFirstControlPlane")}</p>
-            <h1>{view === "queue" ? t("workQueue") : t("agentFleet")}</h1>
+            <h1>{view === "conversations" ? t("conversations") : view === "queue" ? t("workQueue") : t("agentFleet")}</h1>
           </div>
           <div className="topbar-actions">
             <button
@@ -941,6 +949,13 @@ export default function App() {
               )}
             </section>
           </div>
+        ) : view === "conversations" ? (
+          <AgentChat
+            agents={agents.map(({ instance }) => ({ id: instance.id, name: instance.name, status: instance.status }))}
+            locale={locale}
+            initialAgentId={chatAgentId}
+            onInitialAgentHandled={() => setChatAgentId(null)}
+          />
         ) : (
           <section className="agent-grid">
             {agents.map(({ instance: agent, profile, account, machine, latest_capacity: capacity }) => (
@@ -962,6 +977,13 @@ export default function App() {
                   {agent.capabilities.length ? agent.capabilities.map((cap) => <span key={cap}>{cap}</span>) : <span>{t("general")}</span>}
                 </div>
                 <small title={new Date(agent.last_heartbeat_at).toLocaleString(locale)}>{t("heartbeat")} {formatAge(locale, agent.last_heartbeat_at)}</small>
+                <button
+                  type="button"
+                  className="agent-chat-button"
+                  onClick={() => { setChatAgentId(agent.id); setView("conversations"); }}
+                >
+                  {t("chatWithAgent")}
+                </button>
                 <div className="fleet-capacity">
                   {capacity ? <>
                     <div className="mini-card-row"><strong>{t("capacity")}</strong><StateBadge state={capacity.status} locale={locale} /></div>

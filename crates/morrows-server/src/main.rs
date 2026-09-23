@@ -1,4 +1,5 @@
 mod collaboration;
+mod conversation;
 mod dispatch;
 mod fleet;
 mod launch;
@@ -139,6 +140,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/runs/{id}/checkpoint", post(checkpoint_run))
         .route("/runs/{id}/complete", post(complete_run))
         .merge(collaboration::routes())
+        .merge(conversation::routes())
         .merge(dispatch::routes())
         .merge(fleet::routes())
         .merge(launch::routes())

@@ -1,5 +1,8 @@
 use axum::http::request::Parts;
-use morrows_core::{CreateArtifact, CreateDecision, CreateHandoff, CreateMessage, CreateThread};
+use morrows_core::{
+    ConversationHistoryRequest, ConversationReply, CreateArtifact, CreateDecision, CreateHandoff,
+    CreateMessage, CreateThread,
+};
 use morrows_core::{CreateContextRevision, CreateTask, Id, TaskState};
 use morrows_store::Store;
 use rmcp::{
@@ -144,6 +147,65 @@ pub struct HandoffIdRequest {
 }
 #[tool_router(router = tool_router)]
 impl MorrowsMcp {
+    #[tool(
+        description = "List direct company conversations with queued human messages addressed to the authenticated employee. Returns summaries only; use conversation_get to load one history. Requires X-Agent-Instance-Id."
+    )]
+    async fn conversation_inbox(
+        &self,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<String, String> {
+        let value = self
+            .store
+            .agent_conversation_inbox(authenticated_agent(&parts)?)
+            .await
+            .map_err(|e| e.to_string())?;
+        serde_json::to_string(&value).map_err(|e| e.to_string())
+    }
+
+    #[tool(
+        description = "Read one direct company conversation addressed to the authenticated employee. History is paged; before_message_id loads older messages and after_message_id loads newer messages. Requires X-Agent-Instance-Id."
+    )]
+    async fn conversation_get(
+        &self,
+        Parameters(req): Parameters<ConversationHistoryRequest>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<String, String> {
+        let before = req.before_message_id.as_deref().map(parse_id).transpose()?;
+        let after = req.after_message_id.as_deref().map(parse_id).transpose()?;
+        let value = self
+            .store
+            .agent_conversation_history(
+                parse_id(&req.conversation_id)?,
+                authenticated_agent(&parts)?,
+                before,
+                after,
+                req.limit.unwrap_or(80),
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        serde_json::to_string(&value).map_err(|e| e.to_string())
+    }
+
+    #[tool(
+        description = "Reply to a direct company conversation addressed to the authenticated employee. The reply marks queued human messages in that conversation delivered. Requires X-Agent-Instance-Id."
+    )]
+    async fn conversation_reply(
+        &self,
+        Parameters(req): Parameters<ConversationReply>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<String, String> {
+        let value = self
+            .store
+            .agent_reply_conversation(
+                parse_id(&req.conversation_id)?,
+                authenticated_agent(&parts)?,
+                &req.body,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        serde_json::to_string(&value).map_err(|e| e.to_string())
+    }
+
     #[tool(
         description = "Read management instructions for a work item owned by or assigned to the authenticated employee. Requires X-Agent-Instance-Id."
     )]
@@ -514,7 +576,7 @@ impl ServerHandler for MorrowsMcp {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_instructions(
-                "Morrows employee interface. The company control plane owns registration, fleet state, dispatch, assignment, Run creation, launch, cancellation, and scheduling. Employees may access only work they own or have been assigned, pull/update working memory, receive instructions, collaborate, hand off work, renew an existing lease, and report progress or completion. Send X-Agent-Instance-Id on every MCP tool call."
+                "Morrows employee interface. The company control plane owns registration, fleet state, dispatch, assignment, Run creation, launch, cancellation, and scheduling. Employees may read/reply to direct company conversations, access only work they own or have been assigned, pull/update working memory, receive instructions, collaborate, hand off work, renew an existing lease, and report progress or completion. Send X-Agent-Instance-Id on every MCP tool call."
             )
     }
 }
@@ -572,6 +634,9 @@ mod tests {
         let store = Store::connect("sqlite::memory:").await.unwrap();
         let mcp = MorrowsMcp::new(store);
         for name in [
+            "conversation_inbox",
+            "conversation_get",
+            "conversation_reply",
             "work_request_submit",
             "task_get",
             "memory_get",
@@ -627,6 +692,62 @@ mod tests {
                 "control-plane tool leaked into employee MCP: {name}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn direct_conversations_are_scoped_to_the_addressed_employee() {
+        let store = Store::connect("sqlite::memory:").await.unwrap();
+        let a = store.register_agent("chat-a", &[]).await.unwrap();
+        let b = store.register_agent("chat-b", &[]).await.unwrap();
+        let conversation = store
+            .create_conversation(morrows_core::CreateConversation {
+                agent_instance_id: a.id,
+                title: "Direct".into(),
+            })
+            .await
+            .unwrap();
+        store
+            .create_human_conversation_message(conversation.id, "hello")
+            .await
+            .unwrap();
+        let mcp = MorrowsMcp::new(store.clone());
+
+        let inbox: Value = serde_json::from_str(
+            &mcp.conversation_inbox(Extension(parts(Some(a.id))))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(inbox.as_array().unwrap().len(), 1);
+        assert!(
+            mcp.conversation_get(
+                Parameters(ConversationHistoryRequest {
+                    conversation_id: conversation.id.to_string(),
+                    before_message_id: None,
+                    after_message_id: None,
+                    limit: Some(20),
+                }),
+                Extension(parts(Some(b.id))),
+            )
+            .await
+            .is_err()
+        );
+        mcp.conversation_reply(
+            Parameters(ConversationReply {
+                conversation_id: conversation.id.to_string(),
+                body: "hi".into(),
+            }),
+            Extension(parts(Some(a.id))),
+        )
+        .await
+        .unwrap();
+        assert!(
+            store
+                .agent_conversation_inbox(a.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]

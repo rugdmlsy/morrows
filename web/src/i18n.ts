@@ -3,6 +3,8 @@ export type Locale = "zh-CN" | "en";
 const translations = {
   "zh-CN": {
     workOs: "工作系统",
+    conversations: "对话",
+    chatWithAgent: "与 Agent 对话",
     workQueue: "任务队列",
     agentFleet: "Agent 集群",
     localDaemon: "本地守护进程",
@@ -119,6 +121,8 @@ const translations = {
   },
   en: {
     workOs: "Work OS",
+    conversations: "Conversations",
+    chatWithAgent: "Chat with agent",
     workQueue: "Work Queue",
     agentFleet: "Agent Fleet",
     localDaemon: "Local daemon",

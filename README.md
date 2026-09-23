@@ -41,6 +41,9 @@ Human / Web UI / automation
 - Durable executor LaunchProfile / LaunchAttempt records and background launch jobs
 - Safe Codex CLI launch, session resume, stop, and Run/session reconciliation
 - Durable launch instructions, visible in the Web UI and over the employee MCP
+- First-class direct Agent conversations with summary-only list loading and paged message history
+- Conversation WebUI cache: history is fetched only after selection, then incrementally refreshed for the open chat
+- Employee conversation inbox/read/reply MCP tools; human messages queue while the Agent runtime is idle
 - External handoff adapters for LSM, Antigravity, and Gemini with owned accept/status
 - Startup recovery for interrupted local launch jobs
 - Optional LSM Run integration: one durable Logical Session per Run, scoped Codex MCP access, separate control API, execution evidence, explicit restart and bounded cleanup
@@ -113,6 +116,7 @@ The MCP surface intentionally does **not** expose agent/profile/account/machine 
 
 Employee MCP tools currently cover:
 
+- `conversation_inbox`, `conversation_get`, `conversation_reply`: receive and answer direct company conversations addressed to the caller.
 - `work_request_submit`: submit a new work request without choosing priority, assignee, or launcher.
 - `task_get`: read work owned by or assigned to the caller.
 - `memory_get` / `memory_revise`: pull or revise durable task working memory. `memory_get` includes current context, collaboration records, and the caller's Run history.
@@ -122,6 +126,8 @@ Employee MCP tools currently cover:
 - `assignment_renew`, `run_checkpoint`, `run_complete`, `task_events`: maintain an existing assignment and report progress/completion.
 
 Task-scoped MCP reads and collaboration writes verify that the caller owns the submitted request or has an Assignment history for that Task. MCP can report or collaborate on work, but it cannot create its own Assignment or Run.
+
+Direct conversations are separate from Task collaboration. The WebUI loads only conversation summaries at startup; selecting a conversation loads the latest message page into an in-memory cache, older history is fetched explicitly, and only the selected conversation polls for new messages. Human messages are durable and remain queued until the addressed Agent replies. If that Agent already has a `starting`/`running` launch, Morrows also writes a lightweight launch instruction telling it to check the conversation inbox. Morrows does not keep an otherwise-idle Agent process alive solely for chat.
 
 External adapters such as `lsm_external`, `antigravity_external`, `gemini_external`, and `codebuddy_external` remain compatibility launch backends. Their lifecycle endpoints are control-plane REST operations; they are no longer exposed as employee MCP tools. Provider-specific active launch adapters should be preferred when an automation API/CLI exists.
 
@@ -139,6 +145,7 @@ Task identity is independent of model, account, machine, and conversation/sessio
 - **ContextRevision**: immutable handoff/context snapshot.
 - **Handoff**: explicit transfer from a source Run to a separately accepted target Run.
 - **Message**: durable directed/reply-capable agent communication attached to a task thread.
+- **Conversation / ConversationMessage**: direct human↔Agent communication independent of Task collaboration.
 - **Artifact / Decision**: durable work evidence and rationale that can be referenced by handoff.
 - **Event**: append-only audit record.
 
