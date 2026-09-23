@@ -160,9 +160,22 @@ impl LsmControl {
         let capability_id = issued["capability_id"]
             .as_str()
             .ok_or_else(|| anyhow!("LSM did not return a capability ID"))?;
-        store
-            .set_run_capability(run_id, Some(capability_id))
-            .await?;
+        if let Err(err) = store.try_adopt_run_capability(run_id, capability_id).await {
+            // The Run state write wins when cancellation races with issuance.
+            // The unadopted credential must be revoked before aborting launch.
+            if let Err(revoke_err) = self
+                .request(
+                    "POST",
+                    &format!("/capabilities/{capability_id}/revoke"),
+                    json!({}),
+                )
+                .await
+            {
+                tracing::warn!(%run_id, %capability_id, %revoke_err,
+                    "failed revoking unadopted LSM capability; runtime cleanup will retry");
+            }
+            return Err(err.into());
+        }
         Ok(AgentBinding {
             logical_session_id: session_id,
             capability,
@@ -180,7 +193,9 @@ impl LsmControl {
                 json!({}),
             )
             .await?;
-            store.set_run_capability(run_id, None).await?;
+            store
+                .clear_run_capability_if_matches(run_id, &capability_id)
+                .await?;
         }
         Ok(())
     }
@@ -250,5 +265,156 @@ impl LsmControl {
             json!({}),
         )
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{Json, Router, extract::State, routing::post};
+    use std::sync::Arc;
+    use tokio::sync::{Mutex, oneshot};
+
+    struct MockCapability {
+        active: bool,
+        revocations: usize,
+        issued: Option<oneshot::Sender<()>>,
+        release: Option<oneshot::Receiver<()>>,
+    }
+
+    async fn issue(State(state): State<Arc<Mutex<MockCapability>>>) -> Json<Value> {
+        let release = {
+            let mut state = state.lock().await;
+            state.active = true;
+            state.issued.take().unwrap().send(()).unwrap();
+            state.release.take().unwrap()
+        };
+        release.await.unwrap();
+        Json(json!({"capability":"token-issued-during-cancel", "capability_id":"cap-race"}))
+    }
+
+    async fn revoke(State(state): State<Arc<Mutex<MockCapability>>>) -> Json<Value> {
+        let mut state = state.lock().await;
+        state.active = false;
+        state.revocations += 1;
+        Json(json!({"revoked":true}))
+    }
+
+    #[tokio::test]
+    async fn capability_issued_after_cancel_is_revoked_before_launch() {
+        let store = Store::connect("sqlite::memory:").await.unwrap();
+        let agent = store
+            .register_agent("race-agent".into(), &[])
+            .await
+            .unwrap();
+        let task = store
+            .create_task(serde_json::from_value(json!({"title":"issue cancel race"})).unwrap())
+            .await
+            .unwrap();
+        let assignment = store
+            .claim_task(task.id, agent.id, "executor", 600)
+            .await
+            .unwrap();
+        let profile = store
+            .register_launch_profile(
+                serde_json::from_value(json!({
+                    "name":"race-codex", "adapter":"codex_cli", "agent_instance_id":agent.id,
+                    "program":"/bin/echo", "default_cwd":"/tmp"
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let attempt = store
+            .enqueue_launch(
+                serde_json::from_value(json!({
+                    "assignment_id":assignment.id, "launch_profile_id":profile.id
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        store.claim_launch_job().await.unwrap().unwrap();
+        let run_id = store
+            .begin_launch_attempt_with_lsm(attempt.id, Some("shared-runtime"))
+            .await
+            .unwrap()
+            .run
+            .id;
+        store
+            .bind_run_lsm(run_id, "s_issue_cancel_race")
+            .await
+            .unwrap();
+
+        let (issued_tx, issued_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let state = Arc::new(Mutex::new(MockCapability {
+            active: false,
+            revocations: 0,
+            issued: Some(issued_tx),
+            release: Some(release_rx),
+        }));
+        let app = Router::new()
+            .route("/api/control/sessions/{id}/capabilities", post(issue))
+            .route("/api/control/capabilities/{id}/revoke", post(revoke))
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let control = LsmControl {
+            origin: format!("http://{address}"),
+            address,
+            key: "test-control-key".into(),
+            subject: "shared-runtime".into(),
+        };
+        let launcher_control = control.clone();
+        let launcher_store = store.clone();
+        let launcher = tokio::spawn(async move {
+            launcher_control
+                .provision_agent(&launcher_store, run_id, "issue cancel race")
+                .await
+        });
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), issued_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            store.request_run_cancel(run_id).await.unwrap().status,
+            "cancelling"
+        );
+        control.revoke_for_run(&store, run_id).await.unwrap();
+        assert!(state.lock().await.active);
+        release_tx.send(()).unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), launcher)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_err()
+        );
+        let state = state.lock().await;
+        assert!(!state.active);
+        assert_eq!(state.revocations, 1);
+        assert!(
+            store
+                .run_lsm_binding(run_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .capability_id
+                .is_none()
+        );
+        assert!(
+            store
+                .mark_launch_running(attempt.id, Some(42), "out".into(), "err".into())
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            store.get_launch_attempt(attempt.id).await.unwrap().status,
+            "starting"
+        );
+        server.abort();
     }
 }

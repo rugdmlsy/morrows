@@ -548,6 +548,17 @@ impl Store {
                 attempt.status
             )));
         }
+        let run_status: Option<String> = sqlx::query_scalar("SELECT status FROM runs WHERE id=?")
+            .bind(attempt.run_id.map(|run_id| run_id.to_string()))
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(storage)?;
+        if run_status.as_deref() != Some("running") {
+            return Err(DomainError::Conflict(format!(
+                "Run is {}",
+                run_status.as_deref().unwrap_or("missing")
+            )));
+        }
         sqlx::query(
             "UPDATE launch_attempts SET status='running',pid=?,stdout_path=?,stderr_path=? WHERE id=?",
         )

@@ -44,7 +44,7 @@ async fn interrupted_run_restarts_with_one_primary_session() {
     let run_id = first_execution.run.id;
     store.bind_run_lsm(run_id, "s_first").await.unwrap();
     store
-        .set_run_capability(run_id, Some("cap_1"))
+        .try_adopt_run_capability(run_id, "cap_1")
         .await
         .unwrap();
     store
@@ -298,6 +298,106 @@ async fn cancellation_intent_persists_before_an_unbound_session_is_recovered() {
     assert_eq!(
         store.complete_lsm_cleanup(run_id).await.unwrap().status,
         "cancelled"
+    );
+}
+
+#[tokio::test]
+async fn cancellation_wins_while_capability_issuance_is_paused() {
+    let (store, assignment_id, profile_id) = prepared().await;
+    let attempt = store
+        .enqueue_launch(input(json!({
+            "assignment_id": assignment_id, "launch_profile_id": profile_id
+        })))
+        .await
+        .unwrap();
+    store.claim_launch_job().await.unwrap().unwrap();
+    let run_id = store
+        .begin_launch_attempt_with_lsm(attempt.id, Some("shared-runtime"))
+        .await
+        .unwrap()
+        .run
+        .id;
+    store.bind_run_lsm(run_id, "s_issue_race").await.unwrap();
+
+    let (issued_tx, issued_rx) = tokio::sync::oneshot::channel();
+    let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+    let launcher_store = store.clone();
+    let launcher = tokio::spawn(async move {
+        issued_tx.send(()).unwrap();
+        resume_rx.await.unwrap();
+        launcher_store
+            .try_adopt_run_capability(run_id, "new-capability")
+            .await
+    });
+    issued_rx.await.unwrap();
+    assert_eq!(
+        store.request_run_cancel(run_id).await.unwrap().status,
+        "cancelling"
+    );
+    resume_tx.send(()).unwrap();
+    assert!(matches!(
+        launcher.await.unwrap(),
+        Err(DomainError::Conflict(_))
+    ));
+    assert!(
+        store
+            .run_lsm_binding(run_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .capability_id
+            .is_none()
+    );
+    assert!(matches!(
+        store
+            .mark_launch_running(attempt.id, Some(123), "stdout".into(), "stderr".into())
+            .await,
+        Err(DomainError::Conflict(_))
+    ));
+    assert_eq!(
+        store.get_launch_attempt(attempt.id).await.unwrap().status,
+        "starting"
+    );
+}
+
+#[tokio::test]
+async fn old_revoke_cannot_clear_a_newly_adopted_capability() {
+    let (store, assignment_id, profile_id) = prepared().await;
+    let attempt = store
+        .enqueue_launch(input(json!({
+            "assignment_id": assignment_id, "launch_profile_id": profile_id
+        })))
+        .await
+        .unwrap();
+    store.claim_launch_job().await.unwrap().unwrap();
+    let run_id = store
+        .begin_launch_attempt_with_lsm(attempt.id, Some("shared-runtime"))
+        .await
+        .unwrap()
+        .run
+        .id;
+    store.bind_run_lsm(run_id, "s_rotation_race").await.unwrap();
+    store
+        .try_adopt_run_capability(run_id, "old-capability")
+        .await
+        .unwrap();
+    store
+        .try_adopt_run_capability(run_id, "new-capability")
+        .await
+        .unwrap();
+    store
+        .clear_run_capability_if_matches(run_id, "old-capability")
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .run_lsm_binding(run_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .capability_id
+            .as_deref(),
+        Some("new-capability")
     );
 }
 

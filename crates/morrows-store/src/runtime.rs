@@ -188,18 +188,49 @@ impl Store {
             .ok_or_else(|| DomainError::Storage("LSM binding disappeared".into()))
     }
 
-    pub async fn set_run_capability(
+    /// The conditional write is the durable fence between an external LSM issue
+    /// and a concurrent Run cancellation. SQLite serializes it with cancel's
+    /// transaction, so a token issued for a cancelled Run is never adopted.
+    pub async fn try_adopt_run_capability(
         &self,
         run_id: Id,
-        capability_id: Option<&str>,
+        capability_id: &str,
     ) -> Result<(), DomainError> {
-        sqlx::query("UPDATE run_lsm_bindings SET capability_id=?,updated_at=? WHERE run_id=?")
-            .bind(capability_id)
-            .bind(Utc::now().to_rfc3339())
-            .bind(run_id.to_string())
-            .execute(&self.pool)
-            .await
-            .map_err(storage)?;
+        let result = sqlx::query(
+            "UPDATE run_lsm_bindings SET capability_id=?,updated_at=? WHERE run_id=?
+             AND EXISTS (SELECT 1 FROM runs r WHERE r.id=run_lsm_bindings.run_id
+                         AND r.status='running')",
+        )
+        .bind(capability_id)
+        .bind(Utc::now().to_rfc3339())
+        .bind(run_id.to_string())
+        .execute(&self.pool)
+        .await
+        .map_err(storage)?;
+        if result.rows_affected() != 1 {
+            return Err(DomainError::Conflict(
+                "Run stopped before its LSM capability could be adopted".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// A revoke for an older launch attempt must not clear a newer token.
+    pub async fn clear_run_capability_if_matches(
+        &self,
+        run_id: Id,
+        capability_id: &str,
+    ) -> Result<(), DomainError> {
+        sqlx::query(
+            "UPDATE run_lsm_bindings SET capability_id=NULL,updated_at=?
+             WHERE run_id=? AND capability_id=?",
+        )
+        .bind(Utc::now().to_rfc3339())
+        .bind(run_id.to_string())
+        .bind(capability_id)
+        .execute(&self.pool)
+        .await
+        .map_err(storage)?;
         Ok(())
     }
 

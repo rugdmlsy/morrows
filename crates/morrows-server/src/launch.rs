@@ -547,6 +547,12 @@ async fn execute_codex_with_root(
         .await
     {
         let _ = child.kill().await;
+        if let Some(control) = &control
+            && let Err(revoke_err) = control.revoke_for_run(&store, execution.run.id).await
+        {
+            tracing::warn!(run_id=%execution.run.id, %revoke_err,
+                "failed revoking capability after launch was fenced");
+        }
         return Err(err.into());
     }
 
