@@ -272,6 +272,11 @@ function StateBadge({ state, locale }: { state: string; locale: Locale }) {
 
 export default function App() {
   const [locale, setLocale] = useState<Locale>(initialLocale);
+  const [theme, setTheme] = useState<"dark" | "light">(() => {
+    const saved = window.localStorage.getItem("morrows.theme");
+    if (saved === "dark" || saved === "light") return saved;
+    return window.matchMedia?.("(prefers-color-scheme: light)").matches ? "light" : "dark";
+  });
   const [view, setView] = useState<"conversations" | "queue" | "agents">("conversations");
   const [tasks, setTasks] = useState<Task[]>([]);
   const [agents, setAgents] = useState<FleetEntry[]>([]);
@@ -313,6 +318,11 @@ export default function App() {
     window.localStorage.setItem("morrows.locale", locale);
     document.documentElement.lang = locale;
   }, [locale]);
+
+  useEffect(() => {
+    window.localStorage.setItem("morrows.theme", theme);
+    document.documentElement.dataset.theme = theme;
+  }, [theme]);
 
   const refreshHealth = useCallback(async () => {
     try {
@@ -656,29 +666,68 @@ export default function App() {
     }
   }
 
+  const viewMeta = {
+    conversations: {
+      zh: "对话",
+      en: "Direct Conversations",
+      descZh: "人类与特定 Agent 实例的一对一持久化沟通 · 按需加载历史 · 可靠投递",
+      descEn: "Persistent one-to-one conversations · lazy history · durable delivery",
+    },
+    queue: {
+      zh: "工作项",
+      en: "Work Items",
+      descZh: "工作队列 · 上下文快照 · 调度 · 执行与恢复证据",
+      descEn: "Work queue · context snapshots · dispatch · execution evidence",
+    },
+    agents: {
+      zh: "Agent 集群",
+      en: "Agent Fleet",
+      descZh: "Agent 档案 / 账号 / 机器 / 实例身份 · 心跳与容量观测",
+      descEn: "Profiles · accounts · machines · instances · heartbeat and capacity",
+    },
+  }[view];
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand">
-          <div className="brand-mark">M</div>
-          <div>
+          <svg className="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
+            <defs>
+              <linearGradient id="morrows-dawn" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0" stopColor="#E8A33D" />
+                <stop offset="1" stopColor="#E76F51" />
+              </linearGradient>
+            </defs>
+            <rect width="32" height="32" rx="8" fill="var(--inset)" />
+            <circle cx="11" cy="21" r="5.5" fill="url(#morrows-dawn)" />
+            <path d="M6 9.5h20" stroke="#E8A33D" strokeWidth="2" strokeLinecap="round" />
+            <path d="M6 12.5h20" stroke="#6FA8C9" strokeWidth="1.4" strokeLinecap="round" />
+            <path d="M6 15.5h20" stroke="var(--ink-3)" strokeWidth="1.4" strokeLinecap="round" />
+          </svg>
+          <div className="brand-copy">
             <strong>Morrows</strong>
-            <span>{t("workOs")}</span>
+            <span>Agent Work OS</span>
           </div>
         </div>
 
-        <nav>
-          <button className={view === "conversations" ? "nav-active" : ""} onClick={() => setView("conversations")}>
-            {t("conversations")}
-          </button>
+        <nav className="side-nav">
+          <div className="nav-group">{locale === "zh-CN" ? "工作 WORK" : "WORK"}</div>
           <button className={view === "queue" ? "nav-active" : ""} onClick={() => setView("queue")}>
-            {t("workQueue")} <span>{tasks.length}</span>
+            <span className="nav-label"><span className="nav-icon">▤</span>{locale === "zh-CN" ? "工作项" : "Work Items"}</span>
+            <span className="nav-count">{tasks.length}</span>
           </button>
+          <button className={view === "conversations" ? "nav-active" : ""} onClick={() => setView("conversations")}>
+            <span className="nav-label"><span className="nav-icon">◫</span>{t("conversations")}</span>
+          </button>
+
+          <div className="nav-group">{locale === "zh-CN" ? "资源 RESOURCES" : "RESOURCES"}</div>
           <button className={view === "agents" ? "nav-active" : ""} onClick={() => setView("agents")}>
-            {t("agentFleet")} <span>{agents.filter((a) => a.instance.status === "online").length}</span>
+            <span className="nav-label"><span className="nav-icon">⌘</span>{t("agentFleet")}</span>
+            <span className="nav-count">{agents.filter((a) => a.instance.status === "online").length}</span>
           </button>
         </nav>
 
+        <div className="sidebar-spacer" />
         <div className={`system-card ${systemHealth?.ok ? "system-online" : healthCheckedAt ? "system-offline" : "system-checking"}`}>
           <span className="status-dot" />
           <div>
@@ -692,31 +741,66 @@ export default function App() {
             </small>
           </div>
         </div>
+        <div className="planes-tip">{locale === "zh-CN" ? "控制面 · LSM 运行时 · Provider" : "Control · LSM runtime · Provider"}</div>
       </aside>
 
-      <main>
+      <div className="app-main">
         <header className="topbar">
-          <div>
-            <p className="eyebrow">{t("localFirstControlPlane")}</p>
-            <h1>{view === "conversations" ? t("conversations") : view === "queue" ? t("workQueue") : t("agentFleet")}</h1>
+          <div className="topbar-title">
+            <div className="crumb">
+              <strong>{viewMeta.zh}</strong>
+              <span>{viewMeta.en}</span>
+            </div>
+            <p>{locale === "zh-CN" ? viewMeta.descZh : viewMeta.descEn}</p>
           </div>
           <div className="topbar-actions">
+            <div
+              className={`sync-pill ${systemHealth?.ok ? "sync-online" : "sync-offline"}`}
+              title={healthCheckedAt ? `${t("lastChecked")} ${healthCheckedAt.toLocaleTimeString(locale)}` : t("checking")}
+            >
+              <span className="sync-dot" />
+              {systemHealth?.ok ? (locale === "zh-CN" ? "数据同步正常" : "Synced") : t("unreachable")}
+            </div>
+            <button
+              type="button"
+              className="icon-button"
+              title={locale === "zh-CN" ? "刷新数据" : "Refresh"}
+              onClick={() => {
+                void refreshHealth();
+                void refreshFleet();
+                if (view === "queue") {
+                  void refreshQueueBase();
+                  void refreshDetail();
+                }
+              }}
+            >
+              ↻
+            </button>
+            <button
+              type="button"
+              className="icon-button"
+              title={locale === "zh-CN" ? "切换深浅主题" : "Toggle theme"}
+              onClick={() => setTheme((current) => current === "dark" ? "light" : "dark")}
+            >
+              {theme === "dark" ? "☼" : "◐"}
+            </button>
             <button
               type="button"
               className="language-toggle"
               title={t("language")}
               onClick={() => setLocale((current) => current === "zh-CN" ? "en" : "zh-CN")}
             >
-              {t("switchLanguage")}
+              {locale === "zh-CN" ? "中文 · EN" : "EN · 中文"}
             </button>
             <div
               className={`mcp-pill ${systemHealth?.mcp?.ready ? "mcp-ready" : healthCheckedAt ? "mcp-unavailable" : "mcp-checking"}`}
-              title={healthCheckedAt ? `${t("lastChecked")} ${healthCheckedAt.toLocaleTimeString(locale)}` : t("checking")}
             >
-              MCP {systemHealth?.mcp?.path || "/mcp"} · {systemHealth?.mcp?.ready ? t("ready") : healthCheckedAt ? t("unavailable") : t("checking")}
+              MCP {systemHealth?.mcp?.ready ? t("ready") : healthCheckedAt ? t("unavailable") : t("checking")}
             </div>
           </div>
         </header>
+
+        <main className="content">
 
         {error && <div className="error-banner">{error}</div>}
 
@@ -1171,7 +1255,8 @@ export default function App() {
             {!agents.length && <div className="empty large">{t("noAgents")}</div>}
           </section>
         )}
-      </main>
+        </main>
+      </div>
     </div>
   );
 }
