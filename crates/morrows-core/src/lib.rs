@@ -209,3 +209,6 @@ pub use agent_delivery::*;
 
 mod agent_auth;
 pub use agent_auth::*;
+
+mod operator_auth;
+pub use operator_auth::*;

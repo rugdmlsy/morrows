@@ -45,13 +45,14 @@ Human / Web UI / automation
 - Conversation WebUI cache: history is fetched only after selection, then incrementally refreshed for the open chat
 - Employee conversation inbox/read/reply MCP tools backed by a durable Agent delivery outbox
 - Issued/revocable Agent Bearer credentials; runtime credentials are short-lived and Run-bound, bridge credentials are explicitly issued by the local control plane
+- Issued/revocable control-plane Operator credentials with `viewer` / `operator` / `admin` RBAC; WebUI can persist an Operator token locally
 - External handoff adapters for LSM, Antigravity, and Gemini with owned accept/status
 - Startup recovery for interrupted local launch jobs
 - Optional LSM Run integration: one durable Logical Session per Run, scoped Codex MCP access, separate control API, execution evidence, explicit restart and bounded cleanup
 - Chinese/English Web UI with Chinese as the first-visit default
 - SQLite durable jobs for launcher work and a transactional Agent delivery outbox with provider resume
 
-Not yet implemented: direct process control for all external agent products, operator/multi-user control-plane auth/RBAC, or distributed deployment. External adapters invite an existing agent session; they do not open those products automatically.
+Not yet implemented: direct process control for all external agent products, interactive multi-user accounts/SSO, built-in TLS termination, or distributed deployment. External adapters invite an existing agent session; they do not open those products automatically.
 
 ## Run
 
@@ -84,8 +85,17 @@ MORROWS_LSM_CONTROL_URL=http://127.0.0.1:8765
 MORROWS_LSM_CONTROL_KEY=<same value as LOCAL_SHELL_MCP_CONTROL_API_KEY>
 MORROWS_LSM_SUBJECT=local-mcp-client
 MORROWS_AGENT_RESTART_GRACE_SECONDS=600
-# Optional on loopback: require issued Bearer credentials for employee/bridge calls
+# Optional on loopback; required for any remote-facing deployment
 MORROWS_REQUIRE_AGENT_AUTH=1
+MORROWS_REQUIRE_OPERATOR_AUTH=1
+
+# Bootstrap admin credential used only to mint the first durable admin token.
+# Remove it from the environment after bootstrapping.
+MORROWS_BOOTSTRAP_OPERATOR_TOKEN=mrw_operator_<secret>
+
+# Direct non-loopback plaintext HTTP remains blocked by default.
+# Prefer loopback + TLS reverse proxy. Development override only:
+MORROWS_ALLOW_INSECURE_REMOTE_HTTP=0
 ```
 
 ## Test
@@ -120,6 +130,12 @@ The local control plane can issue/list/revoke bridge credentials with `/api/agen
 
 The MCP surface intentionally does **not** expose agent/profile/account/machine registration, fleet state, capacity, dispatch policy, dispatch, assignment claiming, Run creation, launch profile management, launch/cancel operations, or dependency graph administration. Those remain control-plane responsibilities through REST/store/provider adapters.
 
+## Control-plane Operator auth
+
+Control-plane REST supports issued `mrw_operator_*` Bearer credentials. `viewer` can read control-plane state; `operator` can mutate ordinary work/dispatch/launch state; `admin` additionally manages identities and Agent/Operator credentials. Bootstrap access uses `MORROWS_BOOTSTRAP_OPERATOR_TOKEN` as temporary admin authority; after issuing a durable admin credential, remove the bootstrap token from the environment and restart.
+
+Credential management endpoints are `GET/POST /api/operator-credentials` and `POST /api/operator-credentials/{id}/revoke`. Only hashes are stored in SQLite and list responses never return token/hash material. The WebUI top bar can store one Operator token in browser local storage and attaches it to `/api/*` control-plane requests.
+
 Employee MCP tools currently cover:
 
 - `conversation_inbox`, `conversation_get`, `conversation_reply`: receive and answer direct company conversations addressed to the caller.
@@ -139,7 +155,7 @@ External adapters such as `lsm_external`, `antigravity_external`, `gemini_extern
 
 `MORROWS_*` settings take precedence; the former `AC_*` settings remain accepted during migration.
 
-`X-Agent-Instance-Id` remains an identity binding hint, not a secret. Issued Bearer credentials authenticate Agent/bridge calls and are stored only as SHA-256 hashes. Morrows still refuses non-loopback `MORROWS_BIND` because operator/control-plane authentication is not implemented yet; Agent credentials alone do not make the full control plane remotely safe.
+`X-Agent-Instance-Id` remains an identity binding hint, not a secret. Issued Agent and Operator Bearer credentials are stored only as SHA-256 hashes, and the two credential classes cannot cross their authorization planes. Morrows still refuses direct non-loopback plaintext HTTP by default even when both auth systems are strict, because Bearer credentials require transport security. For remote use, keep Morrows on loopback and expose it through a TLS reverse proxy; `MORROWS_ALLOW_INSECURE_REMOTE_HTTP=1` exists only for isolated development.
 
 ## Three-Plane Architecture & Core Invariant
 

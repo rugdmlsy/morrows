@@ -786,3 +786,5 @@ mod context_package;
 mod delivery;
 
 mod auth;
+
+mod operator_auth;

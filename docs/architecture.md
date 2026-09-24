@@ -104,10 +104,32 @@ returned once at issuance or held transiently by the launcher. HTTP authenticati
 `MORROWS_REQUIRE_AGENT_AUTH=1` disables the legacy identity-header-only employee path.
 The default loopback mode keeps that path temporarily for old local bridges.
 
-This does **not** authenticate the operator/control-plane REST surface. Until a separate
-operator credential/RBAC layer exists, `morrows-server` refuses non-loopback
-`MORROWS_BIND`. Agent credentials therefore improve employee/provider isolation without
-claiming that the whole control plane is remotely deployable.
+### Operator/control-plane credential boundary
+
+Control-plane REST uses a separate `mrw_operator_*` credential class. Durable credentials
+carry one of three roles:
+
+- `viewer`: read-only control-plane access;
+- `operator`: ordinary work, dispatch, launch, cancellation, context and conversation
+  mutations;
+- `admin`: operator privileges plus identity registration and Agent/Operator credential
+  management.
+
+`MORROWS_REQUIRE_OPERATOR_AUTH=1` closes the loopback no-auth compatibility path.
+`MORROWS_BOOTSTRAP_OPERATOR_TOKEN` is an ephemeral admin authority for creating the first
+durable admin credential; it should be removed from the environment after bootstrap.
+Operator token hashes, like Agent credential hashes, are the only token material stored
+in SQLite.
+
+Agent and Operator credentials are deliberately non-interchangeable. Agent credentials
+may access employee MCP and the small bridge/heartbeat REST surface, but are rejected by
+control-plane REST. Operator credentials do not authenticate employee MCP or Agent
+delivery endpoints.
+
+Authentication is still not transport encryption. Direct non-loopback plaintext HTTP is
+blocked by default even when both strict auth modes are enabled. Normal remote deployment
+should keep Morrows bound to loopback and place a TLS reverse proxy in front of it.
+`MORROWS_ALLOW_INSECURE_REMOTE_HTTP=1` is only an explicit isolated-development override.
 
 ## Implemented entities
 
@@ -490,5 +512,6 @@ REST additions under `/api`:
 Launch profiles, attempts, enqueue/stop, instruction sending, and external invitation
 acceptance are control-plane REST/Web UI operations and are intentionally absent from
 employee MCP. The Web Task Detail view supports launch/invite, resume, instruction send,
-stop, and status. Agent/provider calls now support issued Bearer credentials, while
-operator/control-plane authentication and remote process launch remain deployment milestones.
+stop, and status. Agent/provider and operator/control-plane calls now use separate issued
+Bearer credential classes. Interactive multi-user identity/SSO, TLS termination, and remote
+process launch remain deployment milestones.

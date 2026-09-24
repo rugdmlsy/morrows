@@ -7,6 +7,7 @@ mod fleet;
 mod launch;
 mod lsm;
 mod mcp;
+mod operator_auth;
 
 use anyhow::Context;
 use axum::{
@@ -116,16 +117,34 @@ async fn main() -> anyhow::Result<()> {
         .or_else(|_| env::var("AC_BIND"))
         .unwrap_or_else(|_| "127.0.0.1:8787".into());
     let addr: SocketAddr = bind.parse().context("parse MORROWS_BIND")?;
-    if !addr.ip().is_loopback() {
-        anyhow::bail!(
-            "Morrows control plane is local-only and refuses non-loopback MORROWS_BIND={addr}; operator authentication is not implemented yet"
-        );
-    }
     let require_agent_auth = env_bool("MORROWS_REQUIRE_AGENT_AUTH", false)?;
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let require_operator_auth = env_bool("MORROWS_REQUIRE_OPERATOR_AUTH", false)?;
+    let allow_insecure_remote_http =
+        env_bool("MORROWS_ALLOW_INSECURE_REMOTE_HTTP", false)?;
+    let bootstrap_operator_token = env::var("MORROWS_BOOTSTRAP_OPERATOR_TOKEN")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    if bootstrap_operator_token
+        .as_deref()
+        .is_some_and(|value| !value.starts_with("mrw_operator_"))
+    {
+        anyhow::bail!("MORROWS_BOOTSTRAP_OPERATOR_TOKEN must start with mrw_operator_");
+    }
+
     let store = Store::connect(&db_url)
         .await
         .context("open Morrows database")?;
+    let has_admin_operator = store.has_active_admin_operator_credential().await?;
+    validate_bind_security(
+        addr,
+        require_agent_auth,
+        require_operator_auth,
+        bootstrap_operator_token.is_some(),
+        has_admin_operator,
+        allow_insecure_remote_http,
+    )?;
+    let listener = tokio::net::TcpListener::bind(addr).await?;
     let recovered = store.recover_launch_jobs_after_restart().await?;
     if recovered > 0 {
         tracing::warn!(recovered, "reconciled interrupted launch jobs");
@@ -156,6 +175,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/runs/{id}/checkpoint", post(checkpoint_run))
         .route("/runs/{id}/complete", post(complete_run))
         .merge(auth::routes())
+        .merge(operator_auth::routes())
         .merge(collaboration::routes())
         .merge(conversation::routes())
         .merge(dispatch::routes())
@@ -206,6 +226,11 @@ async fn main() -> anyhow::Result<()> {
         .or_else(|_| env::var("AC_WEB_DIR"))
         .unwrap_or_else(|_| "web/dist".into());
     let auth_state = auth::AgentAuthState::new(store.clone(), require_agent_auth);
+    let operator_auth_state = operator_auth::OperatorAuthState::new(
+        store.clone(),
+        require_operator_auth,
+        bootstrap_operator_token,
+    );
     let app = Router::new()
         .nest("/api", api)
         .nest_service("/mcp", mcp_service)
@@ -214,11 +239,52 @@ async fn main() -> anyhow::Result<()> {
             auth_state,
             auth::authenticate_agent_requests,
         ))
-        .layer(CorsLayer::permissive())
-        .layer(TraceLayer::new_for_http());
+        .layer(middleware::from_fn_with_state(
+            operator_auth_state,
+            operator_auth::authenticate_operator_requests,
+        ));
+    let app = if addr.ip().is_loopback() {
+        app.layer(CorsLayer::permissive())
+    } else {
+        app
+    };
+    let app = app.layer(TraceLayer::new_for_http());
 
     info!(%addr, "Morrows server listening");
     axum::serve(listener, app).await?;
+    Ok(())
+}
+
+fn validate_bind_security(
+    addr: SocketAddr,
+    require_agent_auth: bool,
+    require_operator_auth: bool,
+    has_bootstrap_operator: bool,
+    has_admin_operator: bool,
+    allow_insecure_remote_http: bool,
+) -> anyhow::Result<()> {
+    if require_operator_auth && !has_bootstrap_operator && !has_admin_operator {
+        anyhow::bail!(
+            "MORROWS_REQUIRE_OPERATOR_AUTH=1 requires MORROWS_BOOTSTRAP_OPERATOR_TOKEN or an active durable admin operator credential"
+        );
+    }
+    if !addr.ip().is_loopback() {
+        if !require_operator_auth {
+            anyhow::bail!(
+                "non-loopback MORROWS_BIND={addr} requires MORROWS_REQUIRE_OPERATOR_AUTH=1"
+            );
+        }
+        if !require_agent_auth {
+            anyhow::bail!(
+                "non-loopback MORROWS_BIND={addr} requires MORROWS_REQUIRE_AGENT_AUTH=1"
+            );
+        }
+        if !allow_insecure_remote_http {
+            anyhow::bail!(
+                "Morrows refuses direct non-loopback HTTP because Bearer credentials require transport security; keep MORROWS_BIND on loopback and expose it through a TLS reverse proxy, or set MORROWS_ALLOW_INSECURE_REMOTE_HTTP=1 only for isolated development"
+            );
+        }
+    }
     Ok(())
 }
 
@@ -413,4 +479,78 @@ async fn task_events(
     Ok(Json(
         serde_json::to_value(state.store.task_events(id).await?).unwrap(),
     ))
+}
+
+#[cfg(test)]
+mod startup_security_tests {
+    use super::*;
+
+    fn addr(value: &str) -> SocketAddr {
+        value.parse().unwrap()
+    }
+
+    #[test]
+    fn loopback_compatibility_remains_available() {
+        validate_bind_security(
+            addr("127.0.0.1:8787"),
+            false,
+            false,
+            false,
+            false,
+            false,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn strict_operator_auth_cannot_start_without_bootstrap_or_admin() {
+        let err = validate_bind_security(
+            addr("127.0.0.1:8787"),
+            true,
+            true,
+            false,
+            false,
+            false,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("MORROWS_BOOTSTRAP_OPERATOR_TOKEN")
+        );
+
+        validate_bind_security(
+            addr("127.0.0.1:8787"),
+            true,
+            true,
+            false,
+            true,
+            false,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn non_loopback_requires_both_auth_planes_and_explicit_plain_http_override() {
+        let remote = addr("0.0.0.0:8787");
+
+        assert!(
+            validate_bind_security(remote, true, false, true, false, false)
+                .unwrap_err()
+                .to_string()
+                .contains("MORROWS_REQUIRE_OPERATOR_AUTH")
+        );
+        assert!(
+            validate_bind_security(remote, false, true, true, false, false)
+                .unwrap_err()
+                .to_string()
+                .contains("MORROWS_REQUIRE_AGENT_AUTH")
+        );
+        assert!(
+            validate_bind_security(remote, true, true, true, false, false)
+                .unwrap_err()
+                .to_string()
+                .contains("refuses direct non-loopback HTTP")
+        );
+        validate_bind_security(remote, true, true, true, false, true).unwrap();
+    }
 }

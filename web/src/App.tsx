@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import type { FormEvent } from "react";
 import "./App.css";
 import AgentChat from "./AgentChat";
-import { api } from "./api";
+import { api, getOperatorToken, setOperatorToken } from "./api";
 import {
   formatAge,
   formatDispatchReason,
@@ -309,6 +309,7 @@ export default function App() {
   const [title, setTitle] = useState("");
   const [priority, setPriority] = useState(0);
   const [chatAgentId, setChatAgentId] = useState<string | null>(null);
+  const [operatorTokenPresent, setOperatorTokenPresent] = useState(() => !!getOperatorToken());
   const [error, setError] = useState<string | null>(null);
 
   const selectedTask = useMemo(() => tasks.find((task) => task.id === selectedId) ?? null, [tasks, selectedId]);
@@ -323,6 +324,12 @@ export default function App() {
     window.localStorage.setItem("morrows.theme", theme);
     document.documentElement.dataset.theme = theme;
   }, [theme]);
+
+  useEffect(() => {
+    const sync = () => setOperatorTokenPresent(!!getOperatorToken());
+    window.addEventListener("morrows-operator-token-changed", sync);
+    return () => window.removeEventListener("morrows-operator-token-changed", sync);
+  }, []);
 
   const refreshHealth = useCallback(async () => {
     try {
@@ -783,6 +790,32 @@ export default function App() {
               onClick={() => setTheme((current) => current === "dark" ? "light" : "dark")}
             >
               {theme === "dark" ? "☼" : "◐"}
+            </button>
+            <button
+              type="button"
+              className={`auth-button ${operatorTokenPresent ? "auth-configured" : ""}`}
+              title={locale === "zh-CN" ? "配置控制面 Operator Credential" : "Configure control-plane operator credential"}
+              onClick={() => {
+                const next = window.prompt(
+                  locale === "zh-CN"
+                    ? "输入 Operator Bearer Token；留空并确认可清除当前 Token。"
+                    : "Enter the Operator Bearer Token. Submit an empty value to clear it.",
+                  "",
+                );
+                if (next === null) return;
+                setOperatorToken(next);
+                setOperatorTokenPresent(!!next.trim());
+                void refreshFleet();
+                if (view === "queue") {
+                  void refreshQueueBase();
+                  void refreshDetail();
+                }
+              }}
+            >
+              <span className="auth-dot" />
+              {operatorTokenPresent
+                ? (locale === "zh-CN" ? "Operator 已配置" : "Operator token")
+                : (locale === "zh-CN" ? "Operator 未配置" : "No operator token")}
             </button>
             <button
               type="button"
