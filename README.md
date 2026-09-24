@@ -43,14 +43,15 @@ Human / Web UI / automation
 - Durable launch instructions, visible in the Web UI and over the employee MCP
 - First-class direct Agent conversations with summary-only list loading and paged message history
 - Conversation WebUI cache: history is fetched only after selection, then incrementally refreshed for the open chat
-- Employee conversation inbox/read/reply MCP tools; human messages queue while the Agent runtime is idle
+- Employee conversation inbox/read/reply MCP tools backed by a durable Agent delivery outbox
+- Issued/revocable Agent Bearer credentials; runtime credentials are short-lived and Run-bound, bridge credentials are explicitly issued by the local control plane
 - External handoff adapters for LSM, Antigravity, and Gemini with owned accept/status
 - Startup recovery for interrupted local launch jobs
 - Optional LSM Run integration: one durable Logical Session per Run, scoped Codex MCP access, separate control API, execution evidence, explicit restart and bounded cleanup
 - Chinese/English Web UI with Chinese as the first-visit default
-- SQLite durable jobs for launcher work; outbox remains reserved for later delivery automation
+- SQLite durable jobs for launcher work and a transactional Agent delivery outbox with provider resume
 
-Not yet implemented: automatic dispatch→launch chaining, direct process control for the external agent products, multi-user auth/RBAC, or distributed deployment. External adapters invite an existing agent session; they do not open those products automatically.
+Not yet implemented: direct process control for all external agent products, operator/multi-user control-plane auth/RBAC, or distributed deployment. External adapters invite an existing agent session; they do not open those products automatically.
 
 ## Run
 
@@ -83,6 +84,8 @@ MORROWS_LSM_CONTROL_URL=http://127.0.0.1:8765
 MORROWS_LSM_CONTROL_KEY=<same value as LOCAL_SHELL_MCP_CONTROL_API_KEY>
 MORROWS_LSM_SUBJECT=local-mcp-client
 MORROWS_AGENT_RESTART_GRACE_SECONDS=600
+# Optional on loopback: require issued Bearer credentials for employee/bridge calls
+MORROWS_REQUIRE_AGENT_AUTH=1
 ```
 
 ## Test
@@ -106,11 +109,14 @@ Morrows exposes a Streamable HTTP MCP endpoint for **employee operations**, not 
 http://127.0.0.1:8787/mcp
 ```
 
-Every MCP call uses the already-provisioned employee identity:
+Employee MCP calls support issued Bearer credentials:
 
 ```
-X-Agent-Instance-Id: <uuid>
+Authorization: Bearer mrw_agent_<secret>
+X-Agent-Instance-Id: <uuid>   # optional with Bearer; if present it must match
 ```
+
+The local control plane can issue/list/revoke bridge credentials with `/api/agents/{id}/credentials` and `/api/agent-credentials/{id}/revoke`. Provider launchers use separate Run-bound runtime credentials and revoke them when the launch attempt finishes. Set `MORROWS_REQUIRE_AGENT_AUTH=1` to reject the legacy identity-header-only path even on loopback.
 
 The MCP surface intentionally does **not** expose agent/profile/account/machine registration, fleet state, capacity, dispatch policy, dispatch, assignment claiming, Run creation, launch profile management, launch/cancel operations, or dependency graph administration. Those remain control-plane responsibilities through REST/store/provider adapters.
 
@@ -127,27 +133,48 @@ Employee MCP tools currently cover:
 
 Task-scoped MCP reads and collaboration writes verify that the caller owns the submitted request or has an Assignment history for that Task. MCP can report or collaborate on work, but it cannot create its own Assignment or Run.
 
-Direct conversations are separate from Task collaboration. The WebUI loads only conversation summaries at startup; selecting a conversation loads the latest message page into an in-memory cache, older history is fetched explicitly, and only the selected conversation polls for new messages. Human messages are durable and remain queued until the addressed Agent replies. If that Agent already has a `starting`/`running` launch, Morrows also writes a lightweight launch instruction telling it to check the conversation inbox. Morrows does not keep an otherwise-idle Agent process alive solely for chat.
+Direct conversations are separate from Task collaboration. The WebUI loads only conversation summaries at startup; selecting a conversation loads the latest message page into an in-memory cache, older history is fetched explicitly, and only the selected conversation polls for new messages. Human messages are durable and remain awaiting reply until the addressed Agent replies. A separate transactional `AgentDelivery` tracks whether each message has reached an Agent runtime. For one-turn local providers, queued delivery automatically resumes the same Run/provider thread after the current turn exits; Morrows does not create a second Run or LSM Logical Session solely for chat.
 
 External adapters such as `lsm_external`, `antigravity_external`, `gemini_external`, and `codebuddy_external` remain compatibility launch backends. Their lifecycle endpoints are control-plane REST operations; they are no longer exposed as employee MCP tools. Provider-specific active launch adapters should be preferred when an automation API/CLI exists.
 
 `MORROWS_*` settings take precedence; the former `AC_*` settings remain accepted during migration.
 
-`X-Agent-Instance-Id` is still only an identity binding mechanism for the current local-only daemon, not remote authentication. A later milestone will replace it with issued credentials/tokens before remote exposure.
+`X-Agent-Instance-Id` remains an identity binding hint, not a secret. Issued Bearer credentials authenticate Agent/bridge calls and are stored only as SHA-256 hashes. Morrows still refuses non-loopback `MORROWS_BIND` because operator/control-plane authentication is not implemented yet; Agent credentials alone do not make the full control plane remotely safe.
 
-## Core invariant
+## Three-Plane Architecture & Core Invariant
 
-Task identity is independent of model, account, machine, and conversation/session.
+Morrows cleanly decouples into three planes:
+1. **Morrows Control Plane**: Source of truth for work semantics, assignments, context snapshots, long-term memory, decisions, and artifacts.
+2. **LSM Runtime Plane**: Source of truth for host execution resources, isolated runtime scopes, jobs, shells, and execution audit.
+3. **Provider Plane**: Source of truth for model-private rollout sessions, tool representations, and reasoning traces. Provider sessions are private and never directly shared.
 
-- **Task**: what work exists.
-- **Assignment**: which AgentInstance currently owns a role, with a lease.
-- **Run**: one concrete execution session.
-- **ContextRevision**: immutable handoff/context snapshot.
-- **Handoff**: explicit transfer from a source Run to a separately accepted target Run.
-- **Message**: durable directed/reply-capable agent communication attached to a task thread.
-- **Conversation / ConversationMessage**: direct human↔Agent communication independent of Task collaboration.
-- **Artifact / Decision**: durable work evidence and rationale that can be referenced by handoff.
-- **Event**: append-only audit record.
+> **Ultimate Recovery Invariant (终极恢复原则)**:
+> Task identity is independent of model, account, machine, and conversation/session. Even if the original Agent process, Provider Session, execution machine, and temporary workspace directories disappear completely, a new Agent can reconstruct full state and proceed solely from Morrows canonical records.
+
+### Normalized Naming Model (去歧义术语对照)
+
+To avoid ambiguity from bare words like `session` and `run`, Morrows adopts a collaborative, Feishu-inspired user layer and precise system-layer definitions:
+
+| 用户层 / 沟通词汇 | 系统层正式英文 | 历史代码别名 | 核心定义与语义范围 |
+| :--- | :--- | :--- | :--- |
+| **工作项** | `WorkItem` | `Task` | 组织内需要完成的一件客观工作任务，具独立生命周期 |
+| **工作分配** | `WorkAssignment` | `Assignment` | 某个 Agent 实例对工作项中某特定角色的有期限责任（带租约 Lease） |
+| **工作执行**（前端：执行记录） | `WorkExecution` | `Run` | 某个 Agent 对一次工作分配的具体逻辑执行过程 |
+| **启动记录 / 启动尝试** | `AgentLaunch` | `LaunchAttempt` | 系统为推进工作执行，实际启动一次具体 Agent 进程的记录 |
+| **运行空间** | `RuntimeScope` | LSM `Logical Session` | LSM 运行时为一次工作执行划定的安全隔离执行范围与权限作用域 |
+| **执行任务** | `RuntimeJob` | LSM `Job` | 在运行空间内异步执行的具体机器任务（如 `cargo test`） |
+| **持久终端 / 终端** | `PersistentShell` | `shell session` | 运行空间内维持环境与状态的常驻命令行交互终端 |
+| **浏览器实例** | `BrowserInstance` | `browser session` | 运行空间内受控的有状态浏览器实例 |
+| **模型会话** | `ProviderThread` | `Provider Session` | Codex / Claude / Gemini 模型自身的连续私有对话流 |
+| **工作对话** | `DirectConversation` | `Conversation` | 人类与特定 Agent 实例直接进行的一对一持久化双向沟通 |
+| **上下文快照** | `ContextSnapshot` | `ContextRevision` | 某次工作执行初始化时冻结的完整工作背景、目标与记忆视图 |
+| **记忆** | `Memory` | `Memory` / `Context` | 长期持久化知识（跨越任务与会话），分组织/项目/员工/工作等作用域 |
+| **成果物** | `Artifact` | `Artifact` | 被正式归档、持久托管并可全局引用的工作交付物证据（Managed Store） |
+| **决策记录** | `Decision` | `Decision` | 经确认的、对后续工作产生约束与指导的技术或业务决断 |
+| **工作交接** | `Handoff` | `Handoff` | 工作责任从一个执行转交至另一个执行的结构化交接协议 |
+| **执行证据** | `WorkExecutionEvidence` | `RunExecutionEvidence`| 将工作语义状态与底层 LSM Audit、Job Logs 关联的追溯证据 |
+
+> 完整规范请参阅：[docs/agent-work-and-context-spec.md](file:///Users/huayuxue/workspaces/morrows/docs/agent-work-and-context-spec.md) 与 [docs/architecture.md](file:///Users/huayuxue/workspaces/morrows/docs/architecture.md)
 
 ## Live handoff validation
 

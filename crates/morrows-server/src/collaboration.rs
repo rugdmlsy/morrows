@@ -28,6 +28,14 @@ pub fn routes() -> Router<AppState> {
         .route("/threads/{id}/messages", post(message_create))
         .route("/runs/{id}/handoffs", post(handoff_create))
         .route("/tasks/{id}/dependencies", post(dependency_add))
+        .route(
+            "/tasks/{id}/context-package",
+            get(context_package_get).post(context_package_create),
+        )
+        .route(
+            "/work-items/{id}/context-package",
+            get(context_package_get).post(context_package_create),
+        )
 }
 async fn collaboration(
     State(s): State<AppState>,
@@ -133,6 +141,88 @@ async fn handoff_create(
     Ok(Json(json!(
         s.store.create_handoff(id, actor(&headers)?, input).await?
     )))
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct ContextPackageInput {
+    #[serde(default)]
+    pub objective: Option<String>,
+    #[serde(default)]
+    pub summary: Option<Value>,
+    #[serde(default)]
+    pub context_snapshot_id: Option<Id>,
+    #[serde(default)]
+    pub memory_refs: Vec<String>,
+    #[serde(default)]
+    pub decision_refs: Vec<Id>,
+    #[serde(default)]
+    pub artifact_refs: Vec<Id>,
+    #[serde(default)]
+    pub changed_files: Vec<String>,
+    #[serde(default)]
+    pub verified_results: Vec<String>,
+    #[serde(default)]
+    pub blockers: Vec<String>,
+    #[serde(default)]
+    pub unresolved_questions: Vec<String>,
+    #[serde(default)]
+    pub next_action: Option<String>,
+    #[serde(default)]
+    pub source_run_id: Option<Id>,
+    #[serde(default)]
+    pub source_agent_id: Option<Id>,
+    #[serde(default)]
+    pub assemble: Option<bool>,
+}
+
+async fn context_package_get(
+    State(s): State<AppState>,
+    Path(id): Path<Id>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(json!(s.store.get_latest_context_package(id).await?)))
+}
+
+async fn context_package_create(
+    State(s): State<AppState>,
+    Path(id): Path<Id>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Json<Value>, ApiError> {
+    let input: ContextPackageInput = if body.is_empty() {
+        ContextPackageInput::default()
+    } else {
+        serde_json::from_slice(&body).map_err(|e| DomainError::InvalidInput(e.to_string()))?
+    };
+    let agent_id = input.source_agent_id.or_else(|| actor(&headers).ok());
+    if input.assemble == Some(true) || input.objective.is_none() {
+        let pkg = s
+            .store
+            .assemble_context_package(id, input.source_run_id, agent_id)
+            .await?;
+        Ok(Json(json!(pkg)))
+    } else {
+        let objective = input.objective.unwrap();
+        let pkg = s
+            .store
+            .create_context_package(CreateContextPackage {
+                work_item_id: id,
+                objective,
+                summary: input.summary,
+                context_snapshot_id: input.context_snapshot_id,
+                memory_refs: input.memory_refs,
+                decision_refs: input.decision_refs,
+                artifact_refs: input.artifact_refs,
+                changed_files: input.changed_files,
+                verified_results: input.verified_results,
+                blockers: input.blockers,
+                unresolved_questions: input.unresolved_questions,
+                next_action: input.next_action.unwrap_or_default(),
+                source_run_id: input.source_run_id,
+                source_agent_id: agent_id,
+            })
+            .await?;
+        Ok(Json(json!(pkg)))
+    }
 }
 
 #[cfg(test)]
@@ -333,5 +423,107 @@ mod tests {
             .0,
             StatusCode::OK
         );
+    }
+
+    #[tokio::test]
+    async fn context_package_rest_routes_support_assembly_and_custom_creation() {
+        let store = Store::connect("sqlite::memory:").await.unwrap();
+        let agent = store.register_agent("package-agent", &[]).await.unwrap();
+        let task = store
+            .create_task(serde_json::from_value(json!({
+                "title": "Migrate database",
+                "description": "Run phase 1 migrations cleanly"
+            })).unwrap())
+            .await
+            .unwrap();
+
+        let app = routes().with_state(AppState {
+            store: store.clone(),
+        });
+
+        // 1. Initial GET returns null
+        let (status, initial_pkg) = request(
+            &app,
+            "GET",
+            &format!("/tasks/{}/context-package", task.id),
+            None,
+            json!(null),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(initial_pkg.is_null());
+
+        // Create an artifact and decision to test assembly
+        let _ = store
+            .create_decision(
+                task.id,
+                agent.id,
+                CreateDecision {
+                    title: "Use sqlite".into(),
+                    rationale: "Embedded database".into(),
+                },
+            )
+            .await
+            .unwrap();
+
+        // 2. POST without body assembles package
+        let (status, assembled) = request(
+            &app,
+            "POST",
+            &format!("/tasks/{}/context-package", task.id),
+            Some(agent.id),
+            json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            assembled["objective"],
+            "Migrate database: Run phase 1 migrations cleanly"
+        );
+        let decisions = assembled["decision_refs"].as_array().unwrap();
+        assert_eq!(decisions.len(), 1);
+
+        // 3. GET returns the assembled package
+        let (status, latest) = request(
+            &app,
+            "GET",
+            &format!("/tasks/{}/context-package", task.id),
+            None,
+            json!(null),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(latest["id"], assembled["id"]);
+
+        // 4. POST with explicit custom package
+        let (status, custom) = request(
+            &app,
+            "POST",
+            &format!("/tasks/{}/context-package", task.id),
+            Some(agent.id),
+            json!({
+                "objective": "Verify migration",
+                "changed_files": ["migrations/0011.sql"],
+                "verified_results": ["cargo test passed"],
+                "next_action": "Deploy to staging"
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(custom["objective"], "Verify migration");
+        assert_eq!(custom["changed_files"][0], "migrations/0011.sql");
+        assert_eq!(custom["verified_results"][0], "cargo test passed");
+
+        // 5. GET via normalized /work-items/{id}/context-package alias returns latest custom package
+        let (status, work_item_latest) = request(
+            &app,
+            "GET",
+            &format!("/work-items/{}/context-package", task.id),
+            None,
+            json!(null),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(work_item_latest["id"], custom["id"]);
     }
 }

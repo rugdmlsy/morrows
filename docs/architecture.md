@@ -1,5 +1,72 @@
 # Architecture
 
+## Three-Plane Architecture (三平面架构)
+
+Morrows separates the system into three decoupled planes with explicit boundaries of truth:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│ 1. Morrows Control Plane (控制平面)                                      │
+│    工作语义与持久知识的 Source of Truth                                    │
+│    负责：工作项、工作分配、工作执行生命周期、上下文快照、长期记忆、成果物托管、       │
+│          决策记录、工作交接、工作对话、调度派发、执行证据关联等                │
+└────────────────────────────────────┬────────────────────────────────────┘
+                                     │
+                     /api/control    │ (trusted loopback HTTP)
+                     scoped token    ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│ 2. LSM Runtime Plane (运行平面)                                         │
+│    执行证据与运行资源的 Source of Truth                                     │
+│    负责：运行空间 (RuntimeScope)、执行任务 (RuntimeJob)、持久终端 (Shell)、    │
+│          浏览器实例、文件系统/远程机器操作、底层审计日志 (Audit) 等             │
+└────────────────────────────────────┬────────────────────────────────────┘
+                                     │
+                 scoped capability   │ (confines agent execution)
+                                     ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│ 3. Provider Plane (模型平面)                                            │
+│    模型推理与私有交互会话的 Source of Truth                                  │
+│    负责：Codex / Claude / Gemini / CodeBuddy 的模型上下文、Rollout /     │
+│          私有对话流、内部思考过程 (Reasoning)、断点恢复 (Resume State) 等    │
+│    * Provider 会话属于外部私有数据，不作为 Morrows 标准状态共享                  │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+## Terminology Normalization & Naming Model (去歧义术语规范)
+
+To prevent severe ambiguity caused by bare usages of common words like `session` and `run`, Morrows defines a two-layer naming model:
+1. **User Layer (用户层 / 交互心智模型)**: Aligned with collaborative organizational concepts (referencing Feishu / Lark product conventions);
+2. **System Layer (系统层 / 规范对象)**: Strict, typed domain entities in store and API.
+
+| 用户层 / 沟通词汇 | 系统层正式英文 | 历史代码别名 | 核心定义与语义范围 |
+| :--- | :--- | :--- | :--- |
+| **工作项** | `WorkItem` | `Task` | 组织内需要完成的一件客观工作任务，具独立生命周期 |
+| **工作分配** | `WorkAssignment` | `Assignment` | 某个 Agent 实例对工作项中某特定角色的有期限责任（带租约 Lease） |
+| **工作执行**（前端：执行记录） | `WorkExecution` | `Run` | 某个 Agent 对一次工作分配的具体逻辑执行过程 |
+| **启动记录 / 启动尝试** | `AgentLaunch` | `LaunchAttempt` | 系统为推进工作执行，实际启动一次具体 Agent 进程的记录 |
+| **运行空间** | `RuntimeScope` | LSM `Logical Session` | LSM 运行时为一次工作执行划定的安全隔离执行范围与权限作用域 |
+| **执行任务** | `RuntimeJob` | LSM `Job` | 在运行空间内异步执行的具体机器任务（如 `cargo test`） |
+| **持久终端 / 终端** | `PersistentShell` | `shell session` | 运行空间内维持环境与状态的常驻命令行交互终端 |
+| **浏览器实例** | `BrowserInstance` | `browser session` | 运行空间内受控的有状态浏览器实例 |
+| **模型会话** | `ProviderThread` | `Provider Session` | Codex / Claude / Gemini 模型自身的连续私有对话流 |
+| **工作对话** | `DirectConversation` | `Conversation` | 人类与特定 Agent 实例直接进行的一对一持久化双向沟通 |
+| **上下文快照** | `ContextSnapshot` | `ContextRevision` | 某次工作执行初始化时冻结的完整工作背景、目标与记忆视图 |
+| **记忆** | `Memory` | `Memory` / `Context` | 长期持久化知识（跨越任务与会话），分组织/项目/员工/工作等作用域 |
+| **成果物** | `Artifact` | `Artifact` | 被正式归档、持久托管并可全局引用的工作交付物证据（Managed Store） |
+| **决策记录** | `Decision` | `Decision` | 经确认的、对后续工作产生约束与指导的技术或业务决断 |
+| **工作交接** | `Handoff` | `Handoff` | 工作责任从一个执行转交至另一个执行的结构化交接协议 |
+| **执行证据** | `WorkExecutionEvidence` | `RunExecutionEvidence`| 将工作语义状态与底层 LSM Audit、Job Logs 关联的追溯证据 |
+
+> 规范详见：[docs/agent-work-and-context-spec.md](file:///Users/huayuxue/workspaces/morrows/docs/agent-work-and-context-spec.md)
+
+## Knowledge, Memory & Summary Hierarchy (知识与记忆层级)
+
+Knowledge is partitioned into four distinct tiers:
+1. **Long-term Memory (长期记忆)**: Partitioned into `organization`, `project`, `agent`, and `task` scopes. Evolves via append-only revisions (`supersedes`). Raw tool outputs, excessive shell logs, and model conjectures MUST NOT enter long-term memory.
+2. **ContextSnapshot (上下文快照)**: Immutable materialized view pinned to a `WorkExecution`. Answers: *"What exactly did this Agent know at execution time?"*
+3. **Structured Summary (结构化摘要)**: Derived data composed of **Deterministic Facts** (changed files, git commits, tests run and exit codes, produced artifacts) + **Semantic Extraction** (goals, findings, blockers, next steps). Crucial findings MUST attach evidence references (`evidence_refs`).
+4. **Context Package (上下文包)**: The standardized package for transferring state across Agents and Providers without sharing private chat history.
+
 ## Local architecture
 
 ```
@@ -16,6 +83,31 @@ REST is the company control plane: registry, fleet, dispatch, Assignment/Run lif
 launch, cancellation, and provider adapters. MCP is an employee-facing interface backed
 by the same store/domain invariants, but exposes only work access, memory, collaboration,
 handoff, and progress/completion reporting. MCP is not an HTTP-to-HTTP adapter.
+
+### Agent credential boundary
+
+Agent/bridge authentication is separate from operator/control-plane authentication.
+
+Morrows can issue two credential classes for one `AgentInstance`:
+
+- `runtime`: short-lived and bound to a `Run`; launch adapters mint one for each
+  Codex/CodeBuddy process and `finish_launch_attempt` revokes active runtime
+  credentials for that Run in the same transaction as process termination.
+- `bridge`: explicitly issued/revoked by the trusted local control plane for an
+  external provider bridge.
+
+Only SHA-256 token hashes are stored in SQLite. The plaintext `mrw_agent_*` token is
+returned once at issuance or held transiently by the launcher. HTTP authentication uses
+`Authorization: Bearer ...`; the token subject becomes the canonical
+`X-Agent-Instance-Id`. If that identity header is also supplied, it must match the token.
+
+`MORROWS_REQUIRE_AGENT_AUTH=1` disables the legacy identity-header-only employee path.
+The default loopback mode keeps that path temporarily for old local bridges.
+
+This does **not** authenticate the operator/control-plane REST surface. Until a separate
+operator credential/RBAC layer exists, `morrows-server` refuses non-loopback
+`MORROWS_BIND`. Agent credentials therefore improve employee/provider isolation without
+claiming that the whole control plane is remotely deployable.
 
 ## Implemented entities
 
@@ -51,6 +143,7 @@ AgentInstance remains the worker identity referenced by M1/M2 work. M3 links eac
 9. Daemon restart does not erase Tasks, Runs, checkpoints, or pending durable jobs.
 10. Conversation list reads return summary metadata only; message history is a separate paged read.
 11. Direct conversation MCP access is scoped to the addressed AgentInstance.
+12. **Ultimate Recovery Invariant (终极恢复原则)**: Even if the original Agent process, Provider Session, execution machine, and temporary workspace directories disappear completely, a new Agent can reconstruct full state and proceed solely from Morrows canonical records (WorkItem, ContextSnapshot, Memory, Decision, Artifact, Summary, Handoff, Evidence).
 
 ## Direct Agent conversations
 
@@ -397,5 +490,5 @@ REST additions under `/api`:
 Launch profiles, attempts, enqueue/stop, instruction sending, and external invitation
 acceptance are control-plane REST/Web UI operations and are intentionally absent from
 employee MCP. The Web Task Detail view supports launch/invite, resume, instruction send,
-stop, and status. Dispatch and launch remain explicit separate actions. Authentication
-and remote process launch belong to the later deployment milestone.
+stop, and status. Agent/provider calls now support issued Bearer credentials, while
+operator/control-plane authentication and remote process launch remain deployment milestones.

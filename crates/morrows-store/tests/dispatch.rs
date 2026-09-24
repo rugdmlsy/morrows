@@ -235,6 +235,78 @@ async fn concurrent_dispatch_and_dispatch_next_are_deterministic() {
 }
 
 #[tokio::test]
+async fn scheduled_dispatch_is_persistent_and_does_not_spam_no_candidate_decisions() {
+    let store = Store::connect("sqlite::memory:").await.unwrap();
+    let defaults = store
+        .get_dispatch_scheduler_settings("executor")
+        .await
+        .unwrap();
+    assert!(!defaults.enabled);
+    assert_eq!(defaults.interval_seconds, 2);
+    assert!(defaults.auto_launch);
+
+    let configured = store
+        .set_dispatch_scheduler_settings(
+            "executor",
+            SetDispatchSchedulerSettings {
+                enabled: true,
+                interval_seconds: 1,
+                auto_launch: false,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(configured.enabled);
+    assert_eq!(configured.interval_seconds, 1);
+    assert!(!configured.auto_launch);
+    assert_eq!(
+        store.list_dispatch_scheduler_settings().await.unwrap().len(),
+        1
+    );
+
+    let task = store
+        .create_task(input(json!({"title":"no scheduler candidate"})))
+        .await
+        .unwrap();
+    policy(&store, task.id, &["missing-capability"]).await;
+
+    for _ in 0..3 {
+        let result = store.dispatch_next_scheduled("executor").await.unwrap();
+        assert!(result.dispatched.is_none());
+        assert!(result.attempts.is_empty());
+    }
+    assert!(
+        store
+            .task_dispatch_decisions(task.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let manual = store.dispatch_next("executor").await.unwrap();
+    assert!(manual.dispatched.is_none());
+    assert_eq!(manual.attempts.len(), 1);
+    assert_eq!(
+        store.task_dispatch_decisions(task.id).await.unwrap().len(),
+        1
+    );
+
+    assert!(matches!(
+        store
+            .set_dispatch_scheduler_settings(
+                "reviewer",
+                SetDispatchSchedulerSettings {
+                    enabled: true,
+                    interval_seconds: 1,
+                    auto_launch: true,
+                },
+            )
+            .await,
+        Err(DomainError::InvalidInput(_))
+    ));
+}
+
+#[tokio::test]
 async fn stale_capacity_and_policy_filters_are_rejected() {
     let store = Store::connect("sqlite::memory:").await.unwrap();
     let agent = worker(&store, "filtered", &["code"], 1, 1).await;

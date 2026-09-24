@@ -124,6 +124,7 @@ pub struct Run {
     pub result: Option<Value>,
     pub started_at: DateTime<Utc>,
     pub ended_at: Option<DateTime<Utc>>,
+    pub context_revision_id: Option<Id>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -199,3 +200,12 @@ pub use launch::*;
 
 mod conversation;
 pub use conversation::*;
+
+mod context_package;
+pub use context_package::*;
+
+mod agent_delivery;
+pub use agent_delivery::*;
+
+mod agent_auth;
+pub use agent_auth::*;

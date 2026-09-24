@@ -101,6 +101,7 @@ type Run = {
   failure_reason?: string | null;
   checkpoint?: unknown;
   result?: unknown;
+  context_revision_id?: string | null;
   started_at: string;
   ended_at?: string | null;
 };
@@ -130,6 +131,31 @@ type ContextRevision = {
   current_summary: string;
   created_by_actor_id: string;
   created_at: string;
+};
+
+type ContextPackage = {
+  id: string;
+  work_item_id: string;
+  objective: string;
+  summary?: unknown | null;
+  context_snapshot_id?: string | null;
+  memory_refs: string[];
+  decision_refs: string[];
+  artifact_refs: string[];
+  changed_files: string[];
+  verified_results: string[];
+  blockers: string[];
+  unresolved_questions: string[];
+  next_action: string;
+  source_run_id?: string | null;
+  source_agent_id?: string | null;
+  created_at: string;
+};
+
+type SystemHealth = {
+  ok: boolean;
+  service: string;
+  mcp?: { ready: boolean; path: string };
 };
 
 type EventItem = {
@@ -258,6 +284,10 @@ export default function App() {
   const [events, setEvents] = useState<EventItem[]>([]);
   const [collaboration, setCollaboration] = useState<Collaboration | null>(null);
   const [context, setContext] = useState<ContextRevision | null>(null);
+  const [contextPackage, setContextPackage] = useState<ContextPackage | null>(null);
+  const [contextBusy, setContextBusy] = useState(false);
+  const [systemHealth, setSystemHealth] = useState<SystemHealth | null>(null);
+  const [healthCheckedAt, setHealthCheckedAt] = useState<Date | null>(null);
   const [dispatchPolicies, setDispatchPolicies] = useState<DispatchPolicy[]>([]);
   const [dispatchPolicy, setDispatchPolicy] = useState<DispatchPolicy | null>(null);
   const [dispatchPreview, setDispatchPreview] = useState<DispatchPreview | null>(null);
@@ -283,6 +313,17 @@ export default function App() {
     window.localStorage.setItem("morrows.locale", locale);
     document.documentElement.lang = locale;
   }, [locale]);
+
+  const refreshHealth = useCallback(async () => {
+    try {
+      const health = await api<SystemHealth>("/api/health");
+      setSystemHealth(health);
+      setHealthCheckedAt(new Date());
+    } catch {
+      setSystemHealth(null);
+      setHealthCheckedAt(new Date());
+    }
+  }, []);
 
   const refreshFleet = useCallback(async () => {
     try {
@@ -313,11 +354,12 @@ export default function App() {
   const refreshDetail = useCallback(async () => {
     if (view !== "queue" || !selectedId) return;
     try {
-      const [nextAssignments, nextRuns, nextEvents, nextContext, nextCollaboration, nextPolicy, nextPreview, nextDispatchDecisions, nextLaunchAttempts, nextLaunchInstructions] = await Promise.all([
+      const [nextAssignments, nextRuns, nextEvents, nextContext, nextContextPackage, nextCollaboration, nextPolicy, nextPreview, nextDispatchDecisions, nextLaunchAttempts, nextLaunchInstructions] = await Promise.all([
         api<Assignment[]>(`/api/tasks/${selectedId}/assignments`),
         api<Run[]>(`/api/tasks/${selectedId}/runs`),
         api<EventItem[]>(`/api/tasks/${selectedId}/events`),
         api<ContextRevision>(`/api/tasks/${selectedId}/context`).catch(() => null),
+        api<ContextPackage | null>(`/api/tasks/${selectedId}/context-package`).catch(() => null),
         api<Collaboration>(`/api/tasks/${selectedId}/collaboration`),
         api<DispatchPolicy>(`/api/tasks/${selectedId}/dispatch-policy/executor`).catch(() => null),
         api<DispatchPreview>(`/api/tasks/${selectedId}/dispatch-preview/executor`).catch(() => null),
@@ -329,6 +371,7 @@ export default function App() {
       setRuns(nextRuns);
       setEvents(nextEvents);
       setContext(nextContext);
+      setContextPackage(nextContextPackage);
       setCollaboration(nextCollaboration);
       setDispatchPolicy(nextPolicy);
       setDispatchPreview(nextPreview);
@@ -344,6 +387,12 @@ export default function App() {
       setError(e instanceof Error ? e.message : String(e));
     }
   }, [view, selectedId, openRunId]);
+
+  useEffect(() => {
+    void refreshHealth();
+    const timer = window.setInterval(() => void refreshHealth(), 5000);
+    return () => window.clearInterval(timer);
+  }, [refreshHealth]);
 
   useEffect(() => {
     void refreshFleet();
@@ -378,6 +427,60 @@ export default function App() {
         setDispatchLease(900);
       });
   }, [view, selectedId]);
+
+  async function saveContext(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!selectedId) return;
+    const form = new FormData(event.currentTarget);
+    const goal = String(form.get("goal") || "").trim();
+    const background = String(form.get("background") || "").trim();
+    const currentSummary = String(form.get("current_summary") || "").trim();
+    const constraintsText = String(form.get("constraints") || "{}").trim();
+    setContextBusy(true);
+    try {
+      let constraints: unknown;
+      try {
+        constraints = JSON.parse(constraintsText || "{}");
+      } catch {
+        throw new Error(t("invalidConstraintsJson"));
+      }
+      const next = await api<ContextRevision>(`/api/tasks/${selectedId}/context`, {
+        method: "POST",
+        body: JSON.stringify({
+          goal,
+          background,
+          current_summary: currentSummary,
+          constraints,
+          created_by_actor_id: "human:webui",
+        }),
+      });
+      setContext(next);
+      await refreshQueueBase();
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setContextBusy(false);
+    }
+  }
+
+  async function assembleContextPackage() {
+    if (!selectedId) return;
+    setContextBusy(true);
+    try {
+      const assembled = await api<ContextPackage>(`/api/tasks/${selectedId}/context-package`, {
+        method: "POST",
+        body: JSON.stringify({ assemble: true }),
+      });
+      setContextPackage(assembled);
+      await refreshDetail();
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setContextBusy(false);
+    }
+  }
 
   async function saveDispatchPolicy() {
     if (!selectedId) return;
@@ -576,11 +679,17 @@ export default function App() {
           </button>
         </nav>
 
-        <div className="system-card">
+        <div className={`system-card ${systemHealth?.ok ? "system-online" : healthCheckedAt ? "system-offline" : "system-checking"}`}>
           <span className="status-dot" />
           <div>
             <strong>{t("localDaemon")}</strong>
-            <small>127.0.0.1:8787</small>
+            <small>
+              {systemHealth?.ok
+                ? `127.0.0.1:8787 · ${t("online")}`
+                : healthCheckedAt
+                  ? t("unreachable")
+                  : t("checking")}
+            </small>
           </div>
         </div>
       </aside>
@@ -600,7 +709,12 @@ export default function App() {
             >
               {t("switchLanguage")}
             </button>
-            <div className="mcp-pill">MCP /mcp</div>
+            <div
+              className={`mcp-pill ${systemHealth?.mcp?.ready ? "mcp-ready" : healthCheckedAt ? "mcp-unavailable" : "mcp-checking"}`}
+              title={healthCheckedAt ? `${t("lastChecked")} ${healthCheckedAt.toLocaleTimeString(locale)}` : t("checking")}
+            >
+              MCP {systemHealth?.mcp?.path || "/mcp"} · {systemHealth?.mcp?.ready ? t("ready") : healthCheckedAt ? t("unavailable") : t("checking")}
+            </div>
           </div>
         </header>
 
@@ -669,6 +783,65 @@ export default function App() {
                       ) : (
                         <div className="empty compact">{t("noContext")}</div>
                       )}
+
+                      <details className="context-editor">
+                        <summary>{context ? t("reviseContext") : t("createContext")}</summary>
+                        <form
+                          className="context-editor-grid"
+                          key={context?.id ?? selectedId ?? "new-context"}
+                          onSubmit={(event) => void saveContext(event)}
+                        >
+                          <label>
+                            <span>{t("contextGoal")}</span>
+                            <input name="goal" defaultValue={context?.goal ?? ""} />
+                          </label>
+                          <label>
+                            <span>{t("contextSummary")}</span>
+                            <textarea name="current_summary" rows={3} defaultValue={context?.current_summary ?? ""} />
+                          </label>
+                          <label>
+                            <span>{t("contextBackground")}</span>
+                            <textarea name="background" rows={3} defaultValue={context?.background ?? ""} />
+                          </label>
+                          <label>
+                            <span>{t("contextConstraints")}</span>
+                            <textarea
+                              name="constraints"
+                              className="mono-input"
+                              rows={4}
+                              defaultValue={JSON.stringify(context?.constraints ?? {}, null, 2)}
+                            />
+                          </label>
+                          <button type="submit" disabled={contextBusy}>{t("saveContext")}</button>
+                        </form>
+                      </details>
+
+                      <h3>{t("contextPackage")}</h3>
+                      <div className="context-package-card">
+                        <div className="mini-card-row">
+                          <strong>{contextPackage?.objective || t("noContextPackage")}</strong>
+                          <button type="button" className="secondary" onClick={() => void assembleContextPackage()} disabled={contextBusy}>
+                            {contextPackage ? t("refreshContextPackage") : t("assembleContextPackage")}
+                          </button>
+                        </div>
+                        {contextPackage ? <>
+                          <small>
+                            {t("created")} {formatAge(locale, contextPackage.created_at)}
+                            {contextPackage.context_snapshot_id ? ` · ${t("context")} ${shortId(contextPackage.context_snapshot_id)}` : ""}
+                          </small>
+                          {contextPackage.summary != null && <pre>{typeof contextPackage.summary === "string" ? contextPackage.summary : JSON.stringify(contextPackage.summary, null, 2)}</pre>}
+                          {!!contextPackage.changed_files.length && <p><strong>{t("changedFiles")}：</strong>{contextPackage.changed_files.join(", ")}</p>}
+                          {!!contextPackage.verified_results.length && <p><strong>{t("verifiedResults")}：</strong>{contextPackage.verified_results.join("; ")}</p>}
+                          {!!contextPackage.blockers.length && <p><strong>{t("blockers")}：</strong>{contextPackage.blockers.join("; ")}</p>}
+                          {!!contextPackage.unresolved_questions.length && <p><strong>{t("unresolvedQuestions")}：</strong>{contextPackage.unresolved_questions.join("; ")}</p>}
+                          {contextPackage.next_action && <p><strong>{t("nextAction")}：</strong>{contextPackage.next_action}</p>}
+                          <div className="context-package-refs">
+                            <span>{t("memoryRefs")} {contextPackage.memory_refs.length}</span>
+                            <span>{t("decisions")} {contextPackage.decision_refs.length}</span>
+                            <span>{t("artifacts")} {contextPackage.artifact_refs.length}</span>
+                          </div>
+                        </> : <p>{t("contextPackageHint")}</p>}
+                      </div>
 
                       <h3>{t("dispatcher")}</h3>
                       <div className="dispatch-card">
@@ -752,9 +925,9 @@ export default function App() {
                                         disabled={launchBusy}
                                         onClick={() => void enqueueLaunch(item.id, profile.id)}
                                       >
-                                        {profile.adapter === "codex_cli" ? t("launch") : t("inviteExternal")} · {profile.name}
+                                        {["codex_cli", "codebuddy_cli"].includes(profile.adapter) ? t("launch") : t("inviteExternal")} · {profile.name}
                                       </button>
-                                      {profile.adapter === "codex_cli" && (() => {
+                                      {["codex_cli", "codebuddy_cli"].includes(profile.adapter) && (() => {
                                         const previous = launchAttempts.find((attempt) =>
                                           attempt.launch_profile_id === profile.id &&
                                           attempt.agent_instance_id === item.agent_instance_id &&
@@ -820,6 +993,7 @@ export default function App() {
                           return <div className="mini-card run-card" key={run.id}>
                             <div className="mini-card-row"><code>{shortId(run.id)}</code><StateBadge state={run.status} locale={locale} /></div>
                             <small>{run.external_session_ref || t("noExternalSession")} · {formatAge(locale, run.started_at)}</small>
+                            {run.context_revision_id && <small>{t("pinnedContext")} · {shortId(run.context_revision_id)}</small>}
                             {(run.failure_reason || run.stop_reason) && <small>{formatState(locale, run.failure_reason || run.stop_reason || "")}</small>}
                             <div className="run-actions">
                               <button className="secondary" onClick={() => void toggleRunExecution(run.id)}>

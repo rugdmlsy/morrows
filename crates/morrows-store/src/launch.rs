@@ -1,4 +1,5 @@
 use super::*;
+use crate::delivery::enqueue_agent_delivery_tx;
 use morrows_core::*;
 use std::path::Path;
 
@@ -18,16 +19,22 @@ impl Store {
                 "launch profile name cannot be empty".into(),
             ));
         }
-        if input.adapter != "codex_cli" && !is_external_adapter(&input.adapter) {
+        if !is_local_adapter(&input.adapter) && !is_external_adapter(&input.adapter) {
             return Err(DomainError::InvalidInput(format!(
                 "unsupported launch adapter {}",
                 input.adapter
             )));
         }
-        if input.adapter == "codex_cli" {
+        if is_local_adapter(&input.adapter) {
             validate_absolute("program", &input.program)?;
-            if let Some(value) = &input.codex_home {
-                validate_absolute("codex_home", value)?;
+            if input.adapter == "codex_cli" {
+                if let Some(value) = &input.codex_home {
+                    validate_absolute("codex_home", value)?;
+                }
+            } else if input.codex_home.is_some() {
+                return Err(DomainError::InvalidInput(
+                    "codebuddy_cli does not use codex_home".into(),
+                ));
             }
             if let Some(value) = &input.default_cwd {
                 validate_absolute("default_cwd", value)?;
@@ -148,7 +155,7 @@ impl Store {
         let cwd = if external {
             if input.cwd.is_some() || input.resume_from_attempt_id.is_some() {
                 return Err(DomainError::InvalidInput(
-                    "external adapters do not accept cwd or Codex resume".into(),
+                    "external adapters do not accept cwd or local provider resume".into(),
                 ));
             }
             None
@@ -445,6 +452,15 @@ impl Store {
             run_id
         } else {
             let run_id = Uuid::new_v4();
+            let current_ctx_rev: Option<String> = sqlx::query_scalar(
+                "SELECT current_context_revision_id FROM tasks WHERE id=?",
+            )
+            .bind(assignment.task_id.to_string())
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(storage)?
+            .flatten();
+
             sqlx::query(
                 "INSERT INTO runs(id,task_id,assignment_id,agent_instance_id,status,started_at)
                  VALUES(?,?,?,?,'running',?)",
@@ -457,6 +473,17 @@ impl Store {
             .execute(&mut *tx)
             .await
             .map_err(storage)?;
+            if let Some(ctx_id) = current_ctx_rev {
+                sqlx::query(
+                    "INSERT INTO run_context_revisions(run_id,context_revision_id,pinned_at) VALUES(?,?,?)",
+                )
+                .bind(run_id.to_string())
+                .bind(ctx_id)
+                .bind(now.to_rfc3339())
+                .execute(&mut *tx)
+                .await
+                .map_err(storage)?;
+            }
             if let Some(subject) = lsm_subject {
                 sqlx::query(
                     "INSERT INTO run_lsm_provisioning(run_id,subject,created_at,updated_at)
@@ -635,6 +662,16 @@ impl Store {
                 .map_err(storage)?;
         }
         if let Some(run_id) = attempt.run_id {
+            sqlx::query(
+                "UPDATE agent_credentials
+                 SET revoked_at=COALESCE(revoked_at,?)
+                 WHERE run_id=? AND kind='runtime' AND revoked_at IS NULL",
+            )
+            .bind(now.to_rfc3339())
+            .bind(run_id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?;
             if external_session_ref.is_some() {
                 sqlx::query("UPDATE runs SET external_session_ref=COALESCE(?,external_session_ref) WHERE id=?")
                     .bind(&external_session_ref)
@@ -850,6 +887,15 @@ impl Store {
             ));
         }
         let run_id = Uuid::new_v4();
+        let current_ctx_rev: Option<String> = sqlx::query_scalar(
+            "SELECT current_context_revision_id FROM tasks WHERE id=?",
+        )
+        .bind(assignment.task_id.to_string())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(storage)?
+        .flatten();
+
         sqlx::query(
             "INSERT INTO runs(id,task_id,assignment_id,agent_instance_id,external_session_ref,status,started_at)
              VALUES(?,?,?,?,?,'running',?)",
@@ -863,6 +909,17 @@ impl Store {
         .execute(&mut *tx)
         .await
         .map_err(storage)?;
+        if let Some(ctx_id) = current_ctx_rev {
+            sqlx::query(
+                "INSERT INTO run_context_revisions(run_id,context_revision_id,pinned_at) VALUES(?,?,?)",
+            )
+            .bind(run_id.to_string())
+            .bind(ctx_id)
+            .bind(now.to_rfc3339())
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?;
+        }
         sqlx::query("UPDATE launch_attempts SET status='running',run_id=?,external_session_ref=?,started_at=? WHERE id=?")
             .bind(run_id.to_string())
             .bind(session_ref)
@@ -916,12 +973,18 @@ impl Store {
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(storage)?;
-        let status: String = sqlx::query_scalar("SELECT status FROM launch_attempts WHERE id=?")
-            .bind(input.launch_attempt_id.to_string())
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(storage)?
-            .ok_or_else(|| DomainError::NotFound("launch attempt".into()))?;
+        let attempt_row = sqlx::query(
+            "SELECT status,task_id,agent_instance_id FROM launch_attempts WHERE id=?",
+        )
+        .bind(input.launch_attempt_id.to_string())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(storage)?
+        .ok_or_else(|| DomainError::NotFound("launch attempt".into()))?;
+        let status: String = attempt_row.try_get("status").map_err(storage)?;
+        let task_id = parse_id(attempt_row.try_get("task_id").map_err(storage)?)?;
+        let agent_instance_id =
+            parse_id(attempt_row.try_get("agent_instance_id").map_err(storage)?)?;
         if !matches!(
             status.as_str(),
             "queued" | "starting" | "running" | "awaiting_agent"
@@ -946,19 +1009,31 @@ impl Store {
             .execute(&mut *tx)
             .await
             .map_err(storage)?;
-        let task_id: String = sqlx::query_scalar("SELECT task_id FROM launch_attempts WHERE id=?")
-            .bind(input.launch_attempt_id.to_string())
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(storage)?;
+        let delivery_id = enqueue_agent_delivery_tx(
+            &mut tx,
+            agent_instance_id,
+            Some(task_id),
+            "launch_instruction",
+            id,
+            json!({
+                "launch_attempt_id": input.launch_attempt_id,
+                "instruction_id": id,
+                "body": body,
+            }),
+        )
+        .await?;
         append_event_tx(
             &mut tx,
             actor_type,
             &actor_id,
             "task",
-            parse_id(task_id)?,
+            task_id,
             "launch.instruction_sent",
-            json!({"launch_attempt_id":input.launch_attempt_id,"instruction_id":id}),
+            json!({
+                "launch_attempt_id":input.launch_attempt_id,
+                "instruction_id":id,
+                "delivery_id":delivery_id,
+            }),
             None,
         )
         .await?;
@@ -1180,7 +1255,7 @@ impl Store {
     pub async fn recover_launch_jobs_after_restart(&self) -> Result<usize, DomainError> {
         let rows = sqlx::query(
             "SELECT a.id FROM launch_attempts a JOIN launch_profiles p ON p.id=a.launch_profile_id
-             WHERE p.adapter='codex_cli' AND a.status IN ('starting','running')",
+             WHERE p.adapter IN ('codex_cli','codebuddy_cli') AND a.status IN ('starting','running')",
         )
         .fetch_all(&self.pool)
         .await
@@ -1331,6 +1406,10 @@ fn row_to_launch_attempt(row: sqlx::sqlite::SqliteRow) -> Result<LaunchAttempt, 
         started_at: parse_opt_dt(row.try_get("started_at").map_err(storage)?)?,
         ended_at: parse_opt_dt(row.try_get("ended_at").map_err(storage)?)?,
     })
+}
+
+fn is_local_adapter(adapter: &str) -> bool {
+    matches!(adapter, "codex_cli" | "codebuddy_cli")
 }
 
 fn is_external_adapter(adapter: &str) -> bool {

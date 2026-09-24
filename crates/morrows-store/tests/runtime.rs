@@ -441,3 +441,135 @@ async fn repeated_restart_uses_the_latest_known_codex_conversation() {
     let restart_two = store.enqueue_run_restart(execution.run.id).await.unwrap();
     assert_eq!(restart_two.resume_from_attempt_id, Some(first.id));
 }
+
+#[tokio::test]
+async fn pending_delivery_can_resume_interrupted_codex_run_without_new_run() {
+    let (store, assignment_id, profile_id) = prepared().await;
+    let first = store
+        .enqueue_launch(input(json!({
+            "assignment_id": assignment_id,
+            "launch_profile_id": profile_id
+        })))
+        .await
+        .unwrap();
+    store.claim_launch_job().await.unwrap().unwrap();
+    let execution = store.begin_launch_attempt(first.id).await.unwrap();
+    let run_id = execution.run.id;
+    store.bind_run_lsm(run_id, "s_delivery").await.unwrap();
+    store
+        .mark_launch_running(
+            first.id,
+            Some(123),
+            "/tmp/delivery-stdout".into(),
+            "/tmp/delivery-stderr".into(),
+        )
+        .await
+        .unwrap();
+
+    store
+        .send_launch_instruction(
+            SendLaunchInstruction {
+                launch_attempt_id: first.id,
+                body: "Continue with the new evidence".into(),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+    store
+        .finish_launch_attempt(
+            first.id,
+            Some(0),
+            Some("codex-delivery-session".into()),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(store.get_run(run_id).await.unwrap().status, "interrupted");
+
+    let candidates = store.delivery_resume_candidates().await.unwrap();
+    assert_eq!(candidates, vec![run_id]);
+
+    let resumed = store.enqueue_run_delivery_resume(run_id).await.unwrap();
+    assert_eq!(resumed.restart_run_id, Some(run_id));
+    assert_eq!(resumed.resume_from_attempt_id, Some(first.id));
+
+    // A queued continuation fences a second delivery worker from enqueuing another.
+    assert!(store.delivery_resume_candidates().await.unwrap().is_empty());
+
+    store.claim_launch_job().await.unwrap().unwrap();
+    let next = store.begin_launch_attempt(resumed.id).await.unwrap();
+    assert_eq!(next.run.id, run_id);
+    assert_eq!(store.get_run(run_id).await.unwrap().status, "running");
+    assert_eq!(
+        store
+            .run_lsm_binding(run_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .logical_session_id,
+        "s_delivery"
+    );
+}
+
+#[tokio::test]
+async fn queued_delivery_makes_interrupted_codex_run_eligible_for_automatic_resume() {
+    let (store, assignment_id, profile_id) = prepared().await;
+    let assignment = store.get_assignment(assignment_id).await.unwrap();
+    let first = store
+        .enqueue_launch(input(json!({
+            "assignment_id":assignment_id,
+            "launch_profile_id":profile_id
+        })))
+        .await
+        .unwrap();
+    store.claim_launch_job().await.unwrap().unwrap();
+    let execution = store.begin_launch_attempt(first.id).await.unwrap();
+    let run_id = execution.run.id;
+    store.bind_run_lsm(run_id, "s_delivery").await.unwrap();
+    store
+        .finish_launch_attempt(
+            first.id,
+            Some(0),
+            Some("codex-delivery-session".into()),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(store.get_run(run_id).await.unwrap().status, "interrupted");
+    assert!(
+        store
+            .delivery_resume_candidates()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let conversation = store
+        .create_conversation(CreateConversation {
+            agent_instance_id: assignment.agent_instance_id,
+            title: "Delivery wake".into(),
+        })
+        .await
+        .unwrap();
+    store
+        .create_human_conversation_message(conversation.id, "continue this turn")
+        .await
+        .unwrap();
+
+    assert_eq!(
+        store.delivery_resume_candidates().await.unwrap(),
+        vec![run_id]
+    );
+    let resumed = store.enqueue_run_delivery_resume(run_id).await.unwrap();
+    assert_eq!(resumed.restart_run_id, Some(run_id));
+    assert_eq!(resumed.resume_from_attempt_id, Some(first.id));
+    assert!(
+        store
+            .delivery_resume_candidates()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}

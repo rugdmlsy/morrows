@@ -237,6 +237,30 @@ impl Store {
     /// Explicit restart creates a new process attempt while preserving the Run and
     /// its LSM Session. The transaction prevents two restarts claiming one window.
     pub async fn enqueue_run_restart(&self, run_id: Id) -> Result<LaunchAttempt, DomainError> {
+        self.enqueue_run_restart_with_actor(run_id, "human", "local", "run.restart_requested")
+            .await
+    }
+
+    pub async fn enqueue_run_delivery_resume(
+        &self,
+        run_id: Id,
+    ) -> Result<LaunchAttempt, DomainError> {
+        self.enqueue_run_restart_with_actor(
+            run_id,
+            "system",
+            "delivery",
+            "run.delivery_resume_requested",
+        )
+        .await
+    }
+
+    async fn enqueue_run_restart_with_actor(
+        &self,
+        run_id: Id,
+        actor_type: &str,
+        actor_id: &str,
+        event_type: &str,
+    ) -> Result<LaunchAttempt, DomainError> {
         let now = Utc::now();
         let mut tx = self
             .pool
@@ -318,11 +342,11 @@ impl Store {
             .bind(cwd).bind(now.to_rfc3339()).execute(&mut *tx).await.map_err(storage)?;
         append_event_tx(
             &mut tx,
-            "human",
-            "local",
+            actor_type,
+            actor_id,
             "run",
             run_id,
-            "run.restart_requested",
+            event_type,
             json!({"launch_attempt_id":attempt_id}),
             None,
         )

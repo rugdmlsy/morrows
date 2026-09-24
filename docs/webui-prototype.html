@@ -1,0 +1,2351 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<script>
+(function(){
+  try {
+    var saved = localStorage.getItem('morrows_theme');
+    var theme = saved || (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+    document.documentElement.setAttribute('data-theme', theme);
+  } catch(e) {}
+})();
+</script>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Morrows · 前端 UI 设计稿 — 本地优先的 Agent 工作协调控制台</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23141619'/%3E%3Ccircle cx='11' cy='21' r='5.5' fill='%23E8A33D'/%3E%3Cpath d='M6 9.5h20' stroke='%23E8A33D' stroke-width='2' stroke-linecap='round'/%3E%3Cpath d='M6 12.5h20' stroke='%236FA8C9' stroke-width='1.4' stroke-linecap='round'/%3E%3Cpath d='M6 15.5h20' stroke='%238B93A1' stroke-width='1.4' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="https://miaoda.feishu.cn/fonts/css2?family=Noto+Sans+SC:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
+<style>
+/* ============ 设计令牌 Design Tokens (深色高对比模式 Obsidian) ============ */
+:root{
+  --bg:#101216;            /* 应用底色：沉静曜黑，拉开与卡片层次 */
+  --bg-soft:#151820;       /* 次级底色 */
+  --elev:#171B24;          /* 侧栏 / 顶栏 / 悬浮组件 */
+  --panel:#1A1F2A;         /* 卡片 / 容器底色 */
+  --panel-2:#222938;       /* 悬停 / 内嵌 / 选中状态 */
+  --inset:#13171F;         /* 内嵌槽位 / 输入区 / 代码底色 */
+  --line:#2F3849;          /* 主描边：提升对比度，轮廓分明 */
+  --line-soft:#232B39;     /* 弱化分割线 */
+  --line-hover:#47536A;    /* 悬停描边强化 */
+  --ink:#F7F8FA;           /* 主文字：清晰白，高对比度 (WCAG AAA) */
+  --ink-2:#C5CBD6;         /* 次级文字：80% 对比度，正文与标签清晰可辨 */
+  --ink-3:#929BAC;         /* 弱化文字：提升至 5.5:1 对比度，时间戳/小字不再昏暗 */
+  --accent:#F0A73A;        /* 晨曦琥珀（主强调） */
+  --accent-2:#ED7154;      /* 晨曦珊瑚（渐变搭档） */
+  --accent-ink:#140E04;
+  --ok:#72C785;            /* 健康 / 运行 (强化明度与饱和度) */
+  --ok-ink:#07190D;
+  --warn:#E6AD52;          /* 等待 / 启动中 */
+  --bad:#E86F5E;           /* 失败 / 风险 */
+  --bad-ink:#220C08;
+  --info:#78B3D6;          /* 信息 / 交接 */
+  --info-ink:#0A1B28;
+  --idle:#929BAC;          /* 空闲 / 离线 */
+  --r-sm:7px; --r-md:10px; --r-lg:14px;
+  --shadow-1:0 1px 3px rgba(0,0,0,.35);
+  --shadow-2:0 10px 32px rgba(0,0,0,.50);
+  --mono:'JetBrains Mono',ui-monospace,'SF Mono',Consolas,'Courier New',monospace;
+  --sans:'Noto Sans SC','PingFang SC','Hiragino Sans GB','Microsoft YaHei',system-ui,-apple-system,sans-serif;
+  --card-hover-border:#47536A;
+  --table-th-bg:#151922;
+  --drawer-mask:rgba(6,8,11,.70);
+  --modal-mask:rgba(6,8,11,.75);
+}
+
+/* ============ 浅色模式 Light Mode (Daylight) ============ */
+[data-theme="light"]{
+  --bg:#F4F6F9;            /* 建筑感浅灰白底色 */
+  --bg-soft:#E9EDF3;       /* 浅色二级底色 */
+  --elev:#FFFFFF;          /* 纯白侧栏 / 顶栏 */
+  --panel:#FFFFFF;         /* 纯白卡片 */
+  --panel-2:#F1F4F8;       /* 悬停 / 激活态 */
+  --inset:#F2F5F8;         /* 凹陷槽位 / 输入底色 */
+  --line:#CCD4E0;          /* 边界描边：清晰利落，高对比度 */
+  --line-soft:#DFE4ED;     /* 弱化分割线 */
+  --line-hover:#98A5B9;    /* 悬停描边 */
+  --ink:#11141A;           /* 主文字：深碳黑，最高对比度 (WCAG AAA) */
+  --ink-2:#333C4B;         /* 次级文字：深岩灰 (WCAG AAA) */
+  --ink-3:#586475;         /* 弱化文字：中岩灰 (>4.8:1，清晰可读) */
+  --accent:#C26800;        /* 晨曦琥珀浅色适配版（高对比度） */
+  --accent-2:#C44327;      /* 晨曦珊瑚 */
+  --accent-ink:#FFFFFF;
+  --ok:#15803D;            /* 运行绿 */
+  --ok-ink:#FFFFFF;
+  --warn:#9A5B00;          /* 等待琥珀 */
+  --bad:#DC2626;           /* 警示红 */
+  --bad-ink:#FFFFFF;
+  --info:#0A6FB5;          /* 信息蓝 */
+  --info-ink:#FFFFFF;
+  --idle:#586475;          /* 空闲灰 */
+  --shadow-1:0 1px 3px rgba(15,23,42,.08),0 1px 2px rgba(15,23,42,.04);
+  --shadow-2:0 12px 32px rgba(15,23,42,.12),0 4px 8px rgba(15,23,42,.06);
+  --card-hover-border:#98A5B9;
+  --table-th-bg:#F8FAFC;
+  --drawer-mask:rgba(15,23,42,.45);
+  --modal-mask:rgba(15,23,42,.50);
+}
+
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:auto}
+body{background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:14px;line-height:1.55;-webkit-font-smoothing:antialiased;overflow-x:hidden}
+body::before{content:'';position:fixed;inset:0 0 auto 0;height:420px;background:radial-gradient(620px 300px at 78% -80px,rgba(240,167,58,.12),transparent 70%);pointer-events:none;z-index:0}
+[data-theme="light"] body::before{background:radial-gradient(620px 300px at 78% -80px,rgba(194,104,0,.08),transparent 70%)}
+::selection{background:rgba(240,167,58,.35)}
+[data-theme="light"] ::selection{background:rgba(194,104,0,.22)}
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-thumb{background:#323A48;border-radius:8px;border:2px solid var(--bg)}
+[data-theme="light"] ::-webkit-scrollbar-thumb{background:#CBD5E1;border-color:var(--bg)}
+::-webkit-scrollbar-track{background:transparent}
+a{color:var(--accent);text-decoration:none}
+.mono{font-family:var(--mono)}
+code{font-family:var(--mono);font-size:.86em;background:var(--inset);border:1px solid var(--line-soft);padding:1px 6px;border-radius:5px;color:var(--ink)}
+
+/* ============ 布局骨架 ============ */
+.app{display:grid;grid-template-columns:236px minmax(0,1fr);min-height:100vh;position:relative;z-index:1}
+.main{min-width:0;padding:20px 26px 64px;max-width:1480px;width:100%}
+
+/* ============ 顶栏 ============ */
+.topbar{grid-column:2;height:56px;display:flex;align-items:center;gap:14px;padding:0 26px;background:color-mix(in srgb,var(--elev) 82%,transparent);backdrop-filter:blur(10px);border-bottom:1px solid var(--line-soft);position:sticky;top:0;z-index:40}
+.topbar::after{content:'';position:absolute;left:0;right:0;bottom:-1px;height:1px;background:linear-gradient(90deg,transparent 0%,rgba(240,167,58,.55) 22%,rgba(237,113,84,.45) 60%,transparent 100%)}
+[data-theme="light"] .topbar::after{background:linear-gradient(90deg,transparent 0%,rgba(194,104,0,.45) 22%,rgba(196,67,39,.35) 60%,transparent 100%)}
+.topbar .crumb{font-size:15px;font-weight:600;display:flex;align-items:center;gap:8px}
+.topbar .crumb .en{font-family:var(--mono);font-size:11px;color:var(--ink-3);font-weight:400;letter-spacing:.4px}
+.topbar .right{margin-left:auto;display:flex;align-items:center;gap:10px}
+.topbar .clock{font-family:var(--mono);font-size:12px;color:var(--ink-2);border:1px solid var(--line);background:var(--panel);padding:4px 10px;border-radius:7px}
+.topbar .lang{font-size:12px}
+.search{display:flex;align-items:center;gap:7px;background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:0 10px;height:34px;width:240px;color:var(--ink-3)}
+.search input{background:none;border:0;outline:0;color:var(--ink);font:inherit;font-size:13px;width:100%}
+.search input::placeholder{color:var(--ink-3);opacity:.85}
+.search kbd{font-family:var(--mono);font-size:10px;color:var(--ink-3);border:1px solid var(--line);border-radius:4px;padding:1px 5px;background:var(--inset)}
+
+/* ============ 侧栏 ============ */
+.side{grid-row:1/3;background:var(--elev);border-right:1px solid var(--line-soft);display:flex;flex-direction:column;position:sticky;top:0;height:100vh;z-index:50}
+.brand{display:flex;align-items:center;gap:10px;padding:15px 16px 13px;border-bottom:1px solid var(--line-soft)}
+.brand .mark{width:30px;height:30px;flex:none}
+.brand .name{font-weight:700;font-size:15px;letter-spacing:.2px;color:var(--ink)}
+.brand .sub{font-size:10.5px;color:var(--ink-3);font-family:var(--mono);margin-top:1px}
+.nav{flex:1;padding:10px 10px 6px;overflow-y:auto}
+.nav-group{font-size:10.5px;color:var(--ink-3);letter-spacing:.8px;padding:12px 10px 6px;font-weight:600}
+.nav-item{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:8px;color:var(--ink-2);font-size:13.5px;cursor:pointer;border:1px solid transparent;user-select:none;transition:all .12s}
+.nav-item:hover{background:var(--panel-2);color:var(--ink)}
+.nav-item.active{background:var(--panel-2);color:var(--ink);border-color:var(--line);font-weight:500}
+.nav-item.active .ic{color:var(--accent)}
+.nav-item .ic{width:17px;height:17px;flex:none;color:var(--ink-3)}
+.nav-item .badge-cnt{margin-left:auto;font-family:var(--mono);font-size:10.5px;background:var(--inset);border:1px solid var(--line);color:var(--ink-2);padding:0 6px;border-radius:99px}
+.side-foot{border-top:1px solid var(--line-soft);padding:12px 14px 14px}
+.daemon{display:flex;align-items:center;gap:9px;font-size:12px;color:var(--ink-2)}
+.daemon .dot{width:7px;height:7px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 3px rgba(114,199,133,.2);animation:pulse 2.4s infinite}
+[data-theme="light"] .daemon .dot{box-shadow:0 0 0 3px rgba(21,128,61,.2)}
+.daemon .url{font-family:var(--mono);font-size:10.5px;color:var(--ink-3)}
+.planes-tip{margin-top:9px;font-size:10.5px;color:var(--ink-3);line-height:1.5}
+@keyframes pulse{0%,100%{box-shadow:0 0 0 3px rgba(114,199,133,.25)}50%{box-shadow:0 0 0 6px rgba(114,199,133,.05)}}
+
+/* ============ 视图容器 ============ */
+.view{display:none}
+.view.active{display:block;animation:viewIn .18s ease}
+@keyframes viewIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+.page-head{display:flex;align-items:flex-end;gap:12px;margin-bottom:16px;flex-wrap:wrap}
+.page-head h1{font-size:21px;font-weight:700;letter-spacing:.1px;color:var(--ink)}
+.page-head .en{font-family:var(--mono);font-size:11.5px;color:var(--ink-3);font-weight:400}
+.page-head .desc{font-size:12.5px;color:var(--ink-2);margin-top:2px}
+.page-head .tools{margin-left:auto;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+
+/* ============ 通用控件 ============ */
+.btn{display:inline-flex;align-items:center;gap:7px;font:inherit;font-size:13px;font-weight:500;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:7px 13px;cursor:pointer;transition:.14s}
+.btn:hover{border-color:var(--line-hover);background:var(--panel-2)}
+.btn:active{transform:translateY(1px)}
+.btn.primary{background:linear-gradient(135deg,var(--accent),var(--accent-2));border-color:transparent;color:var(--accent-ink);font-weight:600}
+.btn.primary:hover{filter:brightness(1.06)}
+.btn.ghost{background:transparent;border-color:transparent;color:var(--ink-2)}
+.btn.ghost:hover{background:var(--panel);color:var(--ink)}
+.btn .ic{width:14px;height:14px}
+.btn.sm{padding:5px 10px;font-size:12px;border-radius:7px}
+.chip{display:inline-flex;align-items:center;gap:6px;font:inherit;font-size:12.5px;color:var(--ink-2);background:transparent;border:1px solid var(--line);border-radius:99px;padding:5px 12px;cursor:pointer;transition:.14s}
+.chip:hover{color:var(--ink);border-color:var(--line-hover)}
+.chip.on{background:color-mix(in srgb,var(--accent) 16%,transparent);border-color:var(--accent);color:var(--accent);font-weight:500}
+.chip .n{font-family:var(--mono);font-size:10.5px;color:var(--ink-3)}
+.chip.on .n{color:var(--accent);font-weight:600}
+.chip-row{display:flex;gap:7px;flex-wrap:wrap;margin-bottom:14px}
+.icon-btn{width:34px;height:34px;display:inline-flex;align-items:center;justify-content:center;border-radius:8px;border:1px solid var(--line);background:var(--panel);color:var(--ink-2);cursor:pointer;transition:.14s}
+.icon-btn:hover{color:var(--ink);border-color:var(--line-hover)}
+
+/* ============ 卡片 / KPI ============ */
+.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--r-md);box-shadow:var(--shadow-1)}
+.card-head{display:flex;align-items:center;gap:10px;padding:13px 16px;border-bottom:1px solid var(--line-soft)}
+.card-head h3{font-size:13.5px;font-weight:600;color:var(--ink)}
+.card-head .hint{margin-left:auto;font-size:11px;color:var(--ink-3);font-family:var(--mono)}
+.card-body{padding:14px 16px}
+.kpi-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:14px}
+.kpi{background:var(--panel);border:1px solid var(--line);border-radius:var(--r-md);padding:14px 16px 12px;position:relative;overflow:hidden}
+.kpi::before{content:'';position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--kpi-accent,var(--accent));opacity:.85}
+.kpi .label{font-size:12px;color:var(--ink-2);display:flex;align-items:center;gap:6px;font-weight:500}
+.kpi .label .en{font-family:var(--mono);font-size:9.5px;color:var(--ink-3);letter-spacing:.5px;font-weight:400}
+.kpi .num{font-family:var(--mono);font-weight:600;font-size:27px;line-height:1.25;margin-top:5px;color:var(--ink)}
+.kpi .num .unit{font-size:13px;color:var(--ink-3);font-weight:500;margin-left:3px}
+.kpi .delta{font-family:var(--mono);font-size:11px;color:var(--ink-3);margin-top:3px}
+.kpi .delta b{color:var(--ok);font-weight:600}
+.kpi .delta b.neg{color:var(--bad)}
+.kpi .spark{position:absolute;right:8px;bottom:8px;opacity:.85}
+
+/* ============ 状态徽标 (高对比增强) ============ */
+.st{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:500;color:var(--ink-2);border:1px solid var(--line);border-radius:99px;padding:3px 10px;background:var(--inset);white-space:nowrap}
+.st .dot{width:6px;height:6px;border-radius:50%;background:var(--idle)}
+.st-running{color:#A3E4B5;border-color:rgba(114,199,133,.45);background:rgba(114,199,133,.14)}
+.st-running .dot{background:var(--ok);box-shadow:0 0 0 3px rgba(114,199,133,.20);animation:pulse 2.2s infinite}
+.st-launching{color:#FCE1AD;border-color:rgba(230,173,82,.45);background:rgba(230,173,82,.14)}
+.st-launching .dot{background:var(--warn);animation:pulse 1.2s infinite}
+.st-pending{color:#FCE1AD;border-color:rgba(230,173,82,.40);background:rgba(230,173,82,.12)}
+.st-pending .dot{background:var(--warn)}
+.st-done{color:#A3E4B5;border-color:rgba(114,199,133,.40);background:rgba(114,199,133,.12)}
+.st-done .dot{background:var(--ok)}
+.st-failed{color:#FFB3A8;border-color:rgba(232,111,94,.45);background:rgba(232,111,94,.14)}
+.st-failed .dot{background:var(--bad)}
+.st-handoff{color:#AFD8F2;border-color:rgba(120,179,214,.45);background:rgba(120,179,214,.14)}
+.st-handoff .dot{background:var(--info)}
+.st-idle{color:var(--ink-2);border-color:var(--line);background:var(--inset)}
+.st-idle .dot{background:var(--idle)}
+.st-offline{color:var(--ink-3);border-color:var(--line);background:var(--inset)}
+.st-offline .dot{background:#565D68}
+.st-accent{color:#FCE1AD;border-color:rgba(240,167,58,.45);background:rgba(240,167,58,.14)}
+.st-accent .dot{background:var(--accent)}
+
+/* 浅色模式专属徽标 */
+[data-theme="light"] .st-running{color:#116833;border-color:#87D5A4;background:#E8F7ED}
+[data-theme="light"] .st-launching{color:#8A5200;border-color:#F8CB7B;background:#FFF7E6}
+[data-theme="light"] .st-pending{color:#8A5200;border-color:#F8CB7B;background:#FFF7E6}
+[data-theme="light"] .st-done{color:#116833;border-color:#87D5A4;background:#E8F7ED}
+[data-theme="light"] .st-failed{color:#B91C1C;border-color:#FCA5A5;background:#FEF2F2}
+[data-theme="light"] .st-handoff{color:#0C5E9C;border-color:#96CEF2;background:#EFF6FC}
+[data-theme="light"] .st-idle{color:#333C4B;border-color:#CCD4E0;background:#F2F5F8}
+[data-theme="light"] .st-offline{color:#64748B;border-color:#CCD4E0;background:#F2F5F8}
+[data-theme="light"] .st-accent{color:#9A5200;border-color:#FFC480;background:#FFF4E5}
+
+.tag{font-family:var(--mono);font-size:11px;color:var(--ink-2);background:var(--inset);border:1px solid var(--line-soft);border-radius:5px;padding:2px 7px;white-space:nowrap}
+.tag.pri-high{color:#FFAFA4;border-color:rgba(232,111,94,.45);background:rgba(232,111,94,.12)}
+.tag.pri-mid{color:#FCE1AD;border-color:rgba(230,173,82,.45);background:rgba(230,173,82,.12)}
+.tag.pri-low{color:var(--ink-2)}
+[data-theme="light"] .tag.pri-high{color:#B91C1C;border-color:#FCA5A5;background:#FEF2F2}
+[data-theme="light"] .tag.pri-mid{color:#8A5200;border-color:#F8CB7B;background:#FFF7E6}
+[data-theme="light"] .tag.pri-low{color:#333C4B;border-color:#CCD4E0;background:#F1F4F9}
+.scope{font-size:11px;border-radius:5px;padding:2px 7px;border:1px solid var(--line);color:var(--ink-2);font-family:var(--mono)}
+
+/* ============ 表格 ============ */
+.tbl-scroll{overflow-x:auto;border-radius:var(--r-md)}
+table.tbl{width:100%;border-collapse:collapse;font-size:13px;table-layout:fixed;background:var(--panel);border:1px solid var(--line);border-radius:var(--r-md);min-width:840px}
+table.tbl th{text-align:left;font-size:11.5px;font-weight:600;color:var(--ink-2);padding:10px 14px;border-bottom:1px solid var(--line);background:var(--table-th-bg);white-space:nowrap}
+table.tbl td{padding:11px 14px;border-bottom:1px solid var(--line-soft);vertical-align:middle;color:var(--ink-2)}
+table.tbl tr:last-child td{border-bottom:0}
+table.tbl tbody tr{cursor:pointer;transition:background .12s}
+table.tbl tbody tr:hover{background:var(--panel-2)}
+table.tbl .t-title{color:var(--ink);font-weight:600}
+table.tbl .t-sub{font-size:11px;color:var(--ink-3);margin-top:1px}
+.cell-id{font-family:var(--mono);font-size:11.5px;color:var(--ink);font-weight:500}
+.mono-s{font-family:var(--mono);font-size:11.5px;color:var(--ink-2)}
+.prog{height:5px;background:var(--inset);border-radius:99px;overflow:hidden;min-width:70px}
+.prog i{display:block;height:100%;border-radius:99px;background:linear-gradient(90deg,var(--accent),var(--accent-2))}
+.prog.ok i{background:var(--ok)} .prog.warn i{background:var(--warn)} .prog.bad i{background:var(--bad)} .prog.info i{background:var(--info)}
+.live{display:inline-flex;align-items:center;gap:6px;font-size:11px;color:var(--ok);font-family:var(--mono);font-weight:500}
+.live::before{content:'';width:6px;height:6px;border-radius:50%;background:var(--ok);animation:pulse 2.2s infinite}
+
+/* ============ Agent 集群带 ============ */
+.fleet{display:grid;grid-template-columns:repeat(6,1fr);gap:10px}
+.agent-node{background:var(--panel);border:1px solid var(--line);border-radius:var(--r-md);padding:12px 13px;cursor:pointer;transition:.14s;position:relative;overflow:hidden}
+.agent-node:hover{border-color:var(--card-hover-border);transform:translateY(-1px)}
+.agent-node::after{content:'';position:absolute;left:0;right:0;top:0;height:2px;background:var(--node-accent,transparent);opacity:.85}
+.agent-node .top{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+.agent-node .avatar{width:26px;height:26px;border-radius:7px;display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-weight:600;font-size:10px;background:var(--inset);border:1px solid var(--line);color:var(--ink)}
+.agent-node .name{font-weight:600;font-size:13px;color:var(--ink)}
+.agent-node .sub{font-family:var(--mono);font-size:10px;color:var(--ink-3);margin-top:1px}
+.agent-node .meta{display:flex;flex-direction:column;gap:4px;font-size:11.5px;color:var(--ink-2)}
+.agent-node .meta .row{display:flex;justify-content:space-between;gap:6px}
+.agent-node .meta .k{color:var(--ink-3);font-size:10.5px}
+.agent-node .hb{margin-top:8px;font-size:10.5px;font-family:var(--mono);color:var(--ink-3);display:flex;justify-content:space-between}
+
+/* ============ 时间轴 ============ */
+.timeline{display:grid;grid-template-columns:86px 22px 1fr;row-gap:0;font-size:13px}
+.tl-node{display:contents}
+.tl-time{grid-column:1;padding:9px 0;font-family:var(--mono);font-size:11px;color:var(--ink-3);text-align:right;line-height:1.5}
+.tl-axis{grid-column:2;position:relative;display:flex;justify-content:center}
+.tl-axis::before{content:'';position:absolute;top:0;bottom:0;width:1px;background:var(--line)}
+.tl-axis .d{width:9px;height:9px;border-radius:50%;background:var(--panel);border:2px solid var(--ink-3);align-self:center;z-index:1;margin-top:14px}
+.tl-axis .d.ok{border-color:var(--ok);background:color-mix(in srgb,var(--ok) 30%,var(--panel))}
+.tl-axis .d.accent{border-color:var(--accent);background:color-mix(in srgb,var(--accent) 30%,var(--panel))}
+.tl-axis .d.bad{border-color:var(--bad);background:color-mix(in srgb,var(--bad) 30%,var(--panel))}
+.tl-content{grid-column:3;padding:9px 0 9px 14px;line-height:1.5}
+.tl-content .t{color:var(--ink);font-weight:600;font-size:13px}
+.tl-content .s{color:var(--ink-2);font-size:12px;margin-top:1px}
+.tl-content .m{font-family:var(--mono);font-size:10.5px;color:var(--ink-3);margin-top:2px}
+
+/* ============ 抽屉 ============ */
+.drawer-mask{position:fixed;inset:0;background:var(--drawer-mask);z-index:80;opacity:0;pointer-events:none;transition:.2s}
+.drawer-mask.show{opacity:1;pointer-events:auto}
+.drawer{position:fixed;top:0;right:0;bottom:0;width:min(560px,92vw);background:var(--elev);border-left:1px solid var(--line);z-index:90;transform:translateX(102%);transition:transform .24s cubic-bezier(.32,.72,.24,1);display:flex;flex-direction:column;box-shadow:var(--shadow-2)}
+.drawer.show{transform:none}
+.drawer-head{padding:16px 20px;border-bottom:1px solid var(--line-soft);display:flex;align-items:flex-start;gap:12px}
+.drawer-head .close{margin-left:auto}
+.drawer-tabs{display:flex;gap:2px;padding:0 14px;border-bottom:1px solid var(--line-soft);background:var(--bg-soft);overflow-x:auto}
+.drawer-tab{font-size:12.5px;color:var(--ink-3);padding:10px 12px;cursor:pointer;border-bottom:2px solid transparent;white-space:nowrap;font-weight:500;transition:.12s}
+.drawer-tab:hover{color:var(--ink-2)}
+.drawer-tab.on{color:var(--accent);border-bottom-color:var(--accent);font-weight:600}
+.drawer-body{flex:1;overflow-y:auto;padding:16px 20px 30px}
+
+/* ============ 对话 ============ */
+.conv-wrap{display:grid;grid-template-columns:340px 1fr;gap:0;border:1px solid var(--line);border-radius:var(--r-lg);overflow:hidden;background:var(--panel);height:calc(100vh - 176px);min-height:480px;position:relative}
+.conv-list{border-right:1px solid var(--line);overflow-y:auto;background:var(--elev)}
+.conv-item{display:flex;gap:11px;padding:13px 15px;border-bottom:1px solid var(--line-soft);cursor:pointer;transition:.12s}
+.conv-item:hover{background:var(--panel-2)}
+.conv-item.on{background:var(--panel-2);box-shadow:inset 3px 0 0 var(--accent)}
+.conv-item .avatar{width:32px;height:32px;border-radius:9px;flex:none;display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:11px;font-weight:600;background:var(--inset);border:1px solid var(--line);color:var(--ink)}
+.conv-item .cname{font-size:13px;font-weight:600;color:var(--ink);display:flex;align-items:center;gap:7px}
+.conv-item .cpre{font-size:12px;color:var(--ink-3);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.conv-item .ctime{font-family:var(--mono);font-size:10.5px;color:var(--ink-3);margin-left:auto;flex:none}
+.unread{width:8px;height:8px;border-radius:50%;background:var(--accent);flex:none;box-shadow:0 0 0 3px rgba(240,167,58,.2)}
+[data-theme="light"] .unread{box-shadow:0 0 0 3px rgba(194,104,0,.2)}
+.conv-main{display:flex;flex-direction:column;min-width:0}
+.conv-head{padding:13px 18px;border-bottom:1px solid var(--line-soft);display:flex;align-items:center;gap:11px;background:var(--bg-soft)}
+.conv-head .info{min-width:0}
+.conv-head .who{font-weight:600;font-size:14px;color:var(--ink)}
+.conv-head .state{font-size:11.5px;color:var(--ink-3);display:flex;align-items:center;gap:6px;margin-top:1px}
+.poll-hint{margin-left:auto;font-family:var(--mono);font-size:10px;color:var(--ink-3);border:1px solid var(--line);border-radius:99px;padding:3px 9px;background:var(--inset)}
+.msg-area{flex:1;overflow-y:auto;padding:20px 22px;display:flex;flex-direction:column;gap:14px;background:var(--bg-soft)}
+.msg{display:flex;gap:11px;max-width:78%}
+.msg.agent{align-self:flex-start}
+.msg.human{align-self:flex-end;flex-direction:row-reverse}
+.msg .avatar{width:30px;height:30px;border-radius:8px;flex:none;display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:10px;font-weight:600;background:var(--inset);border:1px solid var(--line);color:var(--ink)}
+.msg.human .avatar{background:color-mix(in srgb,var(--accent) 20%,var(--inset));border-color:var(--accent);color:var(--accent)}
+.bubble{background:var(--panel);border:1px solid var(--line);border-radius:4px 12px 12px 12px;padding:10px 14px;font-size:13px;color:var(--ink);line-height:1.65;box-shadow:var(--shadow-1)}
+.msg.human .bubble{background:color-mix(in srgb,var(--accent) 14%,var(--panel));border-color:rgba(240,167,58,.45);border-radius:12px 4px 12px 12px;color:var(--ink)}
+[data-theme="light"] .msg.human .bubble{background:#FFF4E5;border-color:#F8CE9F;color:#11141A}
+.bubble .m-time{display:block;font-family:var(--mono);font-size:10px;color:var(--ink-3);margin-top:6px}
+.bubble.queued{border-style:dashed;opacity:.82}
+.queued-tag{display:inline-flex;align-items:center;gap:5px;font-size:10.5px;color:var(--warn);font-family:var(--mono);border:1px solid rgba(230,173,82,.45);border-radius:99px;padding:2px 8px;margin-bottom:6px;background:rgba(230,173,82,.12)}
+.typing{display:inline-flex;gap:4px;padding:6px 4px}
+.typing i{width:5px;height:5px;border-radius:50%;background:var(--ink-3);animation:typing 1s infinite}
+.typing i:nth-child(2){animation-delay:.18s}.typing i:nth-child(3){animation-delay:.36s}
+@keyframes typing{0%,100%{transform:none;opacity:.5}50%{transform:translateY(-3px);opacity:1}}
+.conv-input{border-top:1px solid var(--line-soft);padding:12px 16px;background:var(--elev);display:flex;gap:10px;align-items:flex-end}
+.conv-input textarea{flex:1;background:var(--inset);border:1px solid var(--line);border-radius:9px;color:var(--ink);font:inherit;font-size:13px;padding:9px 12px;resize:none;height:44px;outline:0}
+.conv-input textarea:focus{border-color:var(--accent);box-shadow:0 0 0 2px rgba(240,167,58,.20)}
+[data-theme="light"] .conv-input textarea:focus{box-shadow:0 0 0 2px rgba(194,104,0,.20)}
+
+/* ============ Toast ============ */
+.toasts{position:fixed;bottom:22px;right:22px;display:flex;flex-direction:column;gap:9px;z-index:120}
+.toast{background:var(--elev);border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:9px;padding:11px 15px;font-size:12.5px;color:var(--ink-2);box-shadow:var(--shadow-2);display:flex;gap:9px;align-items:center;animation:toastIn .2s ease;max-width:360px}
+.toast b{color:var(--ink);font-weight:600}
+.toast.ok{border-left-color:var(--ok)}
+.toast.warn{border-left-color:var(--warn)}
+@keyframes toastIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+.toast.bye{opacity:0;transform:translateY(6px);transition:.3s}
+
+/* ============ 记忆 / 列表条目 ============ */
+.mem-item{background:var(--panel);border:1px solid var(--line);border-radius:var(--r-md);padding:13px 16px;cursor:pointer;transition:.12s}
+.mem-item:hover{border-color:var(--card-hover-border)}
+.mem-item .head{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+.mem-item .key{font-family:var(--mono);font-size:12.5px;color:var(--ink);font-weight:600}
+.mem-item .sum{font-size:12.5px;color:var(--ink-2);margin-top:6px;line-height:1.6}
+.mem-item .meta{display:flex;gap:12px;margin-top:8px;font-size:11px;color:var(--ink-3);font-family:var(--mono);flex-wrap:wrap}
+.rev-item{border-left:2px solid var(--line);padding:8px 0 8px 14px;position:relative}
+.rev-item::before{content:'';position:absolute;left:-5.5px;top:14px;width:9px;height:9px;border-radius:50%;background:var(--panel);border:2px solid var(--ink-3)}
+.rev-item.new::before{border-color:var(--accent)}
+.rev-item .rt{font-family:var(--mono);font-size:11px;color:var(--ink-3)}
+.rev-item .rv{font-size:12.5px;color:var(--ink-2);margin-top:2px;line-height:1.6}
+.rev-item .rh{font-family:var(--mono);font-size:10px;color:var(--ink-3);margin-top:3px}
+
+/* ============ 启动 / 调度 ============ */
+.profile-card{background:var(--panel);border:1px solid var(--line);border-radius:var(--r-md);padding:15px 16px;display:flex;flex-direction:column;gap:9px}
+.profile-card .pname{font-weight:600;font-size:14px;color:var(--ink);display:flex;align-items:center;gap:8px}
+.profile-card .cmd{font-family:var(--mono);font-size:11px;color:var(--ink-2);background:var(--inset);border:1px solid var(--line-soft);border-radius:6px;padding:6px 9px;line-height:1.5;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.profile-card .pmeta{font-size:11.5px;color:var(--ink-3);display:flex;gap:12px;font-family:var(--mono);flex-wrap:wrap}
+.ins-block{font-family:var(--mono);font-size:11px;color:var(--ink-2);background:var(--inset);border:1px solid var(--line-soft);border-radius:7px;padding:9px 12px;line-height:1.7;white-space:pre-wrap}
+.plane-row{display:flex;gap:10px}
+.plane{flex:1;border:1px solid var(--line);border-radius:var(--r-md);padding:12px 14px;background:var(--panel)}
+.plane .pt{font-size:12.5px;font-weight:600;color:var(--ink);display:flex;align-items:center;gap:8px}
+.plane .ps{font-size:11.5px;color:var(--ink-2);margin-top:3px;line-height:1.55}
+.plane .pe{font-family:var(--mono);font-size:10.5px;color:var(--ok);margin-top:8px;display:flex;align-items:center;gap:6px;font-weight:500}
+.plane .pe::before{content:'';width:5px;height:5px;border-radius:50%;background:var(--ok)}
+
+/* ============ 环境配置表 ============ */
+.env-table{width:100%;border-collapse:collapse;font-size:12.5px;table-layout:fixed}
+.env-table td{padding:8px 10px;border-bottom:1px solid var(--line-soft);vertical-align:top}
+.env-table tr:last-child td{border-bottom:0}
+.env-table .k{font-family:var(--mono);font-size:11.5px;color:var(--ink);width:34%;font-weight:500}
+.env-table .v{font-family:var(--mono);font-size:11px;color:var(--ink-2);width:46%;word-break:break-all}
+.env-table .d{font-size:11px;color:var(--ink-3);width:20%}
+
+/* ============ 双栏网格 ============ */
+.duo{display:grid;grid-template-columns:1.6fr 1fr;gap:12px;margin-bottom:14px}
+.duo.flip{grid-template-columns:1fr 1.2fr}
+.duo.tight{grid-template-columns:1.35fr 1fr}
+.mem-grid{display:grid;grid-template-columns:1.35fr 1fr;gap:12px;align-items:start}
+#profileGrid,#machGrid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+
+/* ============ 空态 ============ */
+.empty{padding:34px;text-align:center;color:var(--ink-3);font-size:13px;border:1px dashed var(--line);border-radius:var(--r-md);background:var(--bg-soft)}
+.empty .big{font-size:15px;color:var(--ink);margin-bottom:4px;font-weight:500}
+
+/* ============ 响应式 ============ */
+@media (max-width:1280px){
+  .fleet{grid-template-columns:repeat(3,1fr)}
+  .kpi-grid{grid-template-columns:repeat(2,1fr)}
+  #profileGrid,#machGrid{grid-template-columns:repeat(2,1fr)}
+}
+@media (max-width:1060px){
+  .app{grid-template-columns:64px minmax(0,1fr)}
+  .topbar{grid-column:2}
+  .duo,.duo.flip,.duo.tight,.mem-grid{grid-template-columns:1fr}
+  .side .brand .name,.side .brand .sub,.nav-item .lab,.nav-group,.side-foot{display:none}
+  .nav-item{justify-content:center;padding:10px 0}
+  .nav-item .ic{width:19px;height:19px}
+  .nav-item .badge-cnt{display:none}
+  .side-foot{display:block;padding:10px 0;text-align:center}
+  .daemon .url,.planes-tip{display:none}
+  .conv-wrap{grid-template-columns:280px 1fr}
+  .main{padding:18px 16px 60px}
+  .search{display:none}
+}
+@media (max-width:760px){
+  .fleet{grid-template-columns:repeat(2,1fr)}
+  .kpi-grid{grid-template-columns:repeat(2,1fr)}
+  #profileGrid,#machGrid{grid-template-columns:1fr}
+  .conv-wrap{grid-template-columns:1fr;height:calc(100vh - 150px)}
+  .conv-list{display:none}
+  .conv-list.mobile-on{display:block;position:absolute;inset:0;z-index:10;background:var(--elev)}
+  .msg{max-width:92%}
+  .page-head h1{font-size:18px}
+  .plane-row{flex-direction:column}
+}
+@media (max-width:520px){
+  .fleet{grid-template-columns:1fr 1fr}
+  .kpi-grid{grid-template-columns:1fr}
+  .topbar .clock{display:none}
+  .topbar .crumb .en{display:none}
+}
+@media (prefers-reduced-motion:reduce){
+  *{animation:none!important;transition:none!important}
+}
+
+/* ============ 模态弹窗与后端增强样式 ============ */
+.modal-mask{position:fixed;inset:0;background:var(--modal-mask);backdrop-filter:blur(4px);z-index:100;opacity:0;pointer-events:none;transition:.2s;display:flex;align-items:center;justify-content:center;padding:16px}
+.modal-mask.show{opacity:1;pointer-events:auto}
+.modal{width:min(540px,94vw);background:var(--elev);border:1px solid var(--line);border-radius:var(--r-lg);box-shadow:var(--shadow-2);display:flex;flex-direction:column;overflow:hidden;transform:scale(.96);transition:.2s cubic-bezier(.32,.72,.24,1)}
+.modal-mask.show .modal{transform:none}
+.modal-head{padding:16px 20px;border-bottom:1px solid var(--line-soft);display:flex;align-items:center;justify-content:space-between}
+.modal-head h3{font-size:16px;font-weight:600;color:var(--ink);display:flex;align-items:center;gap:8px}
+.modal-head .close{margin-left:auto}
+.modal-body{padding:20px;display:flex;flex-direction:column;gap:14px;overflow-y:auto;max-height:75vh}
+.modal-foot{padding:14px 20px;border-top:1px solid var(--line-soft);display:flex;justify-content:flex-end;gap:10px;background:var(--bg-soft)}
+.form-group{display:flex;flex-direction:column;gap:6px}
+.form-label{font-size:12.5px;color:var(--ink-2);font-weight:500;display:flex;align-items:center;justify-content:space-between}
+.form-label .req{color:var(--accent)}
+.form-input,.form-select,.form-textarea{background:var(--inset);border:1px solid var(--line);border-radius:var(--r-sm);color:var(--ink);font-family:inherit;font-size:13px;padding:9px 12px;outline:none;transition:.15s}
+.form-input:focus,.form-select:focus,.form-textarea:focus{border-color:var(--accent);box-shadow:0 0 0 2px rgba(240,167,58,.20)}
+[data-theme="light"] .form-input:focus,[data-theme="light"] .form-select:focus,[data-theme="light"] .form-textarea:focus{box-shadow:0 0 0 2px rgba(194,104,0,.20)}
+.form-textarea{resize:vertical;min-height:90px;line-height:1.6}
+.summary-banner{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px 14px;margin-bottom:12px;font-size:12px}
+.summary-banner .sb-title{font-weight:600;color:var(--accent);display:flex;align-items:center;gap:6px;margin-bottom:6px}
+.summary-banner .sb-body{color:var(--ink-2);line-height:1.6}
+.summary-banner .sb-facts{font-family:var(--mono);font-size:11px;color:var(--ink-3);margin-top:6px}
+.badge-live-dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--ok);margin-right:6px}
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- ===================== 侧栏 Sidebar ===================== -->
+  <aside class="side">
+    <div class="brand">
+      <svg class="mark" viewBox="0 0 32 32" fill="none">
+        <defs><linearGradient id="dawnG" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#E8A33D"/><stop offset="1" stop-color="#E76F51"/></linearGradient></defs>
+        <rect width="32" height="32" rx="8" fill="var(--panel)" stroke="var(--line)"/>
+        <circle cx="11.5" cy="21.5" r="5" fill="url(#dawnG)"/>
+        <path d="M6 12h20" stroke="#E8A33D" stroke-width="2" stroke-linecap="round"/>
+        <path d="M6 15.5h20" stroke="#6FA8C9" stroke-width="1.5" stroke-linecap="round"/>
+        <path d="M6 19h20" stroke="#4A505C" stroke-width="1.5" stroke-linecap="round"/>
+      </svg>
+      <div>
+        <div class="name">Morrows</div>
+        <div class="sub">morrows-server · v0.9.4</div>
+      </div>
+    </div>
+    <nav class="nav" id="sideNav">
+      <div class="nav-group">概览 OVERVIEW</div>
+      <div class="nav-item active" data-view="dashboard"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7.5" height="7.5" rx="2"/><rect x="13.5" y="3" width="7.5" height="7.5" rx="2"/><rect x="3" y="13.5" width="7.5" height="7.5" rx="2"/><rect x="13.5" y="13.5" width="7.5" height="7.5" rx="2"/></svg><span class="lab">工作台</span><span class="badge-cnt">3</span></div>
+      <div class="nav-item" data-view="fleet"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="5.5" cy="12" r="2.6"/><circle cx="18.5" cy="6" r="2.6"/><circle cx="18.5" cy="18" r="2.6"/><path d="M8 11l8-4M8 13l8 4"/></svg><span class="lab">Agent 集群</span><span class="badge-cnt">8</span></div>
+      <div class="nav-group">工作 WORK</div>
+      <div class="nav-item" data-view="work"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="3.5" width="16" height="17" rx="2.5"/><path d="M9 7.5h6M9 11h6M9 14.5h4"/></svg><span class="lab">工作项</span><span class="badge-cnt">14</span></div>
+      <div class="nav-item" data-view="runs"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 12h4l2.5-6 4 12 2.5-6h4"/></svg><span class="lab">执行记录</span></div>
+      <div class="nav-item" data-view="conv"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6a2 2 0 012-2h12a2 2 0 012 2v8a2 2 0 01-2 2H9l-4.5 4.2V6z"/><path d="M8 10h8M8 13.5h5"/></svg><span class="lab">对话</span><span class="badge-cnt">2</span></div>
+      <div class="nav-item" data-view="memory"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5l8 3v5c0 4.5-3.4 8.3-8 9.5-4.6-1.2-8-5-8-9.5v-5l8-3z"/><path d="M12 12.5V21M8.5 8l7 2.4"/></svg><span class="lab">记忆</span></div>
+      <div class="nav-item" data-view="artifacts"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8h16v12a2 2 0 01-2 2H6a2 2 0 01-2-2V8z"/><path d="M3 4.5A1.5 1.5 0 014.5 3h15A1.5 1.5 0 0121 4.5V8H3V4.5z"/><path d="M9 12h6"/></svg><span class="lab">成果物</span></div>
+      <div class="nav-group">系统 SYSTEM</div>
+      <div class="nav-item" data-view="dispatch"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h9M19 7h1M4 17h1M11 17h9"/><circle cx="16" cy="7" r="2.6"/><circle cx="8" cy="17" r="2.6"/></svg><span class="lab">调度策略</span></div>
+      <div class="nav-item" data-view="launch"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4C8 4 5 7.5 5 12c0 2 .6 3.6 1.4 4.9l2.6-1.4A7.5 7.5 0 0112 17c1 0 2-.2 3-.6l2.6 1.4A10 10 0 0019 12c0-4.5-3-8-7-8z"/><circle cx="12" cy="12" r="2.2"/></svg><span class="lab">启动记录</span></div>
+      <div class="nav-item" data-view="settings"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M12 3.5v2M12 18.5v2M3.5 12h2M18.5 12h2M6 6l1.4 1.4M16.6 16.6L18 18M18 6l-1.4 1.4M7.4 16.6L6 18"/></svg><span class="lab">设置</span></div>
+    </nav>
+    <div class="side-foot">
+      <div class="daemon"><span class="dot"></span><div><div>本地守护进程</div><div class="url">127.0.0.1:8787</div></div></div>
+      <div class="planes-tip">控制面 · LSM 运行时 · Provider 三平面在线</div>
+    </div>
+  </aside>
+
+  <!-- ===================== 顶栏 Topbar ===================== -->
+  <header class="topbar">
+    <div class="crumb"><span id="crumbZh">工作台</span><span class="en" id="crumbEn">Dashboard</span></div>
+    <div class="search"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.2-4.2"/></svg><input id="globalSearch" placeholder="搜索工作项 / Agent / 成果物…"><kbd>⌘K</kbd></div>
+    <div class="right">
+      <span class="live" id="syncState">数据同步正常</span>
+      <button class="icon-btn" id="themeToggleBtn" title="切换深色 / 浅色模式" onclick="toggleTheme()" aria-label="切换主题"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" id="themeIcon"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg></button>
+      <button class="icon-btn" id="refreshBtn" title="刷新数据"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6v5h-5"/><path d="M4 18v-5h5"/><path d="M18.5 11a7 7 0 00-12.2-2.6L4 11M5.5 13a7 7 0 0012.2 2.6L20 13"/></svg></button>
+      <button class="btn sm lang" id="langBtn"><span id="langLab">中文</span><span class="en" style="font-family:var(--mono);font-size:10px;color:var(--ink-3)">EN</span></button>
+      <span class="clock" id="clock">--:--:--</span>
+    </div>
+  </header>
+
+  <!-- ===================== 主区域 ===================== -->
+  <main class="main">
+
+    <!-- ===== 视图：工作台 Dashboard ===== -->
+    <section class="view active" id="view-dashboard">
+      <div class="page-head">
+        <div>
+          <h1>工作台 <span class="en">Dashboard</span></h1>
+          <div class="desc">本地优先的 Agent 工作协调控制台 · 控制面 / LSM 运行时 / Provider 三平面在线</div>
+        </div>
+        <div class="tools">
+          <button class="btn sm" id="newWorkBtn"><svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>新建工作项</button>
+          <button class="btn sm" id="demoBtn">查看演示说明</button>
+        </div>
+      </div>
+
+      <div class="kpi-grid" id="kpiGrid"></div>
+
+      <div class="card" style="margin-bottom:14px">
+        <div class="card-head"><h3>Agent 集群实时状态 <span class="en" style="font-family:var(--mono);font-size:10px;color:var(--ink-3);margin-left:6px">Agent Fleet</span></h3><span class="hint">心跳每 5s 刷新</span><span class="hint" style="margin-left:0">全部 8 个实例</span></div>
+        <div class="card-body"><div class="fleet" id="fleetStrip"></div></div>
+      </div>
+
+      <div class="duo" style="margin-bottom:0">
+        <div class="card">
+          <div class="card-head"><h3>容量观测（近 24 小时）</h3><span class="hint">append-only · 按 Provider 聚合</span></div>
+          <div class="card-body"><div id="capacityChart" style="height:250px"></div></div>
+        </div>
+        <div class="card" style="height:100%">
+          <div class="card-head"><h3>最近活动</h3><span class="hint">recent activity</span></div>
+          <div class="card-body" id="activityFeed" style="padding-top:8px"></div>
+        </div>
+      </div>
+
+      <div class="duo flip" style="margin-bottom:0;margin-top:14px">
+        <div class="card">
+          <div class="card-head"><h3>调度决策</h3><span class="hint">append-only decisions</span></div>
+          <div class="card-body" id="dispatchFeed" style="padding-top:8px"></div>
+        </div>
+        <div class="card">
+          <div class="card-head"><h3>三平面状态</h3><span class="hint">three-plane architecture</span></div>
+          <div class="card-body">
+            <div class="plane-row" id="planeRow"></div>
+            <div style="margin-top:12px;font-size:11.5px;color:var(--ink-3);line-height:1.7;border:1px dashed var(--line);border-radius:8px;padding:10px 12px;background:var(--bg-soft)">
+              <b style="color:var(--accent);font-weight:600">终极恢复原则</b> · 工作项身份独立于模型、账号、机器与会话。即使原始 Agent 进程与 Provider 会话全部消失，新 Agent 仍可仅凭 Morrows 规范记录重建完整状态。
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===== 视图：Agent 集群 Fleet ===== -->
+    <section class="view" id="view-fleet">
+      <div class="page-head">
+        <div>
+          <h1>Agent 集群 <span class="en">Fleet</span></h1>
+          <div class="desc">Agent 档案 / 账号 / 机器 / 实例身份归一 · 自有心跳 · 仅追加容量观测</div>
+        </div>
+        <div class="tools"><span class="live" id="fleetTotal">全部实例</span><button class="btn sm" onclick="toast('演示','注册新实例为控制面 REST 能力，原型不包含','')">注册实例</button></div>
+      </div>
+      <div class="card" style="margin-bottom:14px">
+        <div class="card-head"><h3>机器与容量</h3><span class="hint">append-only capacity observations</span></div>
+        <div class="card-body"><div id="machGrid"></div></div>
+      </div>
+      <div class="tbl-scroll">
+        <table class="tbl">
+          <colgroup><col style="width:15%"><col style="width:13%"><col style="width:13%"><col style="width:13%"><col style="width:9%"><col style="width:9%"><col style="width:20%"><col style="width:8%"></colgroup>
+          <thead><tr><th>实例</th><th>Agent 档案</th><th>账号</th><th>机器</th><th>状态</th><th>心跳</th><th>当前工作</th><th>能力</th></tr></thead>
+          <tbody id="fleetBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ===== 视图：工作项 WorkItems ===== -->
+    <section class="view" id="view-work">
+      <div class="page-head">
+        <div>
+          <h1>工作项 <span class="en">WorkItems</span></h1>
+          <div class="desc">组织内需要完成的一件件客观工作任务，具备独立生命周期与不可变上下文快照</div>
+        </div>
+        <div class="tools">
+          <button class="btn sm primary" onclick="openNewWorkModal()">新建工作项</button>
+          <button class="btn sm" onclick="toast('视图','状态分布：待办 14 · 执行中 3 · 已交接 2 · 已完成 9','ok')">视图</button>
+        </div>
+      </div>
+      <div class="chip-row" id="workFilters"></div>
+      <div class="tbl-scroll">
+        <table class="tbl">
+          <colgroup><col style="width:9%"><col style="width:30%"><col style="width:10%"><col style="width:8%"><col style="width:15%"><col style="width:13%"><col style="width:15%"></colgroup>
+          <thead><tr><th>编号 ID</th><th>标题</th><th>状态</th><th>优先级</th><th>负责人 Agent</th><th>当前执行</th><th>更新时间</th></tr></thead>
+          <tbody id="workRows"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ===== 视图：执行记录 Executions ===== -->
+    <section class="view" id="view-runs">
+      <div class="page-head">
+        <div>
+          <h1>执行记录 <span class="en">WorkExecutions</span></h1>
+          <div class="desc">Agent 对工作分配的具体逻辑执行过程 · 租约续期 · 启动尝试与执行证据可追溯</div>
+        </div>
+        <div class="tools"><button class="btn sm" onclick="toast('演示','执行记录为只读视图，原型不包含操作')">导出</button></div>
+      </div>
+      <div class="chip-row" id="runFilters"></div>
+      <div class="tbl-scroll">
+        <table class="tbl">
+          <colgroup><col style="width:10%"><col style="width:17%"><col style="width:14%"><col style="width:9%"><col style="width:12%"><col style="width:11%"><col style="width:12%"><col style="width:15%"></colgroup>
+          <thead><tr><th>执行 Run</th><th>工作项</th><th>Agent 实例</th><th>阶段</th><th>租约剩余</th><th>启动方式</th><th>时长</th><th>证据 / 说明</th></tr></thead>
+          <tbody id="runRows"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ===== 视图：对话 Conversations ===== -->
+    <section class="view" id="view-conv">
+      <div class="page-head">
+        <div>
+          <h1>对话 <span class="en">DirectConversations</span></h1>
+          <div class="desc">人类与特定 Agent 实例的一对一持久化双向沟通 · 启动时仅加载摘要，选中后才按页拉取历史</div>
+        </div>
+        <div class="tools"><button class="btn sm" onclick="openNewConvModal()">新对话</button></div>
+      </div>
+      <div class="conv-wrap" id="convWrap">
+        <div class="conv-list" id="convList"></div>
+        <div class="conv-main">
+          <div class="conv-head" id="convHead"></div>
+          <div class="msg-area" id="msgArea"></div>
+          <div class="conv-input">
+            <textarea id="msgInput" placeholder="向 Agent 发送消息（原型为模拟回复）…"></textarea>
+            <button class="btn primary" id="sendBtn" style="height:44px">发送</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===== 视图：记忆 Memory ===== -->
+    <section class="view" id="view-memory">
+      <div class="page-head">
+        <div>
+          <h1>记忆 <span class="en">Memory</span></h1>
+          <div class="desc">跨任务与会话的长期持久化知识 · 按组织 / 项目 / 员工 / 工作划分作用域 · 修订不可变</div>
+        </div>
+        <div class="tools"><button class="btn sm" onclick="toast('演示','记忆写入仅通过员工 MCP 工具完成','')">新建条目</button></div>
+      </div>
+      <div class="chip-row" id="memFilters"></div>
+      <div class="mem-grid">
+        <div style="display:flex;flex-direction:column;gap:10px" id="memList"></div>
+        <div class="card" style="position:sticky;top:74px">
+          <div class="card-head"><h3>修订历史 <span style="font-family:var(--mono);font-size:10px;color:var(--ink-3);margin-left:4px">ContextRevisions</span></h3><span class="hint">不可变快照</span></div>
+          <div class="card-body" id="revList" style="padding-top:6px"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===== 视图：成果物 Artifacts ===== -->
+    <section class="view" id="view-artifacts">
+      <div class="page-head">
+        <div>
+          <h1>成果物 <span class="en">Artifacts &amp; Decisions</span></h1>
+          <div class="desc">被正式归档、持久托管并可全局引用的工作交付物与决策记录 · Managed Store</div>
+        </div>
+        <div class="tools"><button class="btn sm" onclick="toast('演示','成果物归档通过员工 MCP 工具完成','')">归档</button></div>
+      </div>
+      <div class="chip-row" id="artFilters"></div>
+      <div class="tbl-scroll">
+        <table class="tbl">
+          <colgroup><col style="width:11%"><col style="width:27%"><col style="width:17%"><col style="width:12%"><col style="width:12%"><col style="width:9%"><col style="width:12%"></colgroup>
+          <thead><tr><th>类型</th><th>标题</th><th>归属工作项</th><th>创建者</th><th>创建时间</th><th>引用</th><th>内容哈希</th></tr></thead>
+          <tbody id="artRows"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ===== 视图：调度策略 Dispatch ===== -->
+    <section class="view" id="view-dispatch">
+      <div class="page-head">
+        <div>
+          <h1>调度策略 <span class="en">Dispatch</span></h1>
+          <div class="desc">每工作项持久化调度策略 · 容量感知分发 · 分配决策仅追加不可篡改</div>
+        </div>
+        <div class="tools"><button class="btn sm" onclick="toast('演示','策略编辑未包含在原型中')">新建策略</button></div>
+      </div>
+      <div class="card" style="margin-bottom:14px">
+        <div class="card-head"><h3>容量视图</h3><span class="hint">provider capacity</span></div>
+        <div class="card-body" id="capBars"></div>
+      </div>
+      <div class="duo tight" style="margin-bottom:0">
+        <div class="card">
+          <div class="card-head"><h3>调度策略</h3><span class="hint">per-task policies</span></div>
+          <div class="tbl-scroll" style="margin:0">
+            <table class="tbl" style="border:0;border-radius:0;min-width:0">
+              <colgroup><col style="width:13%"><col style="width:30%"><col style="width:22%"><col style="width:18%"><col style="width:17%"></colgroup>
+              <thead><tr><th>工作项</th><th>偏好 Agent / 账号</th><th>策略要点</th><th>最大尝试</th><th>状态</th></tr></thead>
+              <tbody id="policyRows"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-head"><h3>分配决策日志</h3><span class="hint">append-only</span></div>
+          <div class="card-body" id="decisionLog" style="padding-top:6px"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===== 视图：启动记录 Launches ===== -->
+    <section class="view" id="view-launch">
+      <div class="page-head">
+        <div>
+          <h1>启动记录 <span class="en">AgentLaunches</span></h1>
+          <div class="desc">为推进工作执行而实际启动 Agent 进程的记录 · LaunchProfile / LaunchAttempt / 后台任务</div>
+        </div>
+        <div class="tools"><button class="btn sm" onclick="toast('演示','启动/停止为控制面 REST 操作，原型不包含')">管理档案</button></div>
+      </div>
+      <div class="card" style="margin-bottom:14px">
+        <div class="card-head"><h3>启动档案 LaunchProfiles</h3><span class="hint">durable launch instructions</span></div>
+        <div class="card-body"><div id="profileGrid"></div></div>
+      </div>
+      <div class="tbl-scroll">
+        <table class="tbl">
+          <colgroup><col style="width:11%"><col style="width:14%"><col style="width:13%"><col style="width:9%"><col style="width:10%"><col style="width:10%"><col style="width:12%"><col style="width:21%"></colgroup>
+          <thead><tr><th>尝试 Attempt</th><th>档案</th><th>目标实例</th><th>状态</th><th>PID</th><th>会话</th><th>启动时间</th><th>启动指令</th></tr></thead>
+          <tbody id="launchRows"></tbody>
+        </table>
+      </div>
+      <div class="card" style="margin-top:14px">
+        <div class="card-head"><h3>后台启动任务</h3><span class="hint">SQLite durable jobs</span></div>
+        <div class="card-body" id="jobFeed" style="padding-top:4px"></div>
+      </div>
+    </section>
+
+    <!-- ===== 视图：设置 Settings ===== -->
+    <section class="view" id="view-settings">
+      <div class="page-head">
+        <div>
+          <h1>设置 <span class="en">Settings</span></h1>
+          <div class="desc">本地守护进程环境配置 · 员工 MCP 端点 · 界面偏好</div>
+        </div>
+      </div>
+      <div class="duo tight" style="margin-bottom:0">
+        <div class="card">
+          <div class="card-head"><h3>环境变量</h3><span class="hint">MORROWS_* 优先</span></div>
+          <div class="card-body" style="padding-top:6px"><table class="env-table" id="envTable"></table></div>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:12px">
+          <div class="card">
+            <div class="card-head"><h3>员工 MCP 端点</h3><span class="hint">Streamable HTTP</span></div>
+            <div class="card-body">
+              <div class="ins-block">http://127.0.0.1:8787/mcp
+X-Agent-Instance-Id: &lt;uuid&gt;</div>
+              <div style="font-size:11.5px;color:var(--ink-3);margin-top:8px;line-height:1.65">MCP 面仅暴露员工操作：对话收件箱 / 工作请求 / 任务读取 / 记忆 / 成果物 / 交接 / 续约与检查点。注册、派发、认领、启动等一律留在控制面。</div>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-head"><h3>界面偏好</h3></div>
+            <div class="card-body">
+              <div style="display:flex;flex-direction:column;gap:9px;font-size:12.5px;color:var(--ink-2)">
+                <div style="display:flex;justify-content:space-between;align-items:center"><span>界面语言</span><div class="chip-row" style="margin:0"><button class="chip on" onclick="setLang('zh');toast('已设置','界面语言切换为中文（首访默认）','ok')">中文</button><button class="chip" onclick="setLang('en');toast('已设置','原型仅演示部分英文文案','ok')">English</button></div></div>
+                <div style="display:flex;justify-content:space-between;align-items:center"><span>主题外观</span><div class="chip-row" style="margin:0" id="themeSettingChips"><button class="chip on" id="chipThemeDark" onclick="setTheme('dark')">深色 · Obsidian</button><button class="chip" id="chipThemeLight" onclick="setTheme('light')">浅色 · Daylight</button></div></div>
+                <div style="display:flex;justify-content:space-between;align-items:center"><span>会话历史加载</span><span class="tag">选中后拉取 · 增量刷新</span></div>
+                <div style="display:flex;justify-content:space-between;align-items:center"><span>外部适配器</span><span class="tag">LSM / Antigravity / Gemini / CodeBuddy</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<!-- ===================== 抽屉 ===================== -->
+<div class="drawer-mask" id="drawerMask" onclick="closeDrawer()"></div>
+<aside class="drawer" id="drawer">
+  <div class="drawer-head" id="drawerHead"></div>
+  <div class="drawer-tabs" id="drawerTabs"></div>
+  <div class="drawer-body" id="drawerBody"></div>
+</aside>
+
+<div class="toasts" id="toasts"></div>
+
+<script>
+/* ============================================================
+   Morrows UI 设计稿 · 演示数据与交互
+   说明：以下全部为原型演示用的模拟数据，用于呈现设计方向；
+   真实后端为 Rust + Axum + SQLite（REST + 员工 MCP）。
+   ============================================================ */
+
+/* ---------- 演示数据 ---------- */
+const AGENTS=[
+ {id:'inst_9f2c1a3e',ab:'cp',profile:'codex-personal',acct:'work@openai',mach:'mbp-huayuxue',st:'running',wi:'WI-231',hb:3,cap:'2 槽位'},
+ {id:'inst_41b7d8f0',ab:'cc',profile:'claude-code',acct:'acme@anthropic',mach:'vm-lin-01',st:'running',wi:'WI-232',hb:8,cap:'2 槽位'},
+ {id:'inst_b0d4e9c5',ab:'cp',profile:'codex-personal',acct:'work@openai',mach:'vm-lin-01',st:'running',wi:'WI-235',hb:5,cap:'2 槽位'},
+ {id:'inst_cc18d4b2',ab:'ag',profile:'antigravity',acct:'ant@antigravity',mach:'vm-lin-02',st:'launching',wi:'WI-234',hb:2,cap:'2 槽位'},
+ {id:'inst_7e05a2c9',ab:'gc',profile:'gemini-cli',acct:'gen@google',mach:'mbp-huayuxue',st:'idle',wi:'WI-240',hb:46,cap:'1 槽位'},
+ {id:'inst_d2f8a4b1',ab:'gc',profile:'gemini-cli',acct:'gen@google',mach:'vm-lin-02',st:'idle',wi:'—',hb:118,cap:'1 槽位'},
+ {id:'inst_91c0e2f6',ab:'cc',profile:'claude-code',acct:'acme@anthropic',mach:'studio-mini',st:'idle',wi:'—',hb:204,cap:'2 槽位'},
+ {id:'inst_3a8e6f7d',ab:'cb',profile:'codebuddy',acct:'cb@tencent',mach:'studio-mini',st:'offline',wi:'—',hb:732,cap:'—'}
+];
+
+const ST_META={
+ running:['执行中','st-running'],assigned:['已分配','st-accent'],launching:['启动中','st-launching'],
+ ready:['待认领','st-pending'],backlog:['待排期','st-idle'],handoff:['待交接','st-handoff'],
+ done:['已完成','st-done'],failed:['失败','st-failed'],cancelled:['已取消','st-offline']};
+
+const WORK=[
+ {id:'WI-231',title:'修复支付网关超时重试的幂等性',st:'running',pri:'high',agent:'inst_9f2c1a3e',upd:'09:52',
+  desc:'支付回调在网关超时后重试会出现重复入账。需要引入幂等键机制，保证同一笔订单的重复回调只生效一次，并补全幂等性集成测试。',
+  policy:'codex-personal@work · 容量感知 · 最大尝试 3',
+  deps:[['WI-241','已完成']],
+  runs:[['认领 Assignment','09:12','inst_9f2c1a3e 原子认领成功'],['启动 Launch','09:12','L-3091 · 会话 cxp-9f2c 已就绪'],['运行 Running','09:14','执行中'],['检查点 Checkpoint','09:41','状态已固化，上下文快照 v7']],
+  mem:[['work','幂等性设计','幂等键 = 订单号 + 事件类型；SETNX 存储，TTL 24h；重复回调直接返回首次结果。']],
+  arts:[['decision','支付网关幂等键采用请求头规范','09:54'],['artifact','幂等性设计备忘','09:52'],['thread','幂等方案讨论','09:35']],
+  hf:[],handoffs:null},
+ {id:'WI-232',title:'为 morrows-server 补充员工 MCP 集成测试',st:'running',pri:'mid',agent:'inst_41b7d8f0',upd:'10:14',
+  desc:'覆盖 conversation_inbox / memory_get / artifact_create 等员工 MCP 工具的端到端行为；验证任务作用域读写的归属校验与交接接受链路。',
+  policy:'claude-code@acme · 容量感知 · 最大尝试 2',
+  deps:[['WI-237','已完成']],
+  runs:[['认领 Assignment','09:12','inst_41b7d8f0 原子认领成功'],['启动 Launch','09:12','L-3092 · 会话 cc-41b7 已就绪'],['运行 Running','09:14','测试分层执行中']],
+  mem:[['project','测试分层','工具级参数校验 → 任务作用域归属校验 → 端到端交接链路。']],
+  arts:[['decision','MCP 工具命名统一为 <domain>_<verb>','07:40']],
+  hf:[],handoffs:null},
+ {id:'WI-233',title:'整理 Q3 容量观测数据并输出周报',st:'handoff',pri:'mid',agent:'inst_7e05a2c9',upd:'09:58',
+  desc:'汇总近一季度各 Provider 容量观测，输出周报。数据整理已完成，需交接给 claude-code 收尾排版与结论。',
+  policy:'gemini-cli@gen · 无偏好 · 最大尝试 2',
+  deps:[['WI-243','待排期']],
+  runs:[['认领 Assignment','07:02','inst_7e05a2c9 认领'],['启动 Launch','07:03','L-3089 · 会话 gm-7e05'],['运行 Running','07:05','数据整理'],['检查点 Checkpoint','09:40','周报草稿已归档'],['交接 Handoff','09:58','责任转交 inst_41b7d8f0，待接受']],
+  mem:[['work','容量口径','按 Provider 维度聚合，机器维度单独附表。']],
+  arts:[['artifact','Q3 容量周报（草稿）','09:40']],
+  hf:[{from:'inst_7e05a2c9',to:'inst_41b7d8f0',t:'09:58',st:'pending',note:'数据已整理，草稿在成果物；请核对口径并输出结论。'}],handoffs:null},
+ {id:'WI-234',title:'升级前端构建到 Vite 6 并迁移路由',st:'launching',pri:'mid',agent:'inst_cc18d4b2',upd:'10:18',
+  desc:'将 web 构建链升级到 Vite 6，路由迁移至页内 hash 模式，验证生产模式由 Rust 守护进程托管静态资源。',
+  policy:'antigravity@ant · 无偏好 · 最大尝试 2',
+  deps:[['WI-244','待排期']],
+  runs:[['分配 Assigned','10:16','inst_cc18d4b2 已分配'],['启动 Launch','10:18','L-3093 启动中，等待实例就绪']],
+  mem:[],
+  arts:[],
+  hf:[],handoffs:null},
+ {id:'WI-235',title:'处理 codebuddy 外部适配器的会话恢复问题',st:'running',pri:'mid',agent:'inst_b0d4e9c5',upd:'10:02',
+  desc:'codebuddy 实例离线后遗留会话导致启动失败。已完成会话恢复，工作责任经交接转入 codex-personal 继续。',
+  policy:'codex-personal@work · 容量感知 · 最大尝试 3',
+  deps:[],
+  runs:[['交接 Handoff','08:40','codebuddy → codex-personal'],['接受 Accept','08:45','inst_b0d4e9c5 显式接受'],['启动 Launch','10:05','L-3094 · 会话恢复成功'],['运行 Running','10:06','恢复后继续执行']],
+  mem:[['work','会话恢复','启动失败根因：遗留会话残留；恢复流程已入启动任务队列。']],
+  arts:[['message','交接说明：从 codebuddy 转 codex-personal','08:42']],
+  hf:[{from:'inst_3a8e6f7d',to:'inst_b0d4e9c5',t:'08:40',st:'accepted',note:'会话残留已清理，工作上下文在记忆与成果物中。'}],handoffs:null},
+ {id:'WI-236',title:'为 WI-231 补充依赖环检测单测',st:'ready',pri:'low',agent:'—',upd:'昨天',
+  desc:'为 TaskDependency 的环检测补充单元测试：覆盖自依赖、二元环、长链环与正常链场景。',
+  policy:'—',deps:[['WI-231','执行中']],runs:[],mem:[],arts:[],hf:[],handoffs:null},
+ {id:'WI-237',title:'迁移对话 WebUI 缓存到选中加载模式',st:'done',pri:'mid',agent:'inst_41b7d8f0',upd:'昨天',
+  desc:'启动时仅加载对话摘要；选中会话后拉取最新消息页并增量轮询；人类消息排队直至 Agent 回复。',
+  policy:'claude-code@acme · 容量感知 · 最大尝试 2',
+  deps:[],runs:[['认领 Assignment','昨天 14:02','inst_41b7d8f0'],['运行 Running','14:05'],['完成 Complete','17:20','RN-1039 已完成']],
+  mem:[['project','对话缓存','仅选中会话轮询；摘要启动加载；消息排队。']],
+  arts:[['decision','对话缓存：选中后拉取 + 增量轮询','昨天 17:15']],hf:[],handoffs:null},
+ {id:'WI-238',title:'编写员工 MCP 交接演练文档',st:'done',pri:'low',agent:'inst_7e05a2c9',upd:'2 天前',
+  desc:'记录 M2.1 双实例交接演练：Agent A 产出成果物并创建待接受交接，Agent B 仅凭员工 MCP 重建状态并完成。',
+  policy:'gemini-cli@gen · 无偏好 · 最大尝试 2',deps:[],
+  runs:[['认领 Assignment','2 天前','inst_7e05a2c9'],['完成 Complete','2 天前','文档已归档']],
+  mem:[],arts:[['artifact','员工 MCP 交接演练文档','2 天前']],hf:[],handoffs:null},
+ {id:'WI-239',title:'检查 Assignment 租约过期扫描的边界条件',st:'ready',pri:'high',agent:'—',upd:'今天 08:30',
+  desc:'验证租约续期与过期扫描在并发边界下的正确性：租约仅剩 1s 时续期、过期瞬间的认领竞争。',
+  policy:'—',deps:[],runs:[],mem:[],arts:[],hf:[],handoffs:null},
+ {id:'WI-240',title:'接入 LSM 运行时的执行证据关联',st:'assigned',pri:'high',agent:'inst_7e05a2c9',upd:'09:05',
+  desc:'将工作语义状态与底层 LSM Audit / Job Logs 关联，输出可追溯的执行证据。每个 Run 对应一个持久 Logical Session。',
+  policy:'gemini-cli@gen · 无偏好 · 最大尝试 2',
+  deps:[['WI-245','待排期']],runs:[['分配 Assigned','09:05','inst_7e05a2c9 已分配']],mem:[],arts:[],hf:[],handoffs:null},
+ {id:'WI-241',title:'API 契约：支付网关回调字段规范',st:'done',pri:'high',agent:'inst_9f2c1a3e',upd:'3 天前',
+  desc:'定义回调字段、签名与重试语义，作为 WI-231 的前置依赖。',
+  policy:'codex-personal@work · 容量感知 · 最大尝试 3',deps:[],
+  runs:[['认领 Assignment','3 天前','inst_9f2c1a3e'],['完成 Complete','3 天前','契约已定稿']],
+  mem:[],arts:[['artifact','支付回调 API 契约 v1.2','3 天前']],hf:[],handoffs:null},
+ {id:'WI-242',title:'清理外部适配器遗留启动会话',st:'failed',pri:'low',agent:'inst_3a8e6f7d',upd:'08:40',
+  desc:'清理 codebuddy 适配器的遗留会话。启动失败：目标实例离线且残留会话占用。需要人工介入或更换实例。',
+  policy:'codebuddy@cb · 无偏好 · 最大尝试 2',deps:[],
+  runs:[['认领 Assignment','08:35','inst_3a8e6f7d'],['启动 Launch','08:40','L-3086 失败：会话残留']],
+  mem:[],arts:[],hf:[],handoffs:null},
+ {id:'WI-243',title:'容量观测采样间隔调整讨论',st:'backlog',pri:'low',agent:'—',upd:'2 天前',
+  desc:'评估将采样间隔从 1min 调整为 30s 的存储成本与可视化收益。',
+  policy:'—',deps:[],runs:[],mem:[],arts:[],hf:[],handoffs:null},
+ {id:'WI-244',title:'升级 Axum 到 0.8 并验证路由兼容',st:'backlog',pri:'mid',agent:'—',upd:'3 天前',
+  desc:'依赖升级跟踪：验证 REST 路由、MCP Streamable HTTP 端点与静态资源托管的兼容性。',
+  policy:'—',deps:[],runs:[],mem:[],arts:[],hf:[],handoffs:null}
+];
+
+const RUNS=[
+ {id:'RN-1046',wi:'WI-235',inst:'inst_b0d4e9c5',st:'running',lease:61,launch:'L-3094',dur:'2h05m',note:'会话恢复完成，执行中',ev:'执行证据已关联'},
+ {id:'RN-1045',wi:'WI-234',inst:'inst_cc18d4b2',st:'launching',lease:92,launch:'L-3093',dur:'34s',note:'启动中，等待实例就绪',ev:'—'},
+ {id:'RN-1044',wi:'WI-233',inst:'inst_7e05a2c9',st:'handoff',lease:0,launch:'L-3088',dur:'3h',note:'已交接，等待 inst_41b7d8f0 接受',ev:'周报草稿已归档'},
+ {id:'RN-1043',wi:'WI-232',inst:'inst_41b7d8f0',st:'running',lease:54,launch:'L-3092',dur:'1h12m',note:'测试分层执行中',ev:'执行证据已关联'},
+ {id:'RN-1042',wi:'WI-231',inst:'inst_9f2c1a3e',st:'running',lease:68,launch:'L-3091',dur:'42m',note:'幂等层实现中',ev:'执行证据已关联'},
+ {id:'RN-1041',wi:'WI-242',inst:'inst_3a8e6f7d',st:'failed',lease:0,launch:'L-3086',dur:'2h',note:'启动失败：会话残留',ev:'—'},
+ {id:'RN-1040',wi:'WI-240',inst:'inst_7e05a2c9',st:'assigned',lease:0,launch:'—',dur:'—',note:'已分配，未认领',ev:'—'},
+ {id:'RN-1039',wi:'WI-237',inst:'inst_41b7d8f0',st:'done',lease:0,launch:'L-3075',dur:'3h18m',note:'已完成',ev:'缓存迁移验证通过'}
+];
+
+const CONVS=[
+ {id:'C-091',inst:'inst_9f2c1a3e',unread:1,last:'10:05',sum:'好的。另外帮我把 API 契约对齐到 WI-241。',
+  msgs:[
+   {r:'h',t:'09:31',m:'在吗？帮我看看 WI-231 的幂等性方案，重点是重复回调场景。'},
+   {r:'a',t:'09:33',m:'收到。我先把当前的重试链路和入库路径梳理一遍，再给方案。'},
+   {r:'a',t:'09:52',m:'方案要点：回调处理入口统一走幂等层，幂等键取「订单号 + 事件类型」，存储用 SETNX 且 24h 过期；重复请求直接返回首次结果。设计备忘已归档到成果物。'},
+   {r:'h',t:'10:05',m:'好的。另外帮我把 API 契约对齐到 WI-241。',q:true}]},
+ {id:'C-092',inst:'inst_41b7d8f0',unread:0,last:'10:14',sum:'计划分三层：工具级参数校验、作用域归属校验、端到端交接链路。',
+  msgs:[
+   {r:'h',t:'10:11',m:'WI-232 的测试范围你打算怎么覆盖？'},
+   {r:'a',t:'10:14',m:'计划分三层：工具级参数校验、任务作用域读写的归属校验、端到端交接链路（handoff_create → accept → 原线程回复）。'}]},
+ {id:'C-093',inst:'inst_7e05a2c9',unread:0,last:'09:45',sum:'口径按 provider 维度聚合就行。',
+  msgs:[
+   {r:'a',t:'09:40',m:'Q3 容量数据已整理，周报草稿在成果物里。有两个口径问题想跟你确认：Provider 维度还是机器维度聚合？'},
+   {r:'h',t:'09:45',m:'口径按 provider 维度聚合就行，机器维度单独出一张附表。'}]},
+ {id:'C-094',inst:'inst_cc18d4b2',unread:1,last:'10:20',sum:'Vite 6 迁移有没有风险项？',
+  msgs:[
+   {r:'h',t:'10:20',m:'Vite 6 迁移有没有风险项？',q:true}]}
+];
+
+const CANNED={
+ 'C-091':['收到，我会先把 WI-241 的契约字段对照一遍，再同步幂等键命名。'],
+ 'C-092':['补充一点：交接链路还会校验接受方与传入 Run 的绑定关系，这是原子操作。'],
+ 'C-093':['明白，附表我放进周报附录，口径说明也标一下。'],
+ 'C-094':['实例刚就绪，我评估后给你一份风险清单，主要是 plugin 兼容与 dev server 预热。']};
+
+const MEMORY=[
+ {scope:'org',sk:'eng-conventions',key:'工程规范',sum:'提交信息采用 Conventional Commits；PR 标题必须包含 WI 编号；涉及支付类改动必须先补幂等性测试。',upd:'3 天前',revs:2},
+ {scope:'project',sk:'morrows',key:'上下文契约',sum:'工作执行初始化时冻结完整工作背景、目标与记忆视图；上下文快照不可变，按 hash 校验。',upd:'今天 09:05',revs:2},
+ {scope:'project',sk:'morrows',key:'术语规范',sum:'工作项 WorkItem / 工作分配 WorkAssignment / 工作执行 WorkExecution / 运行空间 RuntimeScope / 模型会话 ProviderThread / 工作对话 DirectConversation。',upd:'5 天前',revs:1},
+ {scope:'employee',sk:'codex-personal',key:'工作偏好',sum:'优先输出可落地的补丁而非长篇说明；涉及支付类改动必须先补幂等性测试。',upd:'今天 09:52',revs:2},
+ {scope:'work',sk:'WI-231',key:'幂等性设计',sum:'幂等键 = 订单号 + 事件类型；SETNX 存储 TTL 24h；重复回调返回首次结果。',upd:'今天 09:52',revs:3}
+];
+const REVS={
+ '幂等性设计':[
+  {t:'今天 09:52',v:'v7 · 幂等键 = 订单号 + 事件类型；SETNX 存储 TTL 24h；重复回调返回首次结果。',h:'rev_7f3a9c21e0b4'},
+  {t:'今天 09:41',v:'v6 · 存储从 DB 唯一索引调整为 SETNX + TTL，明确过期语义。',h:'rev_2c8b1d47fa90'},
+  {t:'今天 09:35',v:'v5 · 初稿：基于请求头 idempotency-key 的唯一性校验。',h:'rev_0a11e2f3b8c7'}],
+ '上下文契约':[
+  {t:'今天 09:05',v:'v2 · 补充：执行初始化时冻结上下文快照，修订不可变。',h:'rev_9d0a2e55c111'},
+  {t:'5 天前',v:'v1 · 工作执行初始化时冻结完整背景与记忆视图。',h:'rev_51bc0d8a2f9e'}],
+ '工程规范':[
+  {t:'3 天前',v:'v2 · 新增：涉及支付类改动必须先补幂等性测试。',h:'rev_3c9e7a10b2d8'},
+  {t:'6 天前',v:'v1 · 提交信息采用 Conventional Commits；PR 标题必须包含 WI 编号。',h:'rev_88f1a3c6d7e9'}],
+ '工作偏好':[
+  {t:'今天 09:52',v:'v2 · 补充：涉及支付类改动必须先补幂等性测试。',h:'rev_e4b2f8d1a0c5'},
+  {t:'2 天前',v:'v1 · 优先输出可落地的补丁而非长篇说明。',h:'rev_7a0d3e9b4c1f'}],
+ '术语规范':[
+  {t:'5 天前',v:'v1 · 确立用户层 / 系统层双语命名对照。',h:'rev_2f5a0b8c1d3e'}]
+};
+
+const ARTS=[
+ {type:'decision',t:'支付网关幂等键采用请求头规范',wi:'WI-231',by:'inst_9f2c1a3e',at:'今天 09:54',ref:3,h:'art_a91f02'},
+ {type:'artifact',t:'幂等性设计备忘',wi:'WI-231',by:'inst_9f2c1a3e',at:'今天 09:52',ref:2,h:'art_c77b11'},
+ {type:'thread',t:'幂等方案讨论',wi:'WI-231',by:'inst_9f2c1a3e',at:'今天 09:35',ref:1,h:'thr_8d03e4'},
+ {type:'artifact',t:'Q3 容量周报（草稿）',wi:'WI-233',by:'inst_7e05a2c9',at:'今天 09:40',ref:0,h:'art_b2f8a5'},
+ {type:'decision',t:'对话缓存：选中后拉取 + 增量轮询',wi:'WI-237',by:'inst_41b7d8f0',at:'昨天 17:15',ref:4,h:'art_e3c9d7'},
+ {type:'message',t:'交接说明：从 codebuddy 转 codex-personal',wi:'WI-235',by:'inst_3a8e6f7d',at:'今天 08:42',ref:1,h:'msg_1a4b9c'},
+ {type:'decision',t:'MCP 工具命名统一为 <domain>_<verb>',wi:'WI-232',by:'inst_41b7d8f0',at:'今天 07:40',ref:2,h:'art_d5f0a2'},
+ {type:'artifact',t:'员工 MCP 交接演练文档',wi:'WI-238',by:'inst_7e05a2c9',at:'2 天前',ref:3,h:'art_6b8d1e'}
+];
+const ART_META={artifact:['成果物 Artifact','st-done'],decision:['决策 Decision','st-accent'],thread:['线程 Thread','st-handoff'],message:['消息 Message','st-idle']};
+
+const POLICIES=[
+ {wi:'WI-231',pref:'codex-personal@work',points:'容量感知 · 幂等性专家档案',tries:3,st:'生效'},
+ {wi:'WI-232',pref:'claude-code@acme',points:'容量感知 · MCP 工具熟练',tries:2,st:'生效'},
+ {wi:'WI-234',pref:'antigravity@ant',points:'无偏好 · 唯一候选',tries:2,st:'生效'},
+ {wi:'WI-235',pref:'codex-personal@work',points:'容量感知 · 会话恢复后优先',tries:3,st:'生效'},
+ {wi:'WI-240',pref:'gemini-cli@gen',points:'无偏好 · LSM 集成经验',tries:2,st:'生效'}
+];
+const DECISIONS=[
+ {t:'10:02',wi:'WI-235',to:'inst_b0d4e9c5',why:'codebuddy 实例离线，重新分配'},
+ {t:'09:58',wi:'WI-233',to:'inst_41b7d8f0',why:'gemini 容量回收，发起交接'},
+ {t:'09:50',wi:'WI-231',to:'inst_9f2c1a3e',why:'容量优先 + 档案匹配'},
+ {t:'09:41',wi:'WI-232',to:'inst_41b7d8f0',why:'档案匹配'},
+ {t:'09:30',wi:'WI-234',to:'inst_cc18d4b2',why:'唯一候选，立即分配'},
+ {t:'08:45',wi:'WI-235',to:'inst_b0d4e9c5',why:'显式接受交接'}
+];
+
+const PROFILES=[
+ {n:'codex-personal@work',p:'Codex CLI',acct:'work@openai',cmd:'codex exec --agent morrows "$WORK_ITEM_BRIEF"',st:'启用'},
+ {n:'claude-code@acme',p:'Claude Code',acct:'acme@anthropic',cmd:'claude -p --output-format stream-json',st:'启用'},
+ {n:'gemini-cli@gen',p:'Gemini CLI',acct:'gen@google',cmd:'gemini -p',st:'启用'},
+ {n:'antigravity@ant',p:'Antigravity',acct:'ant@antigravity',cmd:'ant run --scope "$RUNTIME_SCOPE"',st:'启用'}
+];
+const LAUNCHES=[
+ {id:'L-3094',prof:'codex-personal@work',inst:'inst_b0d4e9c5',st:'running',pid:'81244',ses:'cxp-9f2c',at:'10:05',ins:'检查对话收件箱（conversation_inbox）\n继续 WI-235，先恢复会话再执行'},
+ {id:'L-3093',prof:'antigravity@ant',inst:'inst_cc18d4b2',st:'starting',pid:'—',ses:'—',at:'10:18',ins:'等待实例就绪\n就绪后加载 WI-234 上下文快照'},
+ {id:'L-3092',prof:'claude-code@acme',inst:'inst_41b7d8f0',st:'running',pid:'78302',ses:'cc-41b7',at:'09:12',ins:'执行 WI-232，测试分层推进'},
+ {id:'L-3091',prof:'codex-personal@work',inst:'inst_9f2c1a3e',st:'running',pid:'80177',ses:'cxp-9f2c',at:'09:12',ins:'执行 WI-231，幂等层实现'},
+ {id:'L-3089',prof:'gemini-cli@gen',inst:'inst_7e05a2c9',st:'ended',pid:'74560',ses:'gm-7e05',at:'07:02',ins:'整理 Q3 容量数据'},
+ {id:'L-3086',prof:'codebuddy@cb',inst:'inst_3a8e6f7d',st:'failed',pid:'69011',ses:'cb-3a8e',at:'08:40',ins:'清理遗留会话'}
+];
+const LAUNCH_ST={running:['运行中','st-running'],starting:['启动中','st-launching'],ended:['已结束','st-done'],failed:['失败','st-failed']};
+const JOBS=[
+ {t:'10:18',n:'启动 L-3093（antigravity · WI-234）',st:'queued'},
+ {t:'10:05',n:'恢复 L-3094 会话（codex-personal · WI-235）',st:'running'},
+ {t:'09:20',n:'清理 inst_3a8e6f7d 残留会话',st:'running'}
+];
+
+const ACTIVITY=[
+ {t:'10:18',n:'启动尝试 <b>L-3093</b> · antigravity 实例（WI-234）',st:'accent'},
+ {t:'10:14',n:'对话 <b>C-092</b> 收到 claude-code 回复',st:'info'},
+ {t:'10:05',n:'对话 <b>C-091</b> 消息已排队（实例忙）',st:'warn'},
+ {t:'10:02',n:'调度决策：WI-235 重新分配 → <b>inst_b0d4e9c5</b>',st:'accent'},
+ {t:'09:58',n:'交接 <b>WI-233</b> 待接受（gemini → claude）',st:'info'},
+ {t:'09:54',n:'决策「幂等键请求头规范」已归档',st:'ok'},
+ {t:'09:52',n:'成果物「幂等性设计备忘」已归档',st:'ok'},
+ {t:'09:50',n:'分配 <b>WI-231</b> → inst_9f2c1a3e（容量优先）',st:'accent'}
+];
+const ACT_ST={accent:'var(--accent)',info:'var(--info)',warn:'var(--warn)',ok:'var(--ok)'};
+
+/* 容量观测：24 小时 · 按 Provider 聚合（演示数据） */
+const CAP={codex:[0,0,0,0,1,1,1,2,2,2,2,2,2,2,2,2,1,1,1,1,1,0,0,0],
+ claude:[0,0,0,0,0,1,1,1,1,2,2,2,1,1,1,1,1,1,1,1,1,1,0,0],
+ gemini:[0,0,0,0,0,0,1,1,1,1,1,1,1,0,0,0,0,1,1,1,0,0,0,0],
+ ant:[0,0,0,0,0,0,0,0,0,0,0,1,1,1,1,0,0,0,0,0,1,1,1,0]};
+const HOURS=Array.from({length:24},(_,i)=>String(i).padStart(2,'0')+':00');
+
+/* ---------- 工具函数 ---------- */
+const $=s=>document.querySelector(s);
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+const agentById = id => {
+  const found = AGENTS.find(a => a.id === id);
+  if (found) return found;
+  const shortId = typeof id === 'string' ? id.slice(0, 8) : 'unknown';
+  return {
+    id: id || 'unknown',
+    ab: (shortId.slice(0, 2) || 'ag').toLowerCase(),
+    profile: `Agent (${shortId})`,
+    acct: 'local',
+    mach: 'host',
+    st: 'idle',
+    wi: '—',
+    hb: 0,
+    cap: '1 槽位'
+  };
+};
+
+const wiById = id => {
+  const found = WORK.find(w => w.id === id);
+  if (found) return found;
+  const shortId = typeof id === 'string' ? id.slice(0, 8) : 'unknown';
+  return {
+    id: id || 'unknown',
+    title: `工作项 (${shortId})`,
+    st: 'ready',
+    pri: 'mid',
+    agent: '—',
+    upd: '—',
+    desc: '加载中...',
+    policy: '—',
+    deps: [],
+    runs: [],
+    mem: [],
+    arts: [],
+    hf: []
+  };
+};
+
+
+function stBadge(st,label){const m=ST_META[st]||[label||st,'st-idle'];return `<span class="st ${m[1]}"><span class="dot"></span>${m[0]}</span>`;}
+function stBadgeRaw(st,cls,label){return `<span class="st ${cls}"><span class="dot"></span>${label||st}</span>`;}
+
+function toast(title,msg,cls){const box=$('#toasts');const el=document.createElement('div');
+ el.className='toast '+(cls||'');el.innerHTML=`<b>${esc(title)}</b><span>${esc(msg||'')}</span>`;
+ box.appendChild(el);setTimeout(()=>{el.classList.add('bye');setTimeout(()=>el.remove(),320)},3000);}
+
+/* ---------- i18n（演示：仅导航与面包屑） ---------- */
+const I18N={dashboard:['工作台','Dashboard'],fleet:['Agent 集群','Fleet'],work:['工作项','WorkItems'],runs:['执行记录','Executions'],
+ conv:['对话','Conversations'],memory:['记忆','Memory'],artifacts:['成果物','Artifacts'],dispatch:['调度策略','Dispatch'],
+ launch:['启动记录','Launches'],settings:['设置','Settings']};
+let LANG='zh';
+function setLang(l){LANG=l;$('#langLab').textContent=l==='zh'?'中文':'English';
+ document.querySelectorAll('.nav-item').forEach(n=>{const v=n.dataset.view;n.querySelector('.lab').textContent=l==='zh'?(I18N[v]||v)[0]:(I18N[v]||v)[1];});
+ const v=CURRENT_VIEW;updateCrumb(v);}
+function updateCrumb(v){const pair=I18N[v]||['',''];$('#crumbZh').textContent=pair[0];$('#crumbEn').textContent=pair[1];}
+
+/* ---------- 路由 ---------- */
+let CURRENT_VIEW='dashboard';
+function setView(v){CURRENT_VIEW=v;
+ document.querySelectorAll('.view').forEach(s=>s.classList.toggle('active',s.id==='view-'+v));
+ document.querySelectorAll('.nav-item').forEach(n=>n.classList.toggle('active',n.dataset.view===v));
+ updateCrumb(v);closeDrawer();renderOnView(v);
+ window.scrollTo({top:0});}
+function renderOnView(v){
+ if(v==='dashboard')renderDashboard();
+ if(v==='work')renderWork();
+ if(v==='runs')renderRuns();
+ if(v==='conv')renderConvList();
+ if(v==='memory')renderMemory();
+ if(v==='artifacts')renderArtifacts();
+ if(v==='dispatch')renderDispatch();
+ if(v==='launch')renderLaunch();
+ if(v==='fleet')renderFleetView();
+}
+
+/* ---------- 时钟与心跳 ---------- */
+function tick(){const d=new Date();const p=n=>String(n).padStart(2,'0');
+ $('#clock').textContent=`${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+ const hb=d.getSeconds()%5===0;if(hb&&CURRENT_VIEW==='dashboard')renderFleetStrip();}
+setInterval(tick,1000);
+</script>
+<style>.conv-back{display:none}
+@media (max-width:760px){.conv-back{display:inline-flex}.conv-main .conv-back-row{display:block}}
+@media (min-width:761px){.conv-back-row{display:none!important}}</style>
+<script>
+/* ============================================================
+   渲染与交互 · 第二部分
+   ============================================================ */
+
+/* ---------- 抽屉 ---------- */
+let DRAWER=null,D_TAB='overview';
+function openDrawer(type,id){DRAWER={type,id};D_TAB='overview';
+ const mask=$('#drawerMask');mask.classList.add('show');$('#drawer').classList.add('show');
+ buildDrawer();}
+function closeDrawer(){$('#drawerMask').classList.remove('show');$('#drawer').classList.remove('show');}
+function drawerTab(tab){D_TAB=tab;buildDrawer();}
+function buildDrawer(){
+ const h=$('#drawerHead'),t=$('#drawerTabs'),b=$('#drawerBody');
+ if(!DRAWER)return;
+ if(DRAWER.type==='work'){
+  const w=wiById(DRAWER.id);
+  h.innerHTML=`<div style="min-width:0;flex:1"><div style="display:flex;align-items:center;gap:9px;flex-wrap:wrap">${stBadge(w.st)}<span class="tag pri-${w.pri==='high'?'high':w.pri==='mid'?'mid':'low'}">${w.pri==='high'?'高优先级':w.pri==='mid'?'中优先级':'低优先级'}</span></div>
+   <div style="font-size:16px;font-weight:600;margin-top:7px">${esc(w.id)} · ${esc(w.title)}</div>
+   <div style="font-size:11.5px;color:var(--ink-3);margin-top:2px;font-family:var(--mono)">更新 ${esc(w.upd)} · 策略 ${esc(w.policy)}</div></div>
+   <button class="icon-btn close" onclick="closeDrawer()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button>`;
+  t.innerHTML=`<div class="drawer-tab ${D_TAB==='overview'?'on':''}" onclick="drawerTab('overview')">概览</div>
+   <div class="drawer-tab ${D_TAB==='runs'?'on':''}" onclick="drawerTab('runs')">执行记录</div>
+   <div class="drawer-tab ${D_TAB==='mem'?'on':''}" onclick="drawerTab('mem')">记忆</div>
+   <div class="drawer-tab ${D_TAB==='arts'?'on':''}" onclick="drawerTab('arts')">成果物</div>
+   <div class="drawer-tab ${D_TAB==='hf'?'on':''}" onclick="drawerTab('hf')">交接</div>
+   <div class="drawer-tab ${D_TAB==='deps'?'on':''}" onclick="drawerTab('deps')">依赖</div>`;
+  b.innerHTML=workTabBody(w);
+ }else if(DRAWER.type==='run'){
+  const r=RUNS.find(x=>x.id===DRAWER.id),w=wiById(r.wi);
+  h.innerHTML=`<div style="min-width:0;flex:1"><div style="display:flex;align-items:center;gap:9px;flex-wrap:wrap">${stBadge(r.st)}<span class="tag">${esc(r.launch)}</span></div>
+   <div style="font-size:16px;font-weight:600;margin-top:7px">${esc(r.id)} · ${esc(w.title)}</div>
+   <div style="font-size:11.5px;color:var(--ink-3);margin-top:2px;font-family:var(--mono)">${esc(r.inst)} · 时长 ${esc(r.dur)} · ${esc(r.ev)}</div></div>
+   <button class="icon-btn close" onclick="closeDrawer()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button>`;
+  t.innerHTML=`<div class="drawer-tab ${D_TAB==='overview'?'on':''}" onclick="drawerTab('overview')">时间线</div>
+   <div class="drawer-tab ${D_TAB==='arts'?'on':''}" onclick="drawerTab('arts')">启动与证据</div>`;
+  b.innerHTML=runTabBody(r);
+ }
+}
+function workTabBody(w){
+ if(D_TAB==='overview'){
+  const runsHtml=w.runs.length?`<div class="timeline">${w.runs.map((r,i)=>`
+   <div class="tl-node"><div class="tl-time">${esc(r[1])}</div>
+   <div class="tl-axis"><span class="d ${i===w.runs.length-1?'accent':'ok'}"></span></div>
+   <div class="tl-content"><div class="t">${esc(r[0])}</div><div class="s">${esc(r[2])}</div></div></div>`).join('')}</div>`
+   :`<div class="empty"><div class="big">尚无执行记录</div>等待分配与认领</div>`;
+  return `<div style="font-size:13px;color:var(--ink-2);line-height:1.8;margin-bottom:16px">${esc(w.desc)}</div>
+   <div class="card-head" style="padding:10px 0 8px"><h3>分配与执行时间线</h3></div>
+   ${runsHtml}
+   <div class="card-head" style="padding:12px 0 8px;margin-top:8px"><h3>依赖</h3></div>
+   ${w.deps.length?w.deps.map(d=>`<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--line-soft);font-size:13px"><span class="cell-id">${esc(d[0])}</span><span style="color:var(--ink-2)">${wiById(d[0])?esc(wiById(d[0]).title):''}</span><span style="margin-left:auto">${d[1]==='已完成'?stBadgeRaw('','st-done','已完成'):d[1]==='执行中'?stBadgeRaw('','st-running','执行中'):stBadgeRaw('','st-pending','待排期')}</span></div>`).join(''):`<div class="empty">无前置依赖 · 依赖环检测通过</div>`}`;
+ }
+ if(D_TAB==='runs'){
+  const rw=RUNS.filter(r=>r.wi===w.id);
+  if(!rw.length)return `<div class="empty"><div class="big">无执行记录</div>该工作项尚未进入执行阶段</div>`;
+  return rw.map(r=>`<div style="border:1px solid var(--line);border-radius:10px;padding:13px 15px;margin-bottom:10px;cursor:pointer" onclick="openRun('${r.id}')">
+   <div style="display:flex;align-items:center;gap:9px;flex-wrap:wrap">${stBadge(r.st)}<span class="cell-id">${esc(r.id)}</span><span class="mono-s">${esc(r.inst)}</span></div>
+   <div style="font-size:12px;color:var(--ink-2);margin-top:6px">${esc(r.note)}</div>
+   <div style="display:flex;align-items:center;gap:10px;margin-top:9px">${r.lease>0?`<div class="prog ${r.lease>60?'ok':r.lease>30?'warn':'bad'}" style="width:120px"><i style="width:${r.lease}%"></i></div><span class="mono-s">租约剩余 ${r.lease}%</span>`:`<span class="mono-s">租约已释放</span>`}</div></div>`).join('');
+ }
+ if(D_TAB==='mem'){
+  if(!w.mem.length)return `<div class="empty"><div class="big">暂无任务记忆</div>记忆通过员工 MCP 工具写入</div>`;
+  return w.mem.map(m=>`<div style="border:1px solid var(--line);border-radius:10px;padding:13px 15px;margin-bottom:10px">
+   <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><span class="scope">${m[0]==='work'?'work':'project'}</span><span class="cell-id">${esc(m[1])}</span></div>
+   <div style="font-size:12.5px;color:var(--ink-2);margin-top:7px;line-height:1.7">${esc(m[2])}</div>
+   <div style="font-family:var(--mono);font-size:10.5px;color:var(--ink-3);margin-top:6px">修订不可变 · 快照按 hash 校验</div></div>`).join('');
+ }
+ if(D_TAB==='arts'){
+  if(!w.arts.length)return `<div class="empty"><div class="big">暂无归档成果物</div>由 Agent 通过 artifact_create 归档</div>`;
+  return w.arts.map(a=>{const m=ART_META[a[0]];return `<div style="display:flex;align-items:center;gap:10px;padding:10px 2px;border-bottom:1px solid var(--line-soft)">
+   <span class="st ${m[1]}" style="padding:2px 8px">${m[0]}</span>
+   <span style="font-size:13px;color:var(--ink);flex:1">${esc(a[1])}</span>
+   <span class="mono-s">${esc(a[2])}</span></div>`;}).join('');
+ }
+ if(D_TAB==='hf'){
+  if(!w.hf.length)return `<div class="empty"><div class="big">无交接记录</div>交接协议在责任转移时创建</div>`;
+  return w.hf.map((h,i)=>`<div style="border:1px solid var(--line);border-radius:10px;padding:13px 15px;margin-bottom:10px">
+   <div style="display:flex;align-items:center;gap:9px;flex-wrap:wrap">${h.st==='pending'?stBadgeRaw('','st-handoff','待接受'):stBadgeRaw('','st-done','已接受')}
+   <span class="mono-s">${esc(agentById(h.from).profile)} → ${esc(agentById(h.to).profile)}</span><span class="mono-s">${esc(h.t)}</span></div>
+   <div style="font-size:12.5px;color:var(--ink-2);margin-top:7px;line-height:1.7">${esc(h.note)}</div>
+   ${h.st==='pending'?`<button class="btn primary sm" style="margin-top:10px" onclick="acceptHF('${w.id}',${i})">接受交接</button>`:`<div style="font-family:var(--mono);font-size:10.5px;color:var(--ok);margin-top:7px">已显式接受并绑定接受方 Run</div>`}</div>`).join('');
+ }
+ if(D_TAB==='deps'){
+  return `<div style="font-size:12.5px;color:var(--ink-3);margin-bottom:10px;line-height:1.7">依赖创建时执行环检测；执行器按依赖顺序门控推进。以下为当前依赖图。</div>
+  ${w.deps.length?w.deps.map(d=>`<div style="display:flex;align-items:center;gap:10px;padding:10px 2px;border-bottom:1px solid var(--line-soft)"><span class="cell-id">${esc(d[0])}</span><span style="color:var(--ink-2);font-size:13px">${wiById(d[0])?esc(wiById(d[0]).title):''}</span><span style="margin-left:auto">${stBadgeRaw('','st-done','无环')}</span></div>`).join(''):`<div class="empty"><div class="big">无依赖</div>独立工作项</div>`}`;
+ }
+}
+function runTabBody(r){
+ const w=wiById(r.wi);
+ const PH={
+  running:[['分配','ok'],['认领','ok'],['启动','ok'],['运行','accent']],
+  launching:[['分配','ok'],['启动','accent']],
+  handoff:[['分配','ok'],['认领','ok'],['运行','ok'],['交接','accent']],
+  assigned:[['分配','accent']],
+  done:[['分配','ok'],['认领','ok'],['运行','ok'],['检查点','ok'],['完成','ok']],
+  failed:[['分配','ok'],['认领','ok'],['启动','bad']]};
+ const ph=(PH[r.st]||[['运行','accent']]);
+ const launch=LAUNCHES.find(l=>l.id===r.launch);
+ if(D_TAB==='overview'){
+  return `<div class="timeline">${ph.map((p,i)=>`<div class="tl-node"><div class="tl-time">${esc(r.at||'—')}</div>
+   <div class="tl-axis"><span class="d ${p[1]}"></span></div>
+   <div class="tl-content"><div class="t">${esc(p[0])}</div><div class="s">${i===ph.length-1?esc(r.note):''}</div>
+   <div class="m">${esc(r.id)} · ${esc(r.inst)}${r.lease>0?` · 租约 ${r.lease}%`:''}</div></div></div>`).join('')}</div>
+   <div style="margin-top:16px" class="card-head" style="padding:10px 0 8px"><h3>工作项</h3></div>
+   <div style="display:flex;align-items:center;gap:10px;padding:10px 2px;cursor:pointer" onclick="openWork('${w.id}')"><span class="cell-id">${esc(w.id)}</span><span style="color:var(--ink);font-size:13px">${esc(w.title)}</span><span style="margin-left:auto">${stBadge(w.st)}</span></div>`;
+ }
+ return `${launch?`<div style="margin-bottom:12px"><div class="card-head" style="padding:10px 0 8px"><h3>启动尝试</h3><span class="hint">${esc(launch.id)}</span></div>
+  <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">${stBadgeRaw('',LAUNCH_ST[launch.st][1],LAUNCH_ST[launch.st][0])}<span class="mono-s">PID ${esc(launch.pid)}</span><span class="mono-s">会话 ${esc(launch.ses)}</span><span class="mono-s">${esc(launch.at)}</span></div>
+  <div class="ins-block">${esc(launch.ins)}</div></div>`:''}
+  <div class="card-head" style="padding:10px 0 8px"><h3>执行证据</h3><span class="hint">WorkExecutionEvidence</span></div>
+  <div style="display:flex;flex-direction:column;gap:8px;margin-top:4px">
+   <div style="display:flex;align-items:center;gap:10px;font-size:12.5px;color:var(--ink-2)"><span class="scope">audit</span><span>LSM Audit 记录已关联</span><span class="mono-s" style="margin-left:auto">evt_9f2c1a</span></div>
+   <div style="display:flex;align-items:center;gap:10px;font-size:12.5px;color:var(--ink-2)"><span class="scope">logs</span><span>RuntimeJob 日志可检索</span><span class="mono-s" style="margin-left:auto">job_3091</span></div>
+   <div style="display:flex;align-items:center;gap:10px;font-size:12.5px;color:var(--ink-2)"><span class="scope">snap</span><span>上下文快照 v7 · hash 校验通过</span><span class="mono-s" style="margin-left:auto">rev_7f3a9c</span></div>
+  </div>`;
+}
+function acceptHF(wiId,i){const w=wiById(wiId);w.hf[i].st='accepted';
+ const to=agentById(w.hf[i].to);to.st='running';to.wi=wiId;w.st='running';w.agent=to.id;
+ buildDrawer();toast('交接已接受',`${esc(w.id)} 责任已转入 ${to.profile}，绑定接受方 Run`,'ok');
+ if(CURRENT_VIEW==='work')renderWork();}
+
+/* ---------- 工作台 ---------- */
+const SPARK=[[2,3,2,4,3,3,5,4],[3,3,4,3,4,4,3,3],[5,4,6,5,6,7,6,6],[1,2,1,1,2,2,3,2]];
+function sparkSvg(d,i){const max=Math.max(...d),min=Math.min(...d);
+ const pts=d.map((v,j)=>`${(j/(d.length-1)*58+3).toFixed(1)},${(26-((v-min)/(max-min||1))*20+2).toFixed(1)}`).join(' ');
+ return `<svg class="spark" width="72" height="30" viewBox="0 0 72 30"><polyline points="${pts}" fill="none" stroke="${i===0?'#E8A33D':i===1?'#7FB98B':i===2?'#6FA8C9':'#E76F51'}" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>`;}
+function renderKpi(){
+ const runN=RUNS.filter(r=>r.st==='running').length;
+ const actN=AGENTS.filter(a=>a.st!=='offline').length;
+ const todoN=WORK.filter(w=>['backlog','ready','assigned','launching','running','handoff'].includes(w.st)).length;
+ const hfN=WORK.reduce((n,w)=>n+(w.hf.filter(h=>h.st==='pending').length),0);
+ const kpis=[
+  {label:'运行中执行',en:'Running Executions',num:runN,delta:'较昨日 <b>+1</b>',ac:'#E8A33D',i:0},
+  {label:'活跃 Agent',en:'Active Instances',num:`${actN}`,unit:'/ 8',delta:'<b>98.2%</b> 租约健康度',ac:'#7FB98B',i:1},
+  {label:'待办工作项',en:'Open WorkItems',num:todoN,delta:'其中待认领 <b>2</b>',ac:'#6FA8C9',i:2},
+  {label:'待处理交接',en:'Pending Handoffs',num:hfN,delta:'需人工关注 <b>1</b>',ac:'#E76F51',i:3}];
+ $('#kpiGrid').innerHTML=kpis.map((k,j)=>`<div class="kpi" style="--kpi-accent:${k.ac}">
+   <div class="label">${k.label}<span class="en">${k.en}</span></div>
+   <div class="num">${k.num}<span class="unit">${k.unit||''}</span></div>
+   <div class="delta">${k.delta}</div>${sparkSvg(SPARK[j],j)}</div>`).join('');
+}
+function renderFleetStrip(){
+ const strip=$('#fleetStrip');if(!strip)return;
+ strip.innerHTML=AGENTS.map(a=>{
+  const accent={running:'#7FB98B',launching:'#E0A94E',idle:'#8B93A1',offline:'#565D68'}[a.st];
+  return `<div class="agent-node" style="--node-accent:${accent}" onclick="setView('fleet')">
+   <div class="top"><div class="avatar">${a.ab}</div><div style="min-width:0"><div class="name">${esc(a.profile)}</div><div class="sub">${esc(a.id)}</div></div></div>
+   <div class="meta">
+    <div class="row"><span class="k">账号</span><span>${esc(a.acct)}</span></div>
+    <div class="row"><span class="k">机器</span><span>${esc(a.mach)}</span></div>
+    <div class="row"><span class="k">当前工作</span><span>${a.wi==='—'?'空闲':esc(a.wi)}</span></div>
+   </div>
+   <div class="hb"><span>${stBadgeRaw('',a.st==='offline'?'st-offline':a.st==='launching'?'st-launching':a.st==='idle'?'st-idle':'st-running',a.st==='running'?'运行中':a.st==='launching'?'启动中':a.st==='idle'?'空闲':'离线')}</span><span>${a.hb}s 前</span></div>
+  </div>`;}).join('');
+ $('#fleetTotal')&&($('#fleetTotal').textContent=`全部 ${AGENTS.length} 个实例`);
+}
+function renderActivity(){
+ $('#activityFeed').innerHTML=ACTIVITY.map(a=>`<div style="display:flex;gap:10px;padding:8px 2px;border-bottom:1px solid var(--line-soft);font-size:12.5px;color:var(--ink-2);line-height:1.6">
+  <span class="mono-s" style="flex:none;width:38px;color:var(--ink-3)">${a.t}</span>
+  <span style="min-width:0"><span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:${ACT_ST[a.st]};margin-right:7px"></span>${a.n}</span></div>`).join('');
+}
+function renderDispatchFeed(){
+ $('#dispatchFeed').innerHTML=DECISIONS.slice(0,6).map(d=>`<div style="display:flex;gap:10px;padding:8px 2px;border-bottom:1px solid var(--line-soft);font-size:12.5px;color:var(--ink-2)">
+  <span class="mono-s" style="flex:none;width:38px;color:var(--ink-3)">${d.t}</span>
+  <span style="min-width:0">分配 <b style="color:var(--ink)">${esc(d.wi)}</b> → <span class="cell-id">${esc(d.to)}</span><div style="font-size:11px;color:var(--ink-3);margin-top:2px">${esc(d.why)}</div></span></div>`).join('');
+}
+function renderPlanes(){
+ $('#planeRow').innerHTML=[
+  ['控制面','Control Plane','工作语义的事实源：注册表 / 派发 / 分配 / 上下文快照 / 记忆 / 决策与成果物','健康'],
+  ['LSM 运行时','Runtime Plane','主机执行资源的事实源：运行空间 / 任务 / 终端 / 浏览器实例 / 执行审计','健康'],
+  ['Provider 面','Provider Plane','模型私有会话与推理轨迹：会话私密，永不直接共享','在线']].map(p=>
+  `<div class="plane"><div class="pt">${p[0]}<span style="font-family:var(--mono);font-size:10px;color:var(--ink-3);font-weight:400">${p[1]}</span></div><div class="ps">${p[2]}</div><div class="pe">${p[3]}</div></div>`).join('');
+}
+let CAPCHART=null;
+function svgCapacityFallback(){
+ const W=640,H=220,padL=36,padB=20,padT=8,maxV=6;
+ const keys=['codex','claude','gemini','ant'];
+ const isLight = document.documentElement.getAttribute('data-theme') === 'light';
+ const colors = isLight
+  ? {codex:'#C26800',claude:'#0A6FB5',gemini:'#15803D',ant:'#C44327'}
+  : {codex:'#F0A73A',claude:'#78B3D6',gemini:'#72C785',ant:'#ED7154'};
+ const x=i=>padL+(W-padL-8)*i/23;
+ const y=v=>padT+(H-padT-padB)*(1-v/maxV);
+ const cum=CAP[keys[0]].map(()=>0);
+ let series='';
+ keys.forEach(k=>{CAP[k].forEach((v,i)=>cum[i]+=v);
+  const top=cum.map((v,i)=>`${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ');
+  const bot=cum.slice().reverse().map((v,i)=>`${x(23-i).toFixed(1)},${y(0).toFixed(1)}`).join(' ');
+  series+=`<path d="M${top} L${bot} Z" fill="${colors[k]}26" stroke="${colors[k]}" stroke-width="1.3" stroke-linejoin="round"/>`;});
+ let grid='',labels='';
+ const gridLineColor = isLight ? '#DFE4ED' : '#232B39';
+ const labelColor = isLight ? '#586475' : '#929BAC';
+ for(let v=0;v<=maxV;v++){grid+=`<line x1="${padL}" y1="${y(v).toFixed(1)}" x2="${W-6}" y2="${y(v).toFixed(1)}" stroke="${gridLineColor}" stroke-width="1"/>`;
+  labels+=`<text x="${padL-7}" y="${(y(v)+3).toFixed(1)}" fill="${labelColor}" font-size="9" text-anchor="end">${v}</text>`;}
+ [0,6,12,18,23].forEach(i=>{labels+=`<text x="${x(i).toFixed(1)}" y="${H-5}" fill="${labelColor}" font-size="9" text-anchor="middle">${HOURS[i]}</text>`;});
+ const legend=keys.map((k,i)=>`<text x="${padL+8+i*92}" y="${H+14}" fill="${colors[k]}" font-size="10" font-family="var(--mono)">${k}</text>`).join('');
+ return `<svg viewBox="0 0 ${W} ${H+24}" width="100%" style="max-width:640px;display:block;margin:0 auto" role="img" aria-label="容量观测堆叠面积图">${grid}${labels}${series}${legend}</svg>`;
+}
+function renderChart(){
+ const el=$('#capacityChart');if(!el)return;
+ if(CAPCHART){CAPCHART.dispose();CAPCHART=null;}
+ if(!window.echarts){el.innerHTML=svgCapacityFallback();return;}
+ CAPCHART=echarts.init(el);
+ const isLight = document.documentElement.getAttribute('data-theme') === 'light';
+ const mk=(name,data,color)=>({name,type:'line',stack:'t',smooth:true,symbol:'none',data,lineStyle:{width:0},
+  areaStyle:{color:{type:'linear',x:0,y:0,x2:0,y2:1,colorStops:[{offset:0,color:color+(isLight?'38':'55')},{offset:1,color:color+'00'}]}}});
+ const seriesPalette = isLight
+  ? {codex:'#C26800',claude:'#0A6FB5',gemini:'#15803D',ant:'#C44327'}
+  : {codex:'#F0A73A',claude:'#78B3D6',gemini:'#72C785',ant:'#ED7154'};
+ CAPCHART.setOption({
+  backgroundColor:'transparent',grid:{left:36,right:14,top:28,bottom:26},
+  tooltip:{
+    trigger:'axis',
+    backgroundColor: isLight ? '#FFFFFF' : '#1A1F2A',
+    borderColor: isLight ? '#CCD4E0' : '#47536A',
+    textStyle:{color: isLight ? '#11141A' : '#F7F8FA',fontSize:12}
+  },
+  legend:{
+    data:['codex','claude','gemini','antigravity'],
+    textStyle:{color: isLight ? '#586475' : '#929BAC',fontSize:11},
+    bottom:0,itemWidth:10,itemHeight:6
+  },
+  xAxis:{
+    type:'category',
+    data:HOURS,
+    axisLine:{lineStyle:{color: isLight ? '#CCD4E0' : '#2F3849'}},
+    axisLabel:{color: isLight ? '#586475' : '#929BAC',fontSize:10,interval:3},
+    axisTick:{show:false}
+  },
+  yAxis:{
+    type:'value',
+    splitLine:{lineStyle:{color: isLight ? '#DFE4ED' : '#232B39'}},
+    axisLabel:{color: isLight ? '#586475' : '#929BAC',fontSize:10}
+  },
+  series:[
+    mk('codex',CAP.codex,seriesPalette.codex),
+    mk('claude',CAP.claude,seriesPalette.claude),
+    mk('gemini',CAP.gemini,seriesPalette.gemini),
+    mk('antigravity',CAP.ant,seriesPalette.ant)
+  ]});
+}
+function renderDashboard(){renderKpi();renderFleetStrip();renderActivity();renderDispatchFeed();renderPlanes();renderChart();}
+
+/* ---------- 工作项 ---------- */
+let WORK_FILTER='all',G_SEARCH='';
+const WF_STS=[['all','全部'],['running','执行中'],['assigned','已分配'],['launching','启动中'],['handoff','待交接'],['ready','待认领'],['backlog','待排期'],['done','已完成'],['failed','失败']];
+function renderWork(){
+ const cnt=s=>WORK.filter(w=>s==='all'||w.st===s).length;
+ $('#workFilters').innerHTML=WF_STS.map(s=>`<button class="chip ${WORK_FILTER===s[0]?'on':''}" onclick="filterWork('${s[0]}')">${s[1]}<span class="n">${cnt(s[0])}</span></button>`).join('');
+ let rows=WORK.filter(w=>WORK_FILTER==='all'||w.st===WORK_FILTER);
+ if(G_SEARCH)rows=rows.filter(w=>(w.id+w.title+w.agent).toLowerCase().includes(G_SEARCH.toLowerCase()));
+ $('#workRows').innerHTML=rows.map(w=>{const a=agentById(w.agent);
+  return `<tr onclick="openWork('${w.id}')">
+   <td><span class="cell-id">${esc(w.id)}</span></td>
+   <td><div class="t-title">${esc(w.title)}</div></td>
+   <td>${stBadge(w.st)}</td>
+   <td><span class="tag pri-${w.pri==='high'?'high':w.pri==='mid'?'mid':'low'}">${w.pri==='high'?'高':w.pri==='mid'?'中':'低'}</span></td>
+   <td><span class="mono-s">${a?esc(a.profile):'—'}</span><div class="t-sub">${a?esc(a.id):'未分配'}</div></td>
+   <td><span class="mono-s">${w.runs.length?esc(w.runs[w.runs.length-1][0]):'—'}</span></td>
+   <td><span class="mono-s">${esc(w.upd)}</span></td></tr>`;}).join('')||`<tr><td colspan="7"><div class="empty">没有符合条件的工作项</div></td></tr>`;
+}
+function filterWork(s){WORK_FILTER=s;renderWork();}
+function openWork(id){openDrawer('work',id);}
+
+/* ---------- 执行记录 ---------- */
+const RUN_STS=[['all','全部'],['running','运行中'],['launching','启动中'],['assigned','已分配'],['handoff','待交接'],['done','已完成'],['failed','失败']];
+let RUN_FILTER='all';
+function renderRuns(){
+ const cnt=s=>RUNS.filter(r=>s==='all'||r.st===s).length;
+ $('#runFilters').innerHTML=RUN_STS.map(s=>`<button class="chip ${RUN_FILTER===s[0]?'on':''}" onclick="filterRun('${s[0]}')">${s[1]}<span class="n">${cnt(s[0])}</span></button>`).join('');
+ const rows=RUNS.filter(r=>RUN_FILTER==='all'||r.st===RUN_FILTER);
+ $('#runRows').innerHTML=rows.map(r=>{const w=wiById(r.wi),a=agentById(r.inst);
+  return `<tr onclick="openRun('${r.id}')">
+   <td><span class="cell-id">${esc(r.id)}</span></td>
+   <td><div class="t-title">${esc(w.title)}</div><div class="t-sub">${esc(r.wi)}</div></td>
+   <td><span class="mono-s">${esc(a.profile)}</span><div class="t-sub">${esc(r.inst)}</div></td>
+   <td>${stBadge(r.st)}</td>
+   <td>${r.lease>0?`<div style="display:flex;align-items:center;gap:8px"><div class="prog ${r.lease>60?'ok':r.lease>30?'warn':'bad'}" style="width:70px"><i style="width:${r.lease}%"></i></div><span class="mono-s">${r.lease}%</span></div>`:'<span class="mono-s">已释放</span>'}</td>
+   <td><span class="mono-s">${esc(r.launch)}</span></td>
+   <td><span class="mono-s">${esc(r.dur)}</span></td>
+   <td><span style="font-size:11.5px;color:var(--ink-2)">${esc(r.ev)}</span></td></tr>`;}).join('')||`<tr><td colspan="8"><div class="empty">没有符合条件的执行记录</div></td></tr>`;
+}
+function filterRun(s){RUN_FILTER=s;renderRuns();}
+function openRun(id){openDrawer('run',id);}
+function fleetRow(id){const a=agentById(id);
+ if(a.wi!=='—')openWork(a.wi);else toast('实例','该实例当前无工作项，仅展示身份与心跳','');}
+
+/* ---------- Agent 集群 ---------- */
+function renderFleetView(){
+ const act=AGENTS.filter(a=>a.st!=='offline').length;
+ const byMach={};AGENTS.forEach(a=>{byMach[a.mach]=byMach[a.mach]||[];byMach[a.mach].push(a);});
+ $('#fleetTotal')&&($('#fleetTotal').textContent=`全部 ${AGENTS.length} 个实例`);
+ $('#fleetBody').innerHTML=AGENTS.map(a=>{const w=a.wi!=='—'?wiById(a.wi):null;
+  return `<tr onclick="fleetRow('${a.id}')">
+   <td><span class="cell-id">${esc(a.id)}</span></td>
+   <td><div class="t-title">${esc(a.profile)}</div><div class="t-sub">${a.ab}</div></td>
+   <td><span class="mono-s">${esc(a.acct)}</span></td>
+   <td><span class="mono-s">${esc(a.mach)}</span></td>
+   <td>${stBadgeRaw('',a.st==='offline'?'st-offline':a.st==='launching'?'st-launching':a.st==='idle'?'st-idle':'st-running',a.st==='running'?'运行中':a.st==='launching'?'启动中':a.st==='idle'?'空闲':'离线')}</td>
+   <td><span class="live">${a.hb}s 前</span></td>
+   <td><span style="font-size:12px;color:var(--ink-2)">${w?esc(w.title):'—'}</span></td>
+   <td><span class="mono-s">${esc(a.cap)}</span></td></tr>`;}).join('');
+ const machHtml=Object.entries(byMach).map(([m,list])=>`<div style="border:1px solid var(--line);border-radius:10px;padding:12px 14px">
+   <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><span class="cell-id">${esc(m)}</span><span class="mono-s">${list.length} 个实例</span><span style="margin-left:auto" class="st st-running"><span class="dot"></span>在线</span></div>
+   <div style="margin-top:9px"><div style="display:flex;justify-content:space-between;font-size:11px;color:var(--ink-3);font-family:var(--mono);margin-bottom:4px"><span>资源占用</span><span>${list.length*13+20}%</span></div>
+   <div class="prog" style="width:100%"><i style="width:${Math.min(list.length*13+20,95)}%"></i></div></div>
+   <div style="font-family:var(--mono);font-size:10.5px;color:var(--ink-3);margin-top:8px">${list.map(a=>a.id).join(' · ')}</div></div>`).join('');
+ $('#machGrid').innerHTML=machHtml;
+}
+</script>
+<script>
+/* ============================================================
+   渲染与交互 · 第三部分（对话 / 记忆 / 成果物 / 调度 / 启动 / 设置 / 初始化）
+   ============================================================ */
+
+/* ---------- 对话 ---------- */
+let ACTIVE_CONV=null,TYPING=false;
+function renderConvList(){
+ const list=$('#convList');
+ list.innerHTML=CONVS.map(c=>{const a=agentById(c.inst);
+  return `<div class="conv-item ${ACTIVE_CONV===c.id?'on':''}" onclick="openConv('${c.id}')">
+   <div class="avatar">${a.ab}</div>
+   <div style="min-width:0;flex:1">
+    <div class="cname">${esc(a.profile)}${c.unread?`<span class="unread"></span>`:''}<span class="ctime">${esc(c.last)}</span></div>
+    <div class="cpre">${esc(c.sum)}</div>
+   </div></div>`;}).join('');
+}
+function openConv(id){
+ ACTIVE_CONV=id;const c=CONVS.find(x=>x.id===id);c.unread=0;
+ if(window.innerWidth<=760){$('#convList').classList.add('mobile-on');}
+ renderConvList();
+ const a=agentById(c.inst);
+ $('#convHead').innerHTML=`<button class="btn sm ghost conv-back" onclick="backConvList()" style="margin-right:2px"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M15 6l-6 6 6 6"/></svg></button>
+  <div class="avatar" style="width:32px;height:32px;border-radius:9px;display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:11px;font-weight:600;background:var(--inset);border:1px solid var(--line);color:var(--ink-2)">${a.ab}</div>
+  <div class="info"><div class="who">${esc(a.profile)}<span style="font-family:var(--mono);font-size:10px;color:var(--ink-3);margin-left:7px">${esc(c.id)}</span></div>
+  <div class="state"><span style="width:6px;height:6px;border-radius:50%;background:${a.st==='running'?'#7FB98B':a.st==='launching'?'#E0A94E':'#8B93A1'}"></span>${a.st==='running'?'实例执行中 · 回复约需 1–3 分钟':a.st==='launching'?'实例启动中 · 消息将排队':a.st==='idle'?'实例空闲 · 随时可回复':'实例离线'}</div></div>
+  <span class="poll-hint">仅选中会话轮询</span>`;
+ const area=$('#msgArea');area.innerHTML=`<div class="empty" style="padding:20px"><div class="big" style="font-size:12.5px">正在加载消息历史…</div><span class="mono-s" style="font-size:10.5px">摘要已缓存 · 选中后按页拉取</span></div>`;
+ setTimeout(()=>renderMsgs(c),380);
+}
+function backConvList(){$('#convList').classList.remove('mobile-on');}
+function renderMsgs(c){
+ const area=$('#msgArea');const a=agentById(c.inst);
+ area.innerHTML=c.msgs.map(m=>`<div class="msg ${m.r==='h'?'human':'agent'}">
+  <div class="avatar">${m.r==='h'?'我':a.ab}</div>
+  <div>${m.q?`<div class="queued-tag">排队中 · Agent 空闲后回复</div>`:''}
+   <div class="bubble ${m.q?'queued':''}">${esc(m.m)}<span class="m-time">${esc(m.t)}${m.r==='h'?' · 人类':' · Agent'}</span></div></div></div>`).join('');
+ area.scrollTop=area.scrollHeight;
+}
+function sendMsg(){
+ if(TYPING||!ACTIVE_CONV)return;
+ const inp=$('#msgInput');const v=inp.value.trim();if(!v)return;
+ const c=CONVS.find(x=>x.id===ACTIVE_CONV);const a=agentById(c.inst);
+ const now=new Date();const p=n=>String(n).padStart(2,'0');
+ c.msgs.push({r:'h',t:`${p(now.getHours())}:${p(now.getMinutes())}`,m:v});inp.value='';
+ c.last=`${p(now.getHours())}:${p(now.getMinutes())}`;c.sum=v;renderConvList();renderMsgs(c);
+ TYPING=true;
+ const area=$('#msgArea');
+ const t=document.createElement('div');t.className='msg agent';
+ t.innerHTML=`<div class="avatar">${a.ab}</div><div><div class="bubble"><span class="typing"><i></i><i></i><i></i></span></div></div>`;
+ area.appendChild(t);area.scrollTop=area.scrollHeight;
+ setTimeout(()=>{TYPING=false;const reps=CANNED[c.id]||['收到。'];
+  const reply=reps[Math.floor(Math.random()*reps.length)];
+  c.msgs.push({r:'a',t:now.getHours()+':'+now.getMinutes(),m:reply});
+  c.last=now.getHours()+':'+now.getMinutes();c.sum=reply;renderMsgs(c);renderConvList();},1400);
+}
+$('#sendBtn')&&($('#sendBtn').onclick=sendMsg);
+$('#msgInput')&&($('#msgInput').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendMsg();}}));
+
+/* ---------- 记忆 ---------- */
+const SCOPE_META={org:['组织','st-accent'],project:['项目','st-info'],employee:['员工','st-handoff'],work:['工作','st-done']};
+const SCOPE_STS=[['all','全部'],['org','组织'],['project','项目'],['employee','员工'],['work','工作']];
+let MEM_FILTER='all',MEM_ACTIVE='幂等性设计';
+function renderMemory(){
+ const cnt=s=>MEMORY.filter(m=>s==='all'||m.scope===s).length;
+ $('#memFilters').innerHTML=SCOPE_STS.map(s=>`<button class="chip ${MEM_FILTER===s[0]?'on':''}" onclick="filterMem('${s[0]}')">${s[1]}<span class="n">${cnt(s[0])}</span></button>`).join('');
+ const rows=MEMORY.filter(m=>MEM_FILTER==='all'||m.scope===MEM_FILTER);
+ $('#memList').innerHTML=rows.map(m=>{const sm=SCOPE_META[m.scope];
+  return `<div class="mem-item ${MEM_ACTIVE===m.key?'':''}" style="${MEM_ACTIVE===m.key?'border-color:rgba(232,163,61,.5)':''}" onclick="selectMem('${esc(m.key)}')">
+   <div class="head"><span class="scope">${sm[0]}</span><span class="mono-s">${esc(m.sk)}</span><span class="tag" style="margin-left:auto">${m.revs} 个修订</span></div>
+   <div class="key" style="margin-top:7px">${esc(m.key)}</div>
+   <div class="sum">${esc(m.sum)}</div>
+   <div class="meta"><span>更新 ${esc(m.upd)}</span><span>不可变修订 · hash 校验</span></div></div>`;}).join('');
+ renderRevs(MEM_ACTIVE);
+}
+function filterMem(s){MEM_FILTER=s;renderMemory();}
+function selectMem(k){MEM_ACTIVE=k;renderMemory();}
+function renderRevs(k){
+ const revs=REVS[k]||[];
+ $('#revList').innerHTML=revs.length?revs.map((r,i)=>`<div class="rev-item ${i===0?'new':''}">
+   <div class="rt">${esc(r.t)}</div><div class="rv">${esc(r.v)}</div><div class="rh">${esc(r.h)}</div></div>`).join('')
+  :`<div class="empty"><div class="big">无修订</div></div>`;
+}
+
+/* ---------- 成果物 ---------- */
+const ART_STS=[['all','全部'],['artifact','成果物'],['decision','决策'],['thread','线程'],['message','消息']];
+let ART_FILTER='all';
+function renderArtifacts(){
+ const cnt=s=>ARTS.filter(a=>s==='all'||a.type===s).length;
+ $('#artFilters').innerHTML=ART_STS.map(s=>`<button class="chip ${ART_FILTER===s[0]?'on':''}" onclick="filterArt('${s[0]}')">${s[1]}<span class="n">${cnt(s[0])}</span></button>`).join('');
+ const rows=ARTS.filter(a=>ART_FILTER==='all'||a.type===ART_FILTER);
+ $('#artRows').innerHTML=rows.map(a=>{const m=ART_META[a.type];
+  return `<tr onclick="openWork('${a.wi}')">
+   <td><span class="st ${m[1]}" style="padding:2px 8px">${m[0]}</span></td>
+   <td><div class="t-title">${esc(a.t)}</div></td>
+   <td><span class="cell-id">${esc(a.wi)}</span></td>
+   <td><span class="mono-s">${esc(a.by)}</span></td>
+   <td><span class="mono-s">${esc(a.at)}</span></td>
+   <td><span class="mono-s">${a.ref} 处引用</span></td>
+   <td><span class="mono-s">${esc(a.h)}</span></td></tr>`;}).join('')||`<tr><td colspan="7"><div class="empty">没有符合条件的归档记录</div></td></tr>`;
+}
+function filterArt(s){ART_FILTER=s;renderArtifacts();}
+
+/* ---------- 调度 ---------- */
+function renderDispatch(){
+ const max={codex:4,claude:3,gemini:2,ant:2};
+ $('#capBars').innerHTML=Object.entries(max).map(([k,v])=>{
+  const used=CAP[k][23];return `<div style="display:flex;align-items:center;gap:12px;padding:7px 0">
+   <span class="mono-s" style="width:86px">${esc(k)}</span>
+   <div class="prog" style="flex:1;max-width:320px"><i style="width:${used/v*100}%"></i></div>
+   <span class="mono-s">${used} / ${v} 槽位</span></div>`;}).join('');
+ $('#policyRows').innerHTML=POLICIES.map(p=>`<tr onclick="openWork('${p.wi}')">
+  <td><span class="cell-id">${esc(p.wi)}</span></td>
+  <td><span class="mono-s">${esc(p.pref)}</span></td>
+  <td style="font-size:12px;color:var(--ink-2)">${esc(p.points)}</td>
+  <td><span class="mono-s">${p.tries} 次</span></td>
+  <td><span class="st st-done"><span class="dot"></span>${esc(p.st)}</span></td></tr>`).join('');
+ $('#decisionLog').innerHTML=DECISIONS.map(d=>`<div style="display:flex;gap:10px;padding:8px 2px;border-bottom:1px solid var(--line-soft);font-size:12.5px;color:var(--ink-2)">
+  <span class="mono-s" style="flex:none;width:38px;color:var(--ink-3)">${d.t}</span>
+  <span style="min-width:0"><b style="color:var(--ink)">${esc(d.wi)}</b> → <span class="cell-id">${esc(d.to)}</span><div style="font-size:11px;color:var(--ink-3);margin-top:2px">${esc(d.why)}</div></span></div>`).join('');
+}
+
+/* ---------- 启动 ---------- */
+function renderLaunch(){
+ $('#profileGrid').innerHTML=PROFILES.map(p=>`<div class="profile-card">
+  <div class="pname">${esc(p.n)}<span class="st st-done" style="padding:1px 8px;font-size:10.5px"><span class="dot"></span>${esc(p.st)}</span></div>
+  <div class="pmeta"><span>${esc(p.p)}</span><span>${esc(p.acct)}</span></div>
+  <div class="cmd">${esc(p.cmd)}</div></div>`).join('');
+ $('#launchRows').innerHTML=LAUNCHES.map(l=>{const m=LAUNCH_ST[l.st];
+  return `<tr onclick="toast('启动尝试',l.id+' · 演示数据','')">
+   <td><span class="cell-id">${esc(l.id)}</span></td>
+   <td><span class="mono-s">${esc(l.prof)}</span></td>
+   <td><span class="mono-s">${esc(l.inst)}</span></td>
+   <td>${stBadgeRaw('',m[1],m[0])}</td>
+   <td><span class="mono-s">${esc(l.pid)}</span></td>
+   <td><span class="mono-s">${esc(l.ses)}</span></td>
+   <td><span class="mono-s">${esc(l.at)}</span></td>
+   <td><span class="mono-s" style="font-size:10.5px;color:var(--ink-3);display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(l.ins)}">${esc(l.ins.split('\n')[0])}</span></td></tr>`;}).join('');
+ $('#jobFeed').innerHTML=JOBS.map(j=>`<div style="display:flex;align-items:center;gap:10px;padding:8px 2px;border-bottom:1px solid var(--line-soft);font-size:12.5px;color:var(--ink-2)">
+  <span class="mono-s" style="width:38px;color:var(--ink-3)">${j.t}</span>
+  <span style="flex:1">${esc(j.n)}</span>
+  ${j.st==='running'?'<span class="live">执行中</span>':'<span class="st st-pending" style="padding:1px 8px"><span class="dot"></span>排队</span>'}</div>`).join('');
+}
+
+/* ---------- 设置 ---------- */
+const ENV=[
+ ['MORROWS_DATABASE_URL','sqlite://data/morrows.db','数据库'],
+ ['MORROWS_BIND','127.0.0.1:8787','监听地址'],
+ ['MORROWS_WEB_DIR','web/dist','前端静态资源'],
+ ['MORROWS_LAUNCH_DIR','data/launches','启动工作目录'],
+ ['MORROWS_LSM_CONTROL_URL','http://127.0.0.1:8765','LSM 集成（可选）'],
+ ['MORROWS_LSM_SUBJECT','local-mcp-client','LSM 主体'],
+ ['MORROWS_AGENT_RESTART_GRACE_SECONDS','600','重启宽限']];
+function renderSettings(){
+ $('#envTable').innerHTML=ENV.map(e=>`<tr><td class="k">${esc(e[0])}</td><td class="v">${esc(e[1])}</td><td class="d">${esc(e[2])}</td></tr>`).join('');
+}
+
+/* ---------- 全局初始化与后端集成 ---------- */
+let IS_BACKEND_LIVE = false;
+let BACKEND_POLL_TIMER = null;
+let CONV_POLL_TIMER = null;
+
+// 通用 Fetch 封装
+async function api(path, options = {}) {
+  const res = await fetch(path, {
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(options.headers || {})
+    }
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || `${res.status} ${res.statusText}`);
+  }
+  const ct = res.headers.get('content-type');
+  if (ct && ct.includes('application/json')) {
+    return await res.json();
+  }
+  return null;
+}
+
+// 格式化时间
+function formatTimeStr(dtStr) {
+  if (!dtStr) return '—';
+  try {
+    const d = new Date(dtStr);
+    const now = new Date();
+    const diffSec = Math.round((now - d) / 1000);
+    if (diffSec < 60) return `${Math.max(1, diffSec)}s 前`;
+    if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m 前`;
+    if (diffSec < 86400) {
+      const p = n => String(n).padStart(2, '0');
+      return `${p(d.getHours())}:${p(d.getMinutes())}`;
+    }
+    return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  } catch (e) {
+    return dtStr;
+  }
+}
+
+// 核心数据拉取与适配
+async function loadBackendData(manual = false) {
+  try {
+    const health = await api('/api/health');
+    if (health && health.ok) {
+      IS_BACKEND_LIVE = true;
+      const dot = document.querySelector('.daemon .dot');
+      if (dot) dot.style.background = 'var(--ok)';
+      const syncEl = document.querySelector('#syncState');
+      if (syncEl) syncEl.textContent = manual ? '刚刚同步' : '数据实时同步';
+    }
+  } catch (e) {
+    IS_BACKEND_LIVE = false;
+    const dot = document.querySelector('.daemon .dot');
+    if (dot) dot.style.background = 'var(--bad)';
+    const syncEl = document.querySelector('#syncState');
+    if (syncEl) syncEl.textContent = '守护进程未响应';
+    if (manual) toast('连接失败', '无法连接至 Morrows 后端 127.0.0.1:8787', 'bad');
+    return;
+  }
+
+  try {
+    const [rawTasks, rawFleet, rawConvs, rawPolicies, rawProfiles] = await Promise.all([
+      api('/api/tasks').catch(() => null),
+      api('/api/agent-fleet').catch(() => api('/api/agents').catch(() => null)),
+      api('/api/conversations').catch(() => null),
+      api('/api/dispatch-policies').catch(() => null),
+      api('/api/launch-profiles').catch(() => null)
+    ]);
+
+    // 1. 处理 Fleet 数据
+    if (Array.isArray(rawFleet) && rawFleet.length > 0) {
+      AGENTS.length = 0;
+      rawFleet.forEach(item => {
+        const inst = item.instance || item;
+        const prof = item.profile || {};
+        const acct = item.account || {};
+        const mach = item.machine || {};
+        const cap = item.latest_capacity || {};
+
+        const name = prof.name || inst.name || 'Agent';
+        const ab = (name.replace(/[^a-zA-Z]/g, '').slice(0, 2) || inst.name.slice(0, 2) || 'ag').toLowerCase();
+
+        let hbSec = 0;
+        if (inst.last_heartbeat_at) {
+          hbSec = Math.max(0, Math.round((Date.now() - new Date(inst.last_heartbeat_at).getTime()) / 1000));
+        }
+
+        let st = 'idle';
+        if (inst.status === 'offline' || hbSec > 3600) {
+          st = 'offline';
+        } else if (cap.status === 'busy' || (cap.active_runs && cap.active_runs > 0)) {
+          st = 'running';
+        } else if (inst.status === 'starting') {
+          st = 'launching';
+        } else {
+          st = 'idle';
+        }
+
+        AGENTS.push({
+          id: inst.id,
+          ab: ab,
+          profile: name,
+          acct: acct.label || acct.provider || 'local',
+          mach: mach.hostname || mach.name || 'local-host',
+          st: st,
+          wi: '—',
+          hb: hbSec,
+          cap: cap.max_concurrency ? `${cap.available_slots || 0} / ${cap.max_concurrency} 槽位` : (cap.available_slots !== undefined ? `${cap.available_slots} 槽位` : '1 槽位'),
+          raw: item
+        });
+      });
+    }
+
+    // 2. 处理 Tasks 与关联数据
+    if (Array.isArray(rawTasks) && rawTasks.length > 0) {
+      WORK.length = 0;
+      const allRunsAgg = [];
+      const allArtsAgg = [];
+      const allActivityAgg = [];
+
+      for (const t of rawTasks) {
+        const stMap = {
+          'backlog': 'backlog',
+          'ready': 'ready',
+          'in_progress': 'running',
+          'review': 'running',
+          'blocked': 'handoff',
+          'done': 'done',
+          'cancelled': 'failed'
+        };
+        const priMap = p => p >= 50 ? 'high' : (p > 0 ? 'mid' : 'low');
+
+        // 拉取 runs 与 collaboration
+        const [runs, collab, ctxPkg] = await Promise.all([
+          api(`/api/tasks/${t.id}/runs`).catch(() => []),
+          api(`/api/tasks/${t.id}/collaboration`).catch(() => ({})),
+          api(`/api/tasks/${t.id}/context-package`).catch(() => null)
+        ]);
+
+        const taskDeps = (collab.dependencies || []).map(d => [d.depends_on_task_id, '已关联']);
+        const taskRuns = (runs || []).map(r => {
+          const tStr = r.started_at ? formatTimeStr(r.started_at) : '—';
+          const desc = r.result ? (r.result.summary || '执行已完成') : (r.checkpoint ? '检查点已保存' : (r.status === 'completed' ? '已完成' : '执行中'));
+          return [`Run ${r.id.slice(0, 8)}`, tStr, desc];
+        });
+
+        const taskMem = [];
+        if (t.current_context_revision_id) {
+          taskMem.push(['work', '上下文快照', `快照版本已锁定: ${t.current_context_revision_id.slice(0, 8)}`]);
+        }
+        if (ctxPkg) {
+          if (ctxPkg.objective) taskMem.push(['work', '工作目标', ctxPkg.objective]);
+          if (ctxPkg.verified_results && ctxPkg.verified_results.length) taskMem.push(['work', '验证结论', ctxPkg.verified_results.join('; ')]);
+          if (ctxPkg.next_action) taskMem.push(['work', '后续行动', ctxPkg.next_action]);
+        }
+
+        const taskArts = [];
+        (collab.artifacts || []).forEach(a => {
+          taskArts.push(['artifact', a.title, formatTimeStr(a.created_at || t.created_at), a.id]);
+          allArtsAgg.push({
+            type: 'artifact',
+            t: a.title,
+            wi: t.id,
+            by: a.created_by ? a.created_by.slice(0, 8) : 'agent',
+            at: formatTimeStr(a.created_at || t.created_at),
+            ref: 1,
+            h: a.id.slice(0, 8)
+          });
+        });
+        (collab.decisions || []).forEach(d => {
+          taskArts.push(['decision', d.title, formatTimeStr(d.created_at || t.created_at), d.id]);
+          allArtsAgg.push({
+            type: 'decision',
+            t: d.title,
+            wi: t.id,
+            by: d.created_by ? d.created_by.slice(0, 8) : 'agent',
+            at: formatTimeStr(d.created_at || t.created_at),
+            ref: 1,
+            h: d.id.slice(0, 8)
+          });
+        });
+        (collab.threads || []).forEach(thr => {
+          taskArts.push(['thread', thr.title, formatTimeStr(thr.created_at || t.created_at), thr.id]);
+          allArtsAgg.push({
+            type: 'thread',
+            t: thr.title,
+            wi: t.id,
+            by: thr.created_by ? thr.created_by.slice(0, 8) : 'agent',
+            at: formatTimeStr(thr.created_at || t.created_at),
+            ref: 1,
+            h: thr.id.slice(0, 8)
+          });
+        });
+
+        const taskHf = (collab.handoffs || []).map(h => ({
+          id: h.id,
+          from: h.created_by,
+          to: h.accepted_by_run_id ? h.accepted_by_run_id : '待接受',
+          t: formatTimeStr(h.created_at),
+          st: h.status === 'accepted' ? 'accepted' : 'pending',
+          note: h.summary || '工作交接协议'
+        }));
+
+        let assignedAgent = '—';
+        if (runs && runs.length > 0) {
+          assignedAgent = runs[0].agent_instance_id;
+          const ag = AGENTS.find(a => a.id === assignedAgent);
+          if (ag) ag.wi = t.id;
+        }
+
+        WORK.push({
+          id: t.id,
+          title: t.title,
+          st: stMap[t.state] || t.state,
+          pri: priMap(t.priority),
+          agent: assignedAgent,
+          upd: formatTimeStr(t.updated_at || t.created_at),
+          desc: t.description || '无详细描述',
+          policy: '容量感知 · 自动派发',
+          deps: taskDeps,
+          runs: taskRuns,
+          mem: taskMem,
+          arts: taskArts,
+          hf: taskHf,
+          raw: t
+        });
+
+        // 收集 Runs
+        (runs || []).forEach(r => {
+          const runStMap = {
+            'running': 'running',
+            'handed_off': 'handoff',
+            'completed': 'done',
+            'failed': 'failed',
+            'cancelled': 'failed',
+            'starting': 'launching'
+          };
+          let dur = '—';
+          if (r.started_at) {
+            const end = r.ended_at ? new Date(r.ended_at).getTime() : Date.now();
+            const sec = Math.max(0, Math.round((end - new Date(r.started_at).getTime()) / 1000));
+            if (sec < 60) dur = `${sec}s`;
+            else if (sec < 3600) dur = `${Math.floor(sec / 60)}m`;
+            else dur = `${Math.floor(sec / 3600)}h${Math.floor((sec % 3600) / 60)}m`;
+          }
+          let note = '执行中';
+          if (r.result && r.result.summary) note = r.result.summary;
+          else if (r.checkpoint) note = typeof r.checkpoint === 'string' ? r.checkpoint.slice(0, 30) : '检查点已保存';
+          else if (r.status === 'completed') note = '已完成';
+          else if (r.status === 'handed_off') note = '已交接';
+
+          allRunsAgg.push({
+            id: r.id,
+            wi: t.id,
+            inst: r.agent_instance_id,
+            st: runStMap[r.status] || r.status,
+            lease: r.status === 'completed' || r.status === 'handed_off' ? 0 : 70,
+            launch: r.external_session_ref || 'LSM-Run',
+            dur: dur,
+            note: note,
+            ev: '执行证据已关联',
+            raw: r
+          });
+        });
+
+        allActivityAgg.push({
+          t: formatTimeStr(t.updated_at || t.created_at),
+          n: `工作项 <b>${t.title}</b> (${t.id.slice(0, 8)}) · 状态 ${t.state}`,
+          st: t.state === 'done' ? 'ok' : (t.state === 'in_progress' ? 'accent' : 'info')
+        });
+      }
+
+      if (allRunsAgg.length > 0) RUNS.splice(0, RUNS.length, ...allRunsAgg);
+      if (allArtsAgg.length > 0) ARTS.splice(0, ARTS.length, ...allArtsAgg);
+      if (allActivityAgg.length > 0) ACTIVITY.splice(0, ACTIVITY.length, ...allActivityAgg.slice(0, 10));
+    }
+
+    // 3. 处理 Conversations
+    if (Array.isArray(rawConvs)) {
+      CONVS.length = 0;
+      rawConvs.forEach(c => {
+        CONVS.push({
+          id: c.id,
+          inst: c.agent_instance_id,
+          unread: c.queued_count || 0,
+          last: c.last_message_at ? formatTimeStr(c.last_message_at) : formatTimeStr(c.updated_at),
+          sum: c.last_message_preview || '暂无消息',
+          msgs: [],
+          raw: c
+        });
+      });
+    }
+
+    // 4. 处理 Policies
+    if (Array.isArray(rawPolicies) && rawPolicies.length > 0) {
+      POLICIES.length = 0;
+      rawPolicies.forEach(p => {
+        POLICIES.push({
+          wi: p.task_id,
+          pref: p.profile_id ? p.profile_id.slice(0, 8) : '自动优选',
+          points: (p.required_capabilities || []).join(' · ') || '容量感知',
+          tries: 3,
+          st: p.enabled ? '生效' : '暂停'
+        });
+      });
+    }
+
+    // 5. 处理 Launch Profiles
+    if (Array.isArray(rawProfiles) && rawProfiles.length > 0) {
+      PROFILES.length = 0;
+      rawProfiles.forEach(lp => {
+        PROFILES.push({
+          n: lp.name,
+          p: lp.adapter,
+          acct: lp.metadata?.account || 'local',
+          cmd: lp.program ? `${lp.program} (cwd: ${lp.default_cwd || '.'})` : lp.adapter,
+          st: lp.enabled ? '启用' : '禁用'
+        });
+      });
+    }
+
+    renderOnView(CURRENT_VIEW);
+    if (manual) toast('同步完成', '已从 Morrows 控制平面加载最新实时数据', 'ok');
+  } catch (err) {
+    console.error('loadBackendData error:', err);
+    if (manual) toast('同步异常', err.message, 'bad');
+  }
+}
+
+// 覆写 openConv
+async function openConv(id) {
+  ACTIVE_CONV = id;
+  const c = CONVS.find(x => x.id === id);
+  if (!c) return;
+  c.unread = 0;
+  if (window.innerWidth <= 760) {
+    $('#convList').classList.add('mobile-on');
+  }
+  renderConvList();
+
+  const a = agentById(c.inst);
+  $('#convHead').innerHTML = `
+    <button class="btn sm ghost conv-back" onclick="backConvList()" style="margin-right:2px"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M15 6l-6 6 6 6"/></svg></button>
+    <div class="avatar" style="width:32px;height:32px;border-radius:9px;display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:11px;font-weight:600;background:var(--inset);border:1px solid var(--line);color:var(--ink-2)">${a.ab}</div>
+    <div class="info">
+      <div class="who">${esc(a.profile)}<span style="font-family:var(--mono);font-size:10px;color:var(--ink-3);margin-left:7px">${esc(c.id.slice(0, 8))}</span></div>
+      <div class="state"><span style="width:6px;height:6px;border-radius:50%;background:${a.st==='running'?'#7FB98B':a.st==='launching'?'#E0A94E':'#8B93A1'}"></span>${a.st==='running'?'实例在线 · 支持双向协作':a.st==='launching'?'实例启动中 · 消息将排队':'实例空闲'}</div>
+    </div>
+    <span class="poll-hint">实时长轮询中</span>`;
+
+  const area = $('#msgArea');
+  area.innerHTML = `<div class="empty" style="padding:20px"><div class="big" style="font-size:12.5px">正在拉取对话历史…</div><span class="mono-s" style="font-size:10.5px">按页拉取 · 增量同步</span></div>`;
+
+  await loadConvHistory(c);
+
+  if (CONV_POLL_TIMER) clearInterval(CONV_POLL_TIMER);
+  CONV_POLL_TIMER = setInterval(() => {
+    if (ACTIVE_CONV === id && CURRENT_VIEW === 'conv') {
+      loadConvHistory(c, true);
+    }
+  }, 2500);
+}
+
+async function loadConvHistory(c, silent = false) {
+  try {
+    const [history, summary] = await Promise.all([
+      api(`/api/conversations/${c.id}/messages?limit=60`).catch(() => null),
+      api(`/api/conversations/${c.id}/summary`).catch(() => null)
+    ]);
+
+    if (history && history.messages) {
+      c.msgs = history.messages.map(m => ({
+        id: m.id,
+        r: m.author_type === 'human' ? 'h' : 'a',
+        t: formatTimeStr(m.created_at),
+        m: m.body,
+        q: m.status === 'queued'
+      }));
+    }
+    c.summaryRevision = summary;
+    renderMsgs(c);
+  } catch (err) {
+    if (!silent) {
+      $('#msgArea').innerHTML = `<div class="empty"><div class="big">加载失败</div>${esc(err.message)}</div>`;
+    }
+  }
+}
+
+function renderMsgs(c) {
+  const area = $('#msgArea');
+  const a = agentById(c.inst);
+
+  let summaryHtml = '';
+  if (c.summaryRevision) {
+    const s = c.summaryRevision;
+    summaryHtml = `
+      <div class="summary-banner">
+        <div class="sb-title"><span class="badge-live-dot"></span>结构化摘要 Revision (${esc(s.created_by)})</div>
+        <div class="sb-body"><b>目标:</b> ${esc(s.goal || '无')} · <b>当前状态:</b> ${esc(s.current_state || '进行中')}</div>
+        ${s.deterministic_facts && Object.keys(s.deterministic_facts).length ? `<div class="sb-facts">确定性事实: ${esc(JSON.stringify(s.deterministic_facts))}</div>` : ''}
+      </div>`;
+  }
+
+  const msgsHtml = c.msgs.map(m => `
+    <div class="msg ${m.r==='h'?'human':'agent'}">
+      <div class="avatar">${m.r==='h'?'我':a.ab}</div>
+      <div>
+        ${m.q ? `<div class="queued-tag">排队中 · Agent 空闲后回复</div>` : ''}
+        <div class="bubble ${m.q?'queued':''}">${esc(m.m)}<span class="m-time">${esc(m.t)}${m.r==='h'?' · 人类':' · Agent'}</span></div>
+      </div>
+    </div>`).join('');
+
+  area.innerHTML = summaryHtml + (msgsHtml || `<div class="empty"><div class="big">暂无历史消息</div>直接在下方输入框向 Agent 提问</div>`);
+  area.scrollTop = area.scrollHeight;
+}
+
+// 覆写 sendMsg
+async function sendMsg() {
+  if (TYPING || !ACTIVE_CONV) return;
+  const inp = $('#msgInput');
+  const v = inp.value.trim();
+  if (!v) return;
+
+  const c = CONVS.find(x => x.id === ACTIVE_CONV);
+  if (!c) return;
+
+  inp.value = '';
+  const now = new Date();
+  const p = n => String(n).padStart(2, '0');
+  const timeStr = `${p(now.getHours())}:${p(now.getMinutes())}`;
+
+  c.msgs.push({ r: 'h', t: timeStr, m: v, q: true });
+  c.last = timeStr;
+  c.sum = v;
+  renderConvList();
+  renderMsgs(c);
+
+  if (!IS_BACKEND_LIVE) {
+    TYPING = true;
+    setTimeout(() => {
+      TYPING = false;
+      c.msgs.push({ r: 'a', t: timeStr, m: '【演示回复】收到指令。' });
+      renderMsgs(c);
+      renderConvList();
+    }, 1200);
+    return;
+  }
+
+  try {
+    await api(`/api/conversations/${c.id}/messages`, {
+      method: 'POST',
+      body: JSON.stringify({ body: v })
+    });
+    await loadConvHistory(c, true);
+  } catch (err) {
+    toast('发送失败', err.message, 'bad');
+  }
+}
+
+// 模态弹窗控制
+function openNewWorkModal() {
+  $('#newWorkModalMask').classList.add('show');
+  $('#newWorkTitle').focus();
+}
+function closeNewWorkModal() {
+  $('#newWorkModalMask').classList.remove('show');
+}
+async function submitNewWork() {
+  const title = $('#newWorkTitle').value.trim();
+  const desc = $('#newWorkDesc').value.trim();
+  const pri = parseInt($('#newWorkPri').value, 10) || 0;
+  if (!title) {
+    toast('请输入标题', '工作项标题不能为空', 'warn');
+    return;
+  }
+  const btn = $('#btnSubmitNewWork');
+  btn.disabled = true;
+  btn.textContent = '创建中...';
+
+  try {
+    const res = await api('/api/tasks', {
+      method: 'POST',
+      body: JSON.stringify({
+        title,
+        description: desc,
+        priority: pri,
+        owner_actor_id: 'human:local'
+      })
+    });
+    toast('工作项已创建', `${res.title} (${res.id.slice(0, 8)})`, 'ok');
+    closeNewWorkModal();
+    $('#newWorkTitle').value = '';
+    $('#newWorkDesc').value = '';
+    await loadBackendData(true);
+    setView('work');
+  } catch (err) {
+    toast('创建工作项失败', err.message, 'bad');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '创建工作项';
+  }
+}
+
+function openNewConvModal() {
+  const sel = $('#newConvAgent');
+  sel.innerHTML = AGENTS.map(a => `<option value="${a.id}">${a.profile} (${a.id.slice(0, 8)}) · ${a.st}</option>`).join('');
+  $('#newConvModalMask').classList.add('show');
+  $('#newConvTitle').focus();
+}
+function closeNewConvModal() {
+  $('#newConvModalMask').classList.remove('show');
+}
+async function submitNewConv() {
+  const agentId = $('#newConvAgent').value;
+  const title = $('#newConvTitle').value.trim() || '工作交流';
+  const firstMsg = $('#newConvFirstMsg').value.trim();
+  if (!agentId) {
+    toast('请选择 Agent', '必须指定接收消息的 Agent 实例', 'warn');
+    return;
+  }
+  const btn = $('#btnSubmitNewConv');
+  btn.disabled = true;
+  btn.textContent = '创建中...';
+
+  try {
+    const conv = await api('/api/conversations', {
+      method: 'POST',
+      body: JSON.stringify({
+        agent_instance_id: agentId,
+        title
+      })
+    });
+    if (firstMsg) {
+      await api(`/api/conversations/${conv.id}/messages`, {
+        method: 'POST',
+        body: JSON.stringify({ body: firstMsg })
+      });
+    }
+    toast('对话已开启', conv.title, 'ok');
+    closeNewConvModal();
+    $('#newConvTitle').value = '';
+    $('#newConvFirstMsg').value = '';
+    await loadBackendData(true);
+    setView('conv');
+    openConv(conv.id);
+  } catch (err) {
+    toast('发起对话失败', err.message, 'bad');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '发起对话';
+  }
+}
+
+// 抽屉详情增强拉取
+const originalOpenWork = openWork;
+openWork = async function(id) {
+  originalOpenWork(id);
+  try {
+    const [task, collab, runs, ctxPkg] = await Promise.all([
+      api(`/api/tasks/${id}`).catch(() => null),
+      api(`/api/tasks/${id}/collaboration`).catch(() => null),
+      api(`/api/tasks/${id}/runs`).catch(() => []),
+      api(`/api/tasks/${id}/context-package`).catch(() => null)
+    ]);
+    const w = wiById(id);
+    if (w && task) {
+      w.raw = task;
+      if (collab) {
+        w.deps = (collab.dependencies || []).map(d => [d.depends_on_task_id, '已关联']);
+        w.arts = [];
+        (collab.artifacts || []).forEach(a => w.arts.push(['artifact', a.title, formatTimeStr(a.created_at), a.id]));
+        (collab.decisions || []).forEach(d => w.arts.push(['decision', d.title, formatTimeStr(d.created_at), d.id]));
+        (collab.threads || []).forEach(t => w.arts.push(['thread', t.title, formatTimeStr(t.created_at), t.id]));
+        w.hf = (collab.handoffs || []).map(h => ({
+          id: h.id,
+          from: h.created_by,
+          to: h.accepted_by_run_id || '待接受',
+          t: formatTimeStr(h.created_at),
+          st: h.status === 'accepted' ? 'accepted' : 'pending',
+          note: h.summary || '工作交接协议'
+        }));
+      }
+      if (runs && runs.length) {
+        w.runs = runs.map(r => [`Run ${r.id.slice(0, 8)}`, formatTimeStr(r.started_at), r.result?.summary || r.checkpoint || r.status]);
+      }
+      if (ctxPkg) {
+        w.mem = [
+          ['work', '工作目标', ctxPkg.objective || '—'],
+          ['work', '验证结论', (ctxPkg.verified_results || []).join('; ') || '通过'],
+          ['work', '下一步行动', ctxPkg.next_action || '无']
+        ];
+      }
+      buildDrawer();
+    }
+  } catch (e) {
+    console.warn('Enhance openWork error:', e);
+  }
+};
+
+// 全局初始化
+
+/* ---------- 主题管理与持久化 (深色 Obsidian / 浅色 Daylight) ---------- */
+const SUN_ICON = `<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/>`;
+const MOON_ICON = `<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>`;
+
+let CURRENT_THEME = localStorage.getItem('morrows_theme') || (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+
+function applyTheme(theme) {
+  CURRENT_THEME = theme;
+  document.documentElement.setAttribute('data-theme', theme);
+  localStorage.setItem('morrows_theme', theme);
+
+  // 顶栏图标更新
+  const iconEl = document.getElementById('themeIcon');
+  const btnEl = document.getElementById('themeToggleBtn');
+  if (iconEl) {
+    iconEl.innerHTML = theme === 'light' ? MOON_ICON : SUN_ICON;
+  }
+  if (btnEl) {
+    btnEl.title = theme === 'light' ? '切换至深色模式 (Obsidian)' : '切换至浅色模式 (Daylight)';
+  }
+
+  // 设置页激活态更新
+  const darkChip = document.getElementById('chipThemeDark');
+  const lightChip = document.getElementById('chipThemeLight');
+  if (darkChip && lightChip) {
+    if (theme === 'light') {
+      darkChip.classList.remove('on');
+      lightChip.classList.add('on');
+    } else {
+      darkChip.classList.add('on');
+      lightChip.classList.remove('on');
+    }
+  }
+
+  // 重绘容量图表
+  if (typeof renderChart === 'function') {
+    renderChart();
+  }
+}
+
+function setTheme(theme) {
+  applyTheme(theme);
+  toast('外观主题', theme === 'light' ? '已切换至浅色模式 (Daylight)' : '已切换至深色高对比模式 (Obsidian)', 'ok');
+}
+
+function toggleTheme() {
+  setTheme(CURRENT_THEME === 'light' ? 'dark' : 'light');
+}
+
+function init() {
+  applyTheme(CURRENT_THEME);
+  document.querySelectorAll('.nav-item').forEach(n => n.addEventListener('click', () => setView(n.dataset.view)));
+  setInterval(() => {
+    AGENTS.forEach(a => { a.hb += 5; });
+    if (CURRENT_VIEW === 'dashboard') renderFleetStrip();
+    if (CURRENT_VIEW === 'fleet') renderFleetView();
+  }, 5000);
+
+  const refreshBtn = $('#refreshBtn');
+  if (refreshBtn) refreshBtn.onclick = () => loadBackendData(true);
+
+  const newWorkBtn = $('#newWorkBtn');
+  if (newWorkBtn) newWorkBtn.onclick = openNewWorkModal;
+
+  const demoBtn = $('#demoBtn');
+  if (demoBtn) demoBtn.onclick = () => toast('系统说明', '已连接 Morrows 本地控制平面 (127.0.0.1:8787)，数据与操作实时入库', 'ok');
+
+  const langBtn = $('#langBtn');
+  if (langBtn) langBtn.onclick = () => {
+    setLang(LANG === 'zh' ? 'en' : 'zh');
+    toast('界面语言', LANG === 'zh' ? '已切换为中文（首访默认）' : 'Switched to English', 'ok');
+  };
+
+  const globalSearch = $('#globalSearch');
+  if (globalSearch) {
+    globalSearch.addEventListener('input', e => {
+      G_SEARCH = e.target.value.trim();
+      if (CURRENT_VIEW === 'work') renderWork();
+      else if (CURRENT_VIEW === 'artifacts') renderArtifacts();
+      else if (CURRENT_VIEW === 'runs') renderRuns();
+    });
+  }
+
+  document.addEventListener('keydown', e => {
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+      e.preventDefault();
+      $('#globalSearch').focus();
+    }
+    if (e.key === 'Escape') {
+      closeDrawer();
+      closeNewWorkModal();
+      closeNewConvModal();
+    }
+  });
+
+  renderSettings();
+  setView('dashboard');
+
+  // 初始拉取与自动轮询
+  loadBackendData(false);
+  BACKEND_POLL_TIMER = setInterval(() => {
+    loadBackendData(false);
+  }, 5000);
+}
+
+document.addEventListener('DOMContentLoaded', init);
+</script>
+
+<!-- ===================== 新建工作项弹窗 ===================== -->
+<div class="modal-mask" id="newWorkModalMask" onclick="if(event.target===this)closeNewWorkModal()">
+  <div class="modal">
+    <div class="modal-head">
+      <h3>新建工作项 <span class="en" style="font-family:var(--mono);font-size:11px;color:var(--ink-3);font-weight:400">WorkItem</span></h3>
+      <button class="icon-btn close" onclick="closeNewWorkModal()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+    </div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label class="form-label">工作项标题 <span class="req">*</span></label>
+        <input class="form-input" id="newWorkTitle" placeholder="例如：重构支付网关超时幂等性..." autocomplete="off">
+      </div>
+      <div class="form-group">
+        <label class="form-label">优先级</label>
+        <select class="form-select" id="newWorkPri">
+          <option value="0">普通优先级 (Normal · 0)</option>
+          <option value="50">中高优先级 (High · 50)</option>
+          <option value="100">紧急 / 关键 (Critical · 100)</option>
+          <option value="-50">低优先级 (Low · -50)</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label class="form-label">详细描述与目标边界</label>
+        <textarea class="form-textarea" id="newWorkDesc" placeholder="描述工作目标、验收标准与约束条件..."></textarea>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn sm" onclick="closeNewWorkModal()">取消</button>
+      <button class="btn sm primary" id="btnSubmitNewWork" onclick="submitNewWork()">创建工作项</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===================== 发起新对话弹窗 ===================== -->
+<div class="modal-mask" id="newConvModalMask" onclick="if(event.target===this)closeNewConvModal()">
+  <div class="modal">
+    <div class="modal-head">
+      <h3>发起一对一工作对话 <span class="en" style="font-family:var(--mono);font-size:11px;color:var(--ink-3);font-weight:400">DirectConversation</span></h3>
+      <button class="icon-btn close" onclick="closeNewConvModal()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+    </div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label class="form-label">目标 Agent 实例 <span class="req">*</span></label>
+        <select class="form-select" id="newConvAgent"></select>
+      </div>
+      <div class="form-group">
+        <label class="form-label">对话主题</label>
+        <input class="form-input" id="newConvTitle" placeholder="例如：架构设计方案探讨..." autocomplete="off">
+      </div>
+      <div class="form-group">
+        <label class="form-label">初始消息</label>
+        <textarea class="form-textarea" id="newConvFirstMsg" placeholder="发送给 Agent 的第一条消息..."></textarea>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn sm" onclick="closeNewConvModal()">取消</button>
+      <button class="btn sm primary" id="btnSubmitNewConv" onclick="submitNewConv()">发起对话</button>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>

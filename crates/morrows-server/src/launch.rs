@@ -379,6 +379,31 @@ async fn task_instructions(
     Ok(Json(json!(s.store.task_launch_instructions(id).await?)))
 }
 
+pub async fn delivery_worker_loop(store: Store) {
+    let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
+    loop {
+        interval.tick().await;
+        let candidates = match store.delivery_resume_candidates().await {
+            Ok(value) => value,
+            Err(err) => {
+                tracing::error!(%err, "Agent delivery resume scan failed");
+                continue;
+            }
+        };
+        for run_id in candidates {
+            match store.enqueue_run_delivery_resume(run_id).await {
+                Ok(attempt) => tracing::info!(
+                    %run_id,
+                    launch_attempt_id = %attempt.id,
+                    "queued Codex continuation for pending Agent delivery"
+                ),
+                Err(DomainError::Conflict(_)) => {}
+                Err(err) => tracing::error!(%run_id, %err, "failed to queue delivery continuation"),
+            }
+        }
+    }
+}
+
 pub async fn worker_loop(store: Store) {
     let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
     loop {
@@ -441,6 +466,7 @@ async fn execute_claimed_launch(store: Store, job: ClaimedLaunchJob) -> anyhow::
     };
     match execution.profile.adapter.as_str() {
         "codex_cli" => execute_codex(store, execution).await,
+        "codebuddy_cli" => execute_codebuddy(store, execution).await,
         other => {
             let message = format!("unsupported launch adapter at runtime: {other}");
             store
@@ -454,6 +480,352 @@ async fn execute_claimed_launch(store: Store, job: ClaimedLaunchJob) -> anyhow::
 async fn execute_codex(store: Store, execution: LaunchExecution) -> anyhow::Result<()> {
     let root = launch_root()?;
     execute_codex_with_root(store, execution, root).await
+}
+
+async fn execute_codebuddy(store: Store, execution: LaunchExecution) -> anyhow::Result<()> {
+    let root = launch_root()?;
+    execute_codebuddy_with_root(store, execution, root).await
+}
+
+struct SecretFileGuard(PathBuf);
+
+impl Drop for SecretFileGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+async fn write_codebuddy_mcp_config(
+    path: &FsPath,
+    execution: &LaunchExecution,
+    agent_binding: Option<&AgentBinding>,
+    morrows_token: &str,
+) -> anyhow::Result<SecretFileGuard> {
+    let morrows_url = std::env::var("MORROWS_MCP_URL")
+        .or_else(|_| std::env::var("AC_MCP_URL"))
+        .unwrap_or_else(|_| "http://127.0.0.1:8787/mcp".into());
+    let mut servers = serde_json::Map::new();
+    servers.insert(
+        "morrows".into(),
+        json!({
+            "type": "http",
+            "url": morrows_url,
+            "headers": {
+                "Authorization": format!("Bearer {morrows_token}"),
+                "X-Agent-Instance-Id": execution.attempt.agent_instance_id.to_string(),
+            },
+            "description": "Morrows employee interface",
+        }),
+    );
+    if let Some(binding) = agent_binding {
+        servers.insert(
+            "lsm".into(),
+            json!({
+                "type": "http",
+                "url": binding.mcp_url,
+                "headers": {
+                    "X-LSM-Session-Capability": binding.capability,
+                },
+                "description": "LSM execution interface",
+            }),
+        );
+    }
+    let config = json!({
+        "mcpServers": servers,
+        "disabledMcpServers": [],
+    });
+    fs::write(path, serde_json::to_vec_pretty(&config)?).await?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(SecretFileGuard(path.to_path_buf()))
+}
+
+fn codebuddy_args(
+    profile: &LaunchProfile,
+    mcp_config_path: &str,
+    session_ref: &str,
+    resume: bool,
+) -> Vec<String> {
+    let mut args = vec![
+        "--print".into(),
+        "--output-format".into(),
+        "stream-json".into(),
+        "--input-format".into(),
+        "text".into(),
+        "--dangerously-skip-permissions".into(),
+        "--tools".into(),
+        "ToolSearch,DeferExecuteTool".into(),
+        "--strict-mcp-config".into(),
+        "--mcp-config".into(),
+        mcp_config_path.into(),
+    ];
+    if let Some(model) = profile.model.as_deref() {
+        args.extend(["--model".into(), model.into()]);
+    }
+    if resume {
+        args.extend(["--resume".into(), session_ref.into()]);
+    } else {
+        args.extend(["--session-id".into(), session_ref.into()]);
+    }
+    args
+}
+
+async fn execute_codebuddy_with_root(
+    store: Store,
+    execution: LaunchExecution,
+    root: PathBuf,
+) -> anyhow::Result<()> {
+    let cwd = execution
+        .attempt
+        .cwd
+        .clone()
+        .or_else(|| execution.profile.default_cwd.clone())
+        .ok_or_else(|| anyhow::anyhow!("launch cwd missing"))?;
+    if !FsPath::new(&cwd).is_dir() {
+        anyhow::bail!("launch cwd is not a directory: {cwd}");
+    }
+    if !FsPath::new(&execution.profile.program).is_file() {
+        anyhow::bail!(
+            "launch program does not exist or is not a file: {}",
+            execution.profile.program
+        );
+    }
+
+    let control = LsmControl::from_env()?;
+    let agent_binding = if let Some(control) = &control {
+        Some(
+            control
+                .provision_agent(&store, execution.run.id, &execution.task.title)
+                .await?,
+        )
+    } else {
+        None
+    };
+
+    let morrows_credential = store
+        .issue_runtime_credential(
+            execution.attempt.agent_instance_id,
+            execution.run.id,
+            &format!("codebuddy launch {}", execution.attempt.id),
+            3600,
+        )
+        .await?;
+
+    let dir = root.join(execution.attempt.id.to_string());
+    fs::create_dir_all(&dir).await?;
+    let stdout_path = dir.join("stdout.jsonl");
+    let stderr_path = dir.join("stderr.log");
+    let mcp_config_path = dir.join("codebuddy-mcp.json");
+    let _mcp_config_guard = write_codebuddy_mcp_config(
+        &mcp_config_path,
+        &execution,
+        agent_binding.as_ref(),
+        &morrows_credential.token,
+    )
+    .await?;
+    let stdout_file = std::fs::File::create(&stdout_path)?;
+    let stderr_file = std::fs::File::create(&stderr_path)?;
+
+    let resume_session = if let Some(previous_id) = execution.attempt.resume_from_attempt_id {
+        store
+            .get_launch_attempt(previous_id)
+            .await?
+            .external_session_ref
+    } else {
+        None
+    };
+    let session_ref = resume_session
+        .clone()
+        .unwrap_or_else(|| format!("morrows-{}", execution.attempt.id));
+    let args = codebuddy_args(
+        &execution.profile,
+        mcp_config_path.to_string_lossy().as_ref(),
+        &session_ref,
+        resume_session.is_some(),
+    );
+
+    let mut command = Command::new(&execution.profile.program);
+    command
+        .args(&args)
+        .current_dir(&cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::from(stdout_file))
+        .stderr(Stdio::from(stderr_file))
+        .kill_on_drop(true);
+    command.env_remove("MORROWS_LSM_CONTROL_KEY");
+    command.env_remove("LOCAL_SHELL_MCP_CONTROL_API_KEY");
+
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(err) => {
+            if let Some(control) = &control {
+                let _ = control.revoke_for_run(&store, execution.run.id).await;
+            }
+            return Err(err.into());
+        }
+    };
+    let pid = child.id().map(i64::from);
+    if let Err(err) = store
+        .mark_launch_running(
+            execution.attempt.id,
+            pid,
+            stdout_path.to_string_lossy().into_owned(),
+            stderr_path.to_string_lossy().into_owned(),
+        )
+        .await
+    {
+        let _ = child.kill().await;
+        if let Some(control) = &control {
+            let _ = control.revoke_for_run(&store, execution.run.id).await;
+        }
+        return Err(err.into());
+    }
+
+    let claimed_deliveries = store
+        .claim_agent_deliveries_for_launch(execution.attempt.id, 50)
+        .await?;
+    let mut prompt = build_prompt(&execution);
+    let delivery_prompt = build_delivery_prompt(&execution, &claimed_deliveries);
+    if !delivery_prompt.is_empty() {
+        prompt.push_str(&delivery_prompt);
+    }
+    if let Some(binding) = &agent_binding {
+        prompt.push_str(&format!(
+            "\nLSM execution context: {}. Use only this Logical Session for LSM calls. Morrows owns Session lifecycle; do not start, finish, cancel, or delete it.\n",
+            binding.logical_session_id,
+        ));
+    }
+
+    if let Some(mut stdin) = child.stdin.take() {
+        if let Err(err) = stdin.write_all(prompt.as_bytes()).await {
+            let _ = store
+                .release_claimed_agent_deliveries(execution.attempt.id)
+                .await;
+            let _ = child.kill().await;
+            if let Some(control) = &control {
+                let _ = control.revoke_for_run(&store, execution.run.id).await;
+            }
+            let message = format!("failed writing CodeBuddy launcher prompt to stdin: {err}");
+            store
+                .finish_launch_attempt(
+                    execution.attempt.id,
+                    None,
+                    Some(session_ref.clone()),
+                    Some(message.clone()),
+                )
+                .await?;
+            anyhow::bail!(message);
+        }
+        drop(stdin);
+        if !claimed_deliveries.is_empty()
+            && let Err(err) = store
+                .complete_claimed_agent_deliveries(
+                    execution.attempt.id,
+                    &format!("codebuddy_cli:{}", execution.attempt.id),
+                )
+                .await
+        {
+            tracing::warn!(
+                launch_attempt_id = %execution.attempt.id,
+                %err,
+                "CodeBuddy received delivery prompt but delivery acknowledgement could not be persisted"
+            );
+        }
+    } else {
+        let _ = store
+            .release_claimed_agent_deliveries(execution.attempt.id)
+            .await;
+        let _ = child.kill().await;
+        if let Some(control) = &control {
+            let _ = control.revoke_for_run(&store, execution.run.id).await;
+        }
+        let message = "CodeBuddy launcher stdin is unavailable".to_owned();
+        store
+            .finish_launch_attempt(
+                execution.attempt.id,
+                None,
+                Some(session_ref.clone()),
+                Some(message.clone()),
+            )
+            .await?;
+        anyhow::bail!(message);
+    }
+
+    let mut poll = tokio::time::interval(std::time::Duration::from_millis(250));
+    let status = loop {
+        tokio::select! {
+            result = child.wait() => break result,
+            _ = poll.tick() => {
+                if store.launch_stop_requested(execution.attempt.id).await? {
+                    let _ = child.kill().await;
+                    if let Some(control) = &control {
+                        control.revoke_for_run(&store, execution.run.id).await?;
+                    }
+                    store.finish_launch_attempt(
+                        execution.attempt.id,
+                        None,
+                        Some(session_ref.clone()),
+                        Some("run_cancel_requested".into()),
+                    ).await?;
+                    return Ok(());
+                }
+            }
+        }
+    };
+    let status = match status {
+        Ok(value) => value,
+        Err(err) => {
+            if let Some(control) = &control {
+                let _ = control.revoke_for_run(&store, execution.run.id).await;
+            }
+            let message = format!("failed waiting for CodeBuddy process: {err}");
+            store
+                .finish_launch_attempt(
+                    execution.attempt.id,
+                    None,
+                    Some(session_ref.clone()),
+                    Some(message.clone()),
+                )
+                .await?;
+            anyhow::bail!(message);
+        }
+    };
+    let exit_code = status.code().map(i64::from);
+    let stderr = fs::read_to_string(&stderr_path).await.unwrap_or_default();
+    let error = if status.success() {
+        None
+    } else {
+        let stdout = fs::read_to_string(&stdout_path).await.unwrap_or_default();
+        extract_codex_error(&stdout)
+            .or_else(|| {
+                let message = stderr.trim();
+                (!message.is_empty()).then(|| clip(message, 2000))
+            })
+            .map(|message| format!("codebuddy: {message}"))
+            .or_else(|| {
+                Some(format!(
+                    "CodeBuddy process exited with {}",
+                    exit_code
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "signal".into())
+                ))
+            })
+    };
+    if let Some(control) = &control {
+        control.revoke_for_run(&store, execution.run.id).await?;
+    }
+    store
+        .finish_launch_attempt(
+            execution.attempt.id,
+            exit_code,
+            Some(session_ref),
+            error,
+        )
+        .await?;
+    Ok(())
 }
 
 async fn execute_codex_with_root(
@@ -492,6 +864,14 @@ async fn execute_codex_with_root(
     } else {
         None
     };
+    let morrows_credential = store
+        .issue_runtime_credential(
+            execution.attempt.agent_instance_id,
+            execution.run.id,
+            &format!("codex launch {}", execution.attempt.id),
+            3600,
+        )
+        .await?;
 
     let dir = root.join(execution.attempt.id.to_string());
     fs::create_dir_all(&dir).await?;
@@ -516,6 +896,7 @@ async fn execute_codex_with_root(
         last_message_path.to_string_lossy().as_ref(),
         resume_session.as_deref(),
     );
+    inject_morrows_config(&mut args);
     if let Some(binding) = &agent_binding {
         inject_lsm_config(&mut args, binding);
     }
@@ -529,6 +910,16 @@ async fn execute_codex_with_root(
         .kill_on_drop(true);
     command.env_remove("MORROWS_LSM_CONTROL_KEY");
     command.env_remove("LOCAL_SHELL_MCP_CONTROL_API_KEY");
+    command.env_remove("MORROWS_AGENT_AUTHORIZATION");
+    command.env_remove("MORROWS_AGENT_INSTANCE_ID");
+    command.env(
+        "MORROWS_AGENT_AUTHORIZATION",
+        format!("Bearer {}", morrows_credential.token),
+    );
+    command.env(
+        "MORROWS_AGENT_INSTANCE_ID",
+        execution.attempt.agent_instance_id.to_string(),
+    );
     if let Some(binding) = &agent_binding {
         command.env("MORROWS_LSM_CAPABILITY", &binding.capability);
     }
@@ -556,7 +947,14 @@ async fn execute_codex_with_root(
         return Err(err.into());
     }
 
+    let claimed_deliveries = store
+        .claim_agent_deliveries_for_launch(execution.attempt.id, 50)
+        .await?;
     let mut prompt = build_prompt(&execution);
+    let delivery_prompt = build_delivery_prompt(&execution, &claimed_deliveries);
+    if !delivery_prompt.is_empty() {
+        prompt.push_str(&delivery_prompt);
+    }
     if let Some(binding) = &agent_binding {
         prompt.push_str(&format!(
             "\nLSM execution context: {}. Use only this Logical Session for LSM calls. Morrows owns Session lifecycle; do not start, finish, cancel, or delete it. LSM will reject old Session IDs from resumed conversation history.\n",
@@ -565,6 +963,9 @@ async fn execute_codex_with_root(
     }
     if let Some(mut stdin) = child.stdin.take() {
         if let Err(err) = stdin.write_all(prompt.as_bytes()).await {
+            let _ = store
+                .release_claimed_agent_deliveries(execution.attempt.id)
+                .await;
             let _ = child.kill().await;
             let message = format!("failed writing launcher prompt to stdin: {err}");
             store
@@ -572,6 +973,31 @@ async fn execute_codex_with_root(
                 .await?;
             anyhow::bail!(message);
         }
+        drop(stdin);
+        if !claimed_deliveries.is_empty()
+            && let Err(err) = store
+                .complete_claimed_agent_deliveries(
+                    execution.attempt.id,
+                    &format!("codex_cli:{}", execution.attempt.id),
+                )
+                .await
+        {
+            tracing::warn!(
+                launch_attempt_id = %execution.attempt.id,
+                %err,
+                "Codex received delivery prompt but delivery acknowledgement could not be persisted"
+            );
+        }
+    } else {
+        let _ = store
+            .release_claimed_agent_deliveries(execution.attempt.id)
+            .await;
+        let _ = child.kill().await;
+        let message = "launcher stdin is unavailable".to_owned();
+        store
+            .finish_launch_attempt(execution.attempt.id, None, None, Some(message.clone()))
+            .await?;
+        anyhow::bail!(message);
     }
 
     // Poll the durable cancellation state while this worker owns the child. This also
@@ -625,6 +1051,23 @@ async fn execute_codex_with_root(
         .finish_launch_attempt(execution.attempt.id, exit_code, session_ref, error)
         .await?;
     Ok(())
+}
+
+fn inject_morrows_config(args: &mut Vec<String>) {
+    let morrows_url = std::env::var("MORROWS_MCP_URL")
+        .or_else(|_| std::env::var("AC_MCP_URL"))
+        .unwrap_or_else(|_| "http://127.0.0.1:8787/mcp".into());
+    let overrides = [
+        format!("mcp_servers.morrows.url=\"{morrows_url}\""),
+        "mcp_servers.morrows.env_http_headers.Authorization=\"MORROWS_AGENT_AUTHORIZATION\""
+            .to_owned(),
+        "mcp_servers.morrows.env_http_headers.X-Agent-Instance-Id=\"MORROWS_AGENT_INSTANCE_ID\""
+            .to_owned(),
+    ];
+    for value in overrides.into_iter().rev() {
+        args.insert(1, value);
+        args.insert(1, "-c".into());
+    }
 }
 
 fn inject_lsm_config(args: &mut Vec<String>, binding: &AgentBinding) {
@@ -707,7 +1150,7 @@ AgentInstance: {agent}\n\
 Task ID: {task_id}\n\
 Assignment ID: {assignment_id}\n\
 Run ID: {run_id}\n\
-\nUse the configured Morrows MCP server as the durable source of truth. The Assignment and Run already exist; do not claim the task or start another Run. Before substantial work, read task_get and memory_get for Task ID {task_id}. Read instructions_get for management updates. Also check conversation_inbox for direct company messages addressed to this AgentInstance; load a selected conversation with conversation_get and reply with conversation_reply when appropriate. Checkpoint meaningful progress to Run ID {run_id}. If the task is fully complete, call run_complete for Run ID {run_id}. If blocked or incomplete, checkpoint the blocker/progress and exit without calling run_complete.\n\
+\nUse the configured Morrows MCP server as the durable source of truth. The Assignment and Run already exist; do not claim the task or start another Run. Before substantial work, read task_get and memory_get for Task ID {task_id}. Read instructions_get for management updates. Also check conversation_inbox for direct company messages addressed to this AgentInstance; load a selected conversation with conversation_get and reply with conversation_reply when appropriate. After materially advancing a long direct conversation, update its structured recovery summary with conversation_summary_revise. Checkpoint meaningful progress to Run ID {run_id}. If the task is fully complete, call run_complete for Run ID {run_id}. If blocked or incomplete, checkpoint the blocker/progress and exit without calling run_complete.\n\
 \nTask title:\n{title}\n\
 \nTask description:\n{description}\n\
 \nContext goal:\n{goal}\n\
@@ -725,6 +1168,60 @@ Run ID: {run_id}\n\
             .map(|v| clip(&v.current_summary, 6000))
             .unwrap_or_default(),
         instructions = clip(&instructions, 6000),
+    )
+}
+
+fn build_delivery_prompt(execution: &LaunchExecution, deliveries: &[AgentDelivery]) -> String {
+    if deliveries.is_empty() {
+        return String::new();
+    }
+    let instruction_ids = execution
+        .instructions
+        .iter()
+        .map(|instruction| instruction.id)
+        .collect::<std::collections::HashSet<_>>();
+    let mut items = Vec::new();
+    for delivery in deliveries {
+        if delivery.kind == "launch_instruction" && instruction_ids.contains(&delivery.source_id) {
+            continue;
+        }
+        match delivery.kind.as_str() {
+            "conversation_message" => {
+                let conversation_id = delivery
+                    .payload
+                    .get("conversation_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown");
+                let body = delivery
+                    .payload
+                    .get("body")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                items.push(format!(
+                    "Direct company message in conversation {conversation_id}:\n{}\nUse conversation_get for context and conversation_reply when appropriate.",
+                    clip(body, 3000)
+                ));
+            }
+            "launch_instruction" => {
+                let body = delivery
+                    .payload
+                    .get("body")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                items.push(format!("Management instruction:\n{}", clip(body, 3000)));
+            }
+            other => items.push(format!(
+                "Morrows delivery {other}: {}",
+                clip(&delivery.payload.to_string(), 3000)
+            )),
+        }
+    }
+    if items.is_empty() {
+        return String::new();
+    }
+    format!(
+        "\n\nPending Morrows deliveries received for this turn. Process these before continuing stale work:\n{}\n",
+        clip(&items.join("\n---\n"), 12000)
     )
 }
 
@@ -1049,6 +1546,193 @@ mod tests {
         assert_eq!(&resumed[0..3], &["exec", "resume", "--json"]);
         assert_eq!(resumed[resumed.len() - 2], "session-123");
         assert!(!resumed.join(" ").contains("task"));
+    }
+
+    #[test]
+    fn codex_morrows_auth_config_uses_env_names_not_credentials() {
+        let profile = LaunchProfile {
+            id: uuid::Uuid::new_v4(),
+            name: "codex".into(),
+            adapter: "codex_cli".into(),
+            agent_instance_id: uuid::Uuid::new_v4(),
+            program: "/bin/codex".into(),
+            codex_home: None,
+            default_cwd: Some("/tmp/work".into()),
+            model: None,
+            enabled: true,
+            metadata: json!({}),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let mut args = codex_args(&profile, "/tmp/work", "/tmp/last", None);
+        inject_morrows_config(&mut args);
+        let joined = args.join(" ");
+        assert!(joined.contains("MORROWS_AGENT_AUTHORIZATION"));
+        assert!(joined.contains("MORROWS_AGENT_INSTANCE_ID"));
+        assert!(!joined.contains("Bearer "));
+        assert!(!joined.contains("mrw_agent_"));
+    }
+
+    #[test]
+    fn codebuddy_argv_contains_only_control_metadata_not_prompt_or_capability() {
+        let profile = LaunchProfile {
+            id: uuid::Uuid::new_v4(),
+            name: "codebuddy".into(),
+            adapter: "codebuddy_cli".into(),
+            agent_instance_id: uuid::Uuid::new_v4(),
+            program: "/opt/homebrew/bin/codebuddy".into(),
+            codex_home: None,
+            default_cwd: Some("/tmp/work".into()),
+            model: Some("glm-5.3-flash".into()),
+            enabled: true,
+            metadata: json!({"permission_mode":"auto"}),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let args = codebuddy_args(
+            &profile,
+            "/tmp/private-mcp-config.json",
+            "morrows-session-1",
+            false,
+        );
+        assert!(args.windows(2).any(|pair| pair == ["--session-id", "morrows-session-1"]));
+        assert!(args.windows(2).any(|pair| pair == ["--mcp-config", "/tmp/private-mcp-config.json"]));
+        assert!(args.iter().any(|arg| arg == "--dangerously-skip-permissions"));
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--tools", "ToolSearch,DeferExecuteTool"])
+        );
+        assert!(!args.join(" ").contains("task body"));
+        assert!(!args.join(" ").contains("LSM-CAPABILITY"));
+        assert!(!args.join(" ").contains("X-LSM-Session-Capability"));
+
+        let resumed = codebuddy_args(
+            &profile,
+            "/tmp/private-mcp-config.json",
+            "morrows-session-1",
+            true,
+        );
+        assert!(resumed.windows(2).any(|pair| pair == ["--resume", "morrows-session-1"]));
+        assert!(!resumed.iter().any(|arg| arg == "--session-id"));
+    }
+
+    #[tokio::test]
+    async fn fake_codebuddy_process_receives_delivery_and_persists_resumable_session() {
+        let store = Store::connect("sqlite::memory:").await.unwrap();
+        let program = fake_executable(0);
+        let cwd = program.parent().unwrap().to_path_buf();
+        let agent = make_agent(&store).await;
+        let task = store
+            .create_task(input(json!({
+                "title":"CodeBuddy fake runtime",
+                "description":"No real provider call"
+            })))
+            .await
+            .unwrap();
+        let assignment = store
+            .claim_task(task.id, agent.id, "executor", 600)
+            .await
+            .unwrap();
+        let profile = store
+            .register_launch_profile(input(json!({
+                "name":"fake codebuddy",
+                "adapter":"codebuddy_cli",
+                "agent_instance_id":agent.id,
+                "program":program,
+                "default_cwd":cwd,
+                "model":"glm-5.3-flash",
+                "enabled":true
+            })))
+            .await
+            .unwrap();
+        let conversation = store
+            .create_conversation(CreateConversation {
+                agent_instance_id: agent.id,
+                title: "CodeBuddy delivery".into(),
+            })
+            .await
+            .unwrap();
+        store
+            .create_human_conversation_message(conversation.id, "delivery to codebuddy")
+            .await
+            .unwrap();
+        let delivery_id = store.agent_delivery_inbox(agent.id, 80).await.unwrap()[0].id;
+
+        let attempt = store
+            .enqueue_launch(input(json!({
+                "assignment_id":assignment.id,
+                "launch_profile_id":profile.id
+            })))
+            .await
+            .unwrap();
+        store.claim_launch_job().await.unwrap().unwrap();
+        let execution = store.begin_launch_attempt(attempt.id).await.unwrap();
+        let root = cwd.join("codebuddy-launches");
+        execute_codebuddy_with_root(store.clone(), execution, root.clone())
+            .await
+            .unwrap();
+
+        let finished = store.get_launch_attempt(attempt.id).await.unwrap();
+        assert_eq!(finished.status, "completed");
+        assert_eq!(
+            finished.external_session_ref.as_deref(),
+            Some(format!("morrows-{}", attempt.id).as_str())
+        );
+        let delivered = store.get_agent_delivery(delivery_id).await.unwrap();
+        assert_eq!(delivered.status, "delivered");
+        assert!(
+            delivered
+                .delivered_by
+                .as_deref()
+                .is_some_and(|value| value.starts_with("codebuddy_cli:"))
+        );
+        assert!(
+            !root
+                .join(attempt.id.to_string())
+                .join("codebuddy-mcp.json")
+                .exists()
+        );
+    }
+
+    #[tokio::test]
+    async fn delivery_prompt_includes_direct_message_and_avoids_duplicate_current_instruction() {
+        let store = Store::connect("sqlite::memory:").await.unwrap();
+        let program = fake_executable(0);
+        let cwd = program.parent().unwrap().to_path_buf();
+        let (attempt, agent) = make_execution(&store, &program, &cwd).await;
+        store
+            .send_launch_instruction(
+                SendLaunchInstruction {
+                    launch_attempt_id: attempt.id,
+                    body: "instruction already loaded by launch execution".into(),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        let conversation = store
+            .create_conversation(CreateConversation {
+                agent_instance_id: agent.id,
+                title: "Prompt delivery".into(),
+            })
+            .await
+            .unwrap();
+        store
+            .create_human_conversation_message(conversation.id, "answer this direct message")
+            .await
+            .unwrap();
+
+        store.claim_launch_job().await.unwrap().unwrap();
+        let execution = store.begin_launch_attempt(attempt.id).await.unwrap();
+        let deliveries = store.agent_delivery_inbox(agent.id, 80).await.unwrap();
+        let delivery_prompt = build_delivery_prompt(&execution, &deliveries);
+        assert!(delivery_prompt.contains("answer this direct message"));
+        assert!(delivery_prompt.contains(&conversation.id.to_string()));
+        assert!(!delivery_prompt.contains("instruction already loaded by launch execution"));
+        assert!(
+            build_prompt(&execution)
+                .contains("instruction already loaded by launch execution")
+        );
     }
 
     #[tokio::test]

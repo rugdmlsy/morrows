@@ -1,6 +1,8 @@
 use super::*;
+use crate::delivery::enqueue_agent_delivery_tx;
 use morrows_core::{
-    Conversation, ConversationHistory, ConversationMessage, ConversationSummary, CreateConversation,
+    Conversation, ConversationHistory, ConversationMessage, ConversationSummary,
+    ConversationSummaryRevision, CreateConversation, CreateConversationSummaryRevision,
 };
 
 impl Store {
@@ -88,6 +90,10 @@ impl Store {
                 "SELECT c.*,a.name AS agent_name,
                   (SELECT COUNT(*) FROM conversation_messages m WHERE m.conversation_id=c.id) AS message_count,
                   (SELECT COUNT(*) FROM conversation_messages m WHERE m.conversation_id=c.id AND m.author_type='human' AND m.status='queued') AS queued_count,
+                  (SELECT COUNT(*) FROM agent_deliveries d
+                     JOIN conversation_messages dm ON dm.id=d.source_id
+                     WHERE d.kind='conversation_message' AND dm.conversation_id=c.id
+                       AND d.status IN ('queued','claimed')) AS undelivered_count,
                   (SELECT substr(m.body,1,160) FROM conversation_messages m WHERE m.conversation_id=c.id ORDER BY m.created_at DESC,m.id DESC LIMIT 1) AS last_message_preview,
                   (SELECT m.author_type FROM conversation_messages m WHERE m.conversation_id=c.id ORDER BY m.created_at DESC,m.id DESC LIMIT 1) AS last_message_author_type,
                   (SELECT m.created_at FROM conversation_messages m WHERE m.conversation_id=c.id ORDER BY m.created_at DESC,m.id DESC LIMIT 1) AS last_message_at
@@ -103,6 +109,10 @@ impl Store {
                 "SELECT c.*,a.name AS agent_name,
                   (SELECT COUNT(*) FROM conversation_messages m WHERE m.conversation_id=c.id) AS message_count,
                   (SELECT COUNT(*) FROM conversation_messages m WHERE m.conversation_id=c.id AND m.author_type='human' AND m.status='queued') AS queued_count,
+                  (SELECT COUNT(*) FROM agent_deliveries d
+                     JOIN conversation_messages dm ON dm.id=d.source_id
+                     WHERE d.kind='conversation_message' AND dm.conversation_id=c.id
+                       AND d.status IN ('queued','claimed')) AS undelivered_count,
                   (SELECT substr(m.body,1,160) FROM conversation_messages m WHERE m.conversation_id=c.id ORDER BY m.created_at DESC,m.id DESC LIMIT 1) AS last_message_preview,
                   (SELECT m.author_type FROM conversation_messages m WHERE m.conversation_id=c.id ORDER BY m.created_at DESC,m.id DESC LIMIT 1) AS last_message_author_type,
                   (SELECT m.created_at FROM conversation_messages m WHERE m.conversation_id=c.id ORDER BY m.created_at DESC,m.id DESC LIMIT 1) AS last_message_at
@@ -143,9 +153,12 @@ impl Store {
             .map_err(storage)?
             .ok_or_else(|| DomainError::NotFound("conversation message anchor".into()))?;
             sqlx::query(
-                "SELECT * FROM conversation_messages
-                 WHERE conversation_id=? AND (created_at < ? OR (created_at = ? AND id < ?))
-                 ORDER BY created_at DESC,id DESC LIMIT ?",
+                "SELECT m.*,
+                        (SELECT d.status FROM agent_deliveries d
+                         WHERE d.kind='conversation_message' AND d.source_id=m.id LIMIT 1) AS delivery_status
+                 FROM conversation_messages m
+                 WHERE m.conversation_id=? AND (m.created_at < ? OR (m.created_at = ? AND m.id < ?))
+                 ORDER BY m.created_at DESC,m.id DESC LIMIT ?",
             )
             .bind(conversation_id.to_string())
             .bind(&anchor)
@@ -166,9 +179,12 @@ impl Store {
             .map_err(storage)?
             .ok_or_else(|| DomainError::NotFound("conversation message anchor".into()))?;
             let rows = sqlx::query(
-                "SELECT * FROM conversation_messages
-                 WHERE conversation_id=? AND (created_at > ? OR (created_at = ? AND id > ?))
-                 ORDER BY created_at,id LIMIT ?",
+                "SELECT m.*,
+                        (SELECT d.status FROM agent_deliveries d
+                         WHERE d.kind='conversation_message' AND d.source_id=m.id LIMIT 1) AS delivery_status
+                 FROM conversation_messages m
+                 WHERE m.conversation_id=? AND (m.created_at > ? OR (m.created_at = ? AND m.id > ?))
+                 ORDER BY m.created_at,m.id LIMIT ?",
             )
             .bind(conversation_id.to_string())
             .bind(&anchor)
@@ -192,8 +208,11 @@ impl Store {
             });
         } else {
             sqlx::query(
-                "SELECT * FROM conversation_messages
-                 WHERE conversation_id=? ORDER BY created_at DESC,id DESC LIMIT ?",
+                "SELECT m.*,
+                        (SELECT d.status FROM agent_deliveries d
+                         WHERE d.kind='conversation_message' AND d.source_id=m.id LIMIT 1) AS delivery_status
+                 FROM conversation_messages m
+                 WHERE m.conversation_id=? ORDER BY m.created_at DESC,m.id DESC LIMIT ?",
             )
             .bind(conversation_id.to_string())
             .bind(fetch_limit)
@@ -252,6 +271,19 @@ impl Store {
             .execute(&mut *tx)
             .await
             .map_err(storage)?;
+        let delivery_id = enqueue_agent_delivery_tx(
+            &mut tx,
+            conversation.agent_instance_id,
+            None,
+            "conversation_message",
+            id,
+            json!({
+                "conversation_id": conversation_id,
+                "message_id": id,
+                "body": body,
+            }),
+        )
+        .await?;
         append_event_tx(
             &mut tx,
             "human",
@@ -259,7 +291,11 @@ impl Store {
             "conversation",
             conversation_id,
             "conversation.message_queued",
-            json!({"message_id": id, "agent_instance_id": conversation.agent_instance_id}),
+            json!({
+                "message_id": id,
+                "agent_instance_id": conversation.agent_instance_id,
+                "delivery_id": delivery_id,
+            }),
             None,
         )
         .await?;
@@ -323,6 +359,22 @@ impl Store {
             .await
             .map_err(storage)?;
         sqlx::query(
+            "UPDATE agent_deliveries
+             SET status='delivered',delivered_by=?,delivered_at=?
+             WHERE agent_instance_id=? AND kind='conversation_message' AND status='queued'
+               AND source_id IN (
+                 SELECT id FROM conversation_messages
+                 WHERE conversation_id=? AND author_type='human' AND status='queued'
+               )",
+        )
+        .bind(format!("conversation_reply:{agent_id}"))
+        .bind(now.to_rfc3339())
+        .bind(agent_id.to_string())
+        .bind(conversation_id.to_string())
+        .execute(&mut *tx)
+        .await
+        .map_err(storage)?;
+        sqlx::query(
             "UPDATE conversation_messages SET status='delivered'
              WHERE conversation_id=? AND author_type='human' AND status='queued'",
         )
@@ -364,13 +416,116 @@ impl Store {
     }
 
     async fn get_conversation_message(&self, id: Id) -> Result<ConversationMessage, DomainError> {
-        let row = sqlx::query("SELECT * FROM conversation_messages WHERE id=?")
+        let row = sqlx::query(
+            "SELECT m.*,
+                    (SELECT d.status FROM agent_deliveries d
+                     WHERE d.kind='conversation_message' AND d.source_id=m.id LIMIT 1) AS delivery_status
+             FROM conversation_messages m WHERE m.id=?",
+        )
             .bind(id.to_string())
             .fetch_optional(&self.pool)
             .await
             .map_err(storage)?
             .ok_or_else(|| DomainError::NotFound(format!("conversation message {id}")))?;
         row_to_conversation_message(row)
+    }
+
+    pub async fn create_conversation_summary_revision(
+        &self,
+        input: CreateConversationSummaryRevision,
+    ) -> Result<ConversationSummaryRevision, DomainError> {
+        self.get_conversation(input.conversation_id).await?;
+        let id = Uuid::new_v4();
+        let now = Utc::now();
+        let mut tx = self.pool.begin().await.map_err(storage)?;
+        sqlx::query(
+            "INSERT INTO conversation_summary_revisions(
+                id,conversation_id,previous_revision_id,covers_until_message_id,
+                goal,current_state,important_findings_json,decisions_json,
+                blockers_json,unresolved_questions_json,next_steps_json,
+                deterministic_facts_json,created_by,created_at
+             ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        )
+        .bind(id.to_string())
+        .bind(input.conversation_id.to_string())
+        .bind(input.previous_revision_id.map(|x| x.to_string()))
+        .bind(input.covers_until_message_id.map(|x| x.to_string()))
+        .bind(&input.goal)
+        .bind(&input.current_state)
+        .bind(input.important_findings.to_string())
+        .bind(input.decisions.to_string())
+        .bind(input.blockers.to_string())
+        .bind(input.unresolved_questions.to_string())
+        .bind(input.next_steps.to_string())
+        .bind(input.deterministic_facts.to_string())
+        .bind(&input.created_by)
+        .bind(now.to_rfc3339())
+        .execute(&mut *tx)
+        .await
+        .map_err(storage)?;
+
+        append_event_tx(
+            &mut tx,
+            "system",
+            &input.created_by,
+            "conversation_summary",
+            id,
+            "conversation_summary.created",
+            json!({"conversation_id": input.conversation_id}),
+            None,
+        )
+        .await?;
+
+        tx.commit().await.map_err(storage)?;
+        self.get_conversation_summary_revision(id).await
+    }
+
+    pub async fn get_conversation_summary_revision(
+        &self,
+        id: Id,
+    ) -> Result<ConversationSummaryRevision, DomainError> {
+        let row = sqlx::query("SELECT * FROM conversation_summary_revisions WHERE id=?")
+            .bind(id.to_string())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(storage)?
+            .ok_or_else(|| DomainError::NotFound(format!("conversation summary revision {id}")))?;
+        row_to_conversation_summary_revision(row)
+    }
+
+    pub async fn get_latest_conversation_summary_revision(
+        &self,
+        conversation_id: Id,
+    ) -> Result<Option<ConversationSummaryRevision>, DomainError> {
+        self.get_conversation(conversation_id).await?;
+        let row = sqlx::query(
+            "SELECT * FROM conversation_summary_revisions
+             WHERE conversation_id=?
+             ORDER BY created_at DESC, id DESC
+             LIMIT 1",
+        )
+        .bind(conversation_id.to_string())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage)?;
+        row.map(row_to_conversation_summary_revision).transpose()
+    }
+
+    pub async fn list_conversation_summary_revisions(
+        &self,
+        conversation_id: Id,
+    ) -> Result<Vec<ConversationSummaryRevision>, DomainError> {
+        self.get_conversation(conversation_id).await?;
+        let rows = sqlx::query(
+            "SELECT * FROM conversation_summary_revisions
+             WHERE conversation_id=?
+             ORDER BY created_at DESC, id DESC",
+        )
+        .bind(conversation_id.to_string())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage)?;
+        rows.into_iter().map(row_to_conversation_summary_revision).collect()
     }
 }
 
@@ -407,6 +562,7 @@ fn row_to_conversation_summary(
         status: row.try_get("status").map_err(storage)?,
         message_count: row.try_get("message_count").map_err(storage)?,
         queued_count: row.try_get("queued_count").map_err(storage)?,
+        undelivered_count: row.try_get("undelivered_count").map_err(storage)?,
         last_message_preview: row.try_get("last_message_preview").map_err(storage)?,
         last_message_author_type: row.try_get("last_message_author_type").map_err(storage)?,
         last_message_at: last_message_at.map(parse_dt).transpose()?,
@@ -427,6 +583,34 @@ fn row_to_conversation_message(
         )?,
         body: row.try_get("body").map_err(storage)?,
         status: row.try_get("status").map_err(storage)?,
+        delivery_status: row.try_get("delivery_status").map_err(storage)?,
+        created_at: parse_dt(row.try_get("created_at").map_err(storage)?)?,
+    })
+}
+
+fn row_to_conversation_summary_revision(
+    row: sqlx::sqlite::SqliteRow,
+) -> Result<ConversationSummaryRevision, DomainError> {
+    Ok(ConversationSummaryRevision {
+        id: parse_id(row.try_get("id").map_err(storage)?)?,
+        conversation_id: parse_id(row.try_get("conversation_id").map_err(storage)?)?,
+        previous_revision_id: parse_opt_id(row.try_get("previous_revision_id").map_err(storage)?)?,
+        covers_until_message_id: parse_opt_id(
+            row.try_get("covers_until_message_id").map_err(storage)?,
+        )?,
+        goal: row.try_get("goal").map_err(storage)?,
+        current_state: row.try_get("current_state").map_err(storage)?,
+        important_findings: parse_json(row.try_get("important_findings_json").map_err(storage)?)?,
+        decisions: parse_json(row.try_get("decisions_json").map_err(storage)?)?,
+        blockers: parse_json(row.try_get("blockers_json").map_err(storage)?)?,
+        unresolved_questions: parse_json(
+            row.try_get("unresolved_questions_json").map_err(storage)?,
+        )?,
+        next_steps: parse_json(row.try_get("next_steps_json").map_err(storage)?)?,
+        deterministic_facts: parse_json(
+            row.try_get("deterministic_facts_json").map_err(storage)?,
+        )?,
+        created_by: row.try_get("created_by").map_err(storage)?,
         created_at: parse_dt(row.try_get("created_at").map_err(storage)?)?,
     })
 }

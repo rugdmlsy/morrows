@@ -88,6 +88,26 @@ pub struct DispatchNextResult {
     pub attempts: Vec<DispatchOutcome>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DispatchSchedulerSettings {
+    pub role: String,
+    pub enabled: bool,
+    pub interval_seconds: i64,
+    pub auto_launch: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SetDispatchSchedulerSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_scheduler_interval")]
+    pub interval_seconds: i64,
+    #[serde(default = "default_enabled")]
+    pub auto_launch: bool,
+}
+
 fn executor_role() -> String {
     "executor".into()
 }
@@ -99,4 +119,7 @@ fn default_lease() -> i64 {
 }
 fn default_enabled() -> bool {
     true
+}
+fn default_scheduler_interval() -> i64 {
+    2
 }

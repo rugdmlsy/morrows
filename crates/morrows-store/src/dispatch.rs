@@ -115,6 +115,77 @@ impl Store {
         rows.into_iter().map(row_to_decision).collect()
     }
 
+    pub async fn get_dispatch_scheduler_settings(
+        &self,
+        role: &str,
+    ) -> Result<DispatchSchedulerSettings, DomainError> {
+        let role = role.trim();
+        if role.is_empty() {
+            return Err(DomainError::InvalidInput("role cannot be empty".into()));
+        }
+        let row = sqlx::query("SELECT * FROM dispatch_scheduler_settings WHERE role=?")
+            .bind(role)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(storage)?
+            .ok_or_else(|| {
+                DomainError::NotFound(format!("dispatch scheduler settings for role {role}"))
+            })?;
+        row_to_scheduler_settings(row)
+    }
+
+    pub async fn list_dispatch_scheduler_settings(
+        &self,
+    ) -> Result<Vec<DispatchSchedulerSettings>, DomainError> {
+        let rows = sqlx::query("SELECT * FROM dispatch_scheduler_settings ORDER BY role")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(storage)?;
+        rows.into_iter().map(row_to_scheduler_settings).collect()
+    }
+
+    pub async fn set_dispatch_scheduler_settings(
+        &self,
+        role: &str,
+        input: SetDispatchSchedulerSettings,
+    ) -> Result<DispatchSchedulerSettings, DomainError> {
+        let role = role.trim();
+        if role.is_empty() {
+            return Err(DomainError::InvalidInput("role cannot be empty".into()));
+        }
+        if !(1..=300).contains(&input.interval_seconds) {
+            return Err(DomainError::InvalidInput(
+                "scheduler interval_seconds must be between 1 and 300".into(),
+            ));
+        }
+        if input.auto_launch && role != "executor" {
+            return Err(DomainError::InvalidInput(
+                "scheduler auto_launch is only supported for executor assignments".into(),
+            ));
+        }
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO dispatch_scheduler_settings(
+                role,enabled,interval_seconds,auto_launch,created_at,updated_at
+             ) VALUES(?,?,?,?,?,?)
+             ON CONFLICT(role) DO UPDATE SET
+                enabled=excluded.enabled,
+                interval_seconds=excluded.interval_seconds,
+                auto_launch=excluded.auto_launch,
+                updated_at=excluded.updated_at",
+        )
+        .bind(role)
+        .bind(input.enabled)
+        .bind(input.interval_seconds)
+        .bind(input.auto_launch)
+        .bind(&now)
+        .bind(&now)
+        .execute(&self.pool)
+        .await
+        .map_err(storage)?;
+        self.get_dispatch_scheduler_settings(role).await
+    }
+
     pub async fn dispatch_task(
         &self,
         task_id: Id,
@@ -189,6 +260,21 @@ impl Store {
     }
 
     pub async fn dispatch_next(&self, role: &str) -> Result<DispatchNextResult, DomainError> {
+        self.dispatch_next_inner(role, true).await
+    }
+
+    pub async fn dispatch_next_scheduled(
+        &self,
+        role: &str,
+    ) -> Result<DispatchNextResult, DomainError> {
+        self.dispatch_next_inner(role, false).await
+    }
+
+    async fn dispatch_next_inner(
+        &self,
+        role: &str,
+        record_no_candidate: bool,
+    ) -> Result<DispatchNextResult, DomainError> {
         if role.trim().is_empty() {
             return Err(DomainError::InvalidInput("role cannot be empty".into()));
         }
@@ -236,6 +322,9 @@ impl Store {
             } else {
                 None
             };
+            if assignment.is_none() && !record_no_candidate {
+                continue;
+            }
             let outcome = if assignment.is_some() {
                 "assigned"
             } else {
@@ -357,6 +446,19 @@ fn row_to_policy(row: sqlx::sqlite::SqliteRow) -> Result<TaskDispatchPolicy, Dom
         capacity_ttl_seconds: row.try_get("capacity_ttl_seconds").map_err(storage)?,
         lease_seconds: row.try_get("lease_seconds").map_err(storage)?,
         enabled: row.try_get("enabled").map_err(storage)?,
+        created_at: parse_dt(row.try_get("created_at").map_err(storage)?)?,
+        updated_at: parse_dt(row.try_get("updated_at").map_err(storage)?)?,
+    })
+}
+
+fn row_to_scheduler_settings(
+    row: sqlx::sqlite::SqliteRow,
+) -> Result<DispatchSchedulerSettings, DomainError> {
+    Ok(DispatchSchedulerSettings {
+        role: row.try_get("role").map_err(storage)?,
+        enabled: row.try_get("enabled").map_err(storage)?,
+        interval_seconds: row.try_get("interval_seconds").map_err(storage)?,
+        auto_launch: row.try_get("auto_launch").map_err(storage)?,
         created_at: parse_dt(row.try_get("created_at").map_err(storage)?)?,
         updated_at: parse_dt(row.try_get("updated_at").map_err(storage)?)?,
     })

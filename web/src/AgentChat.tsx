@@ -18,6 +18,7 @@ type ConversationSummary = {
   status: string;
   message_count: number;
   queued_count: number;
+  undelivered_count: number;
   last_message_preview?: string | null;
   last_message_author_type?: string | null;
   last_message_at?: string | null;
@@ -41,6 +42,7 @@ type ConversationMessage = {
   author_agent_instance_id?: string | null;
   body: string;
   status: "queued" | "delivered";
+  delivery_status?: "queued" | "claimed" | "delivered" | null;
   created_at: string;
 };
 
@@ -49,6 +51,23 @@ type ConversationHistory = {
   messages: ConversationMessage[];
   has_more: boolean;
   next_before?: string | null;
+};
+
+type ConversationSummaryRevision = {
+  id: string;
+  conversation_id: string;
+  previous_revision_id?: string | null;
+  covers_until_message_id?: string | null;
+  goal: string;
+  current_state: string;
+  important_findings: unknown;
+  decisions: unknown;
+  blockers: unknown;
+  unresolved_questions: unknown;
+  next_steps: unknown;
+  deterministic_facts: unknown;
+  created_by: string;
+  created_at: string;
 };
 
 type Props = {
@@ -79,6 +98,7 @@ export default function AgentChat({ agents, locale, initialAgentId, onInitialAge
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [historyCache, setHistoryCache] = useState<Record<string, ConversationHistory>>({});
+  const [summaryCache, setSummaryCache] = useState<Record<string, ConversationSummaryRevision | null>>({});
   const historyCacheRef = useRef<Record<string, ConversationHistory>>({});
   const [loadingId, setLoadingId] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
@@ -92,6 +112,7 @@ export default function AgentChat({ agents, locale, initialAgentId, onInitialAge
     [conversations, selectedId],
   );
   const history = selectedId ? historyCache[selectedId] : undefined;
+  const summary = selectedId ? summaryCache[selectedId] : undefined;
 
   useEffect(() => {
     historyCacheRef.current = historyCache;
@@ -123,8 +144,12 @@ export default function AgentChat({ agents, locale, initialAgentId, onInitialAge
     if (!force && historyCacheRef.current[id]) return;
     setLoadingId(id);
     try {
-      const loaded = await api<ConversationHistory>(`/api/conversations/${id}/messages?limit=80`);
+      const [loaded, loadedSummary] = await Promise.all([
+        api<ConversationHistory>(`/api/conversations/${id}/messages?limit=80`),
+        api<ConversationSummaryRevision | null>(`/api/conversations/${id}/summary`).catch(() => null),
+      ]);
       setHistoryCache((current) => ({ ...current, [id]: loaded }));
+      setSummaryCache((current) => ({ ...current, [id]: loadedSummary }));
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -143,10 +168,9 @@ export default function AgentChat({ agents, locale, initialAgentId, onInitialAge
     const timer = window.setInterval(() => {
       const current = historyCacheRef.current[selectedId];
       if (!current) return;
-      const last = current?.messages.at(-1);
-      const path = last
-        ? `/api/conversations/${selectedId}/messages?after=${encodeURIComponent(last.id)}&limit=80`
-        : `/api/conversations/${selectedId}/messages?limit=80`;
+      // Refresh only the selected conversation's recent window. Merging keeps any
+      // explicitly loaded older pages while also updating delivery/reply states.
+      const path = `/api/conversations/${selectedId}/messages?limit=80`;
       void api<ConversationHistory>(path)
         .then((next) => {
           setHistoryCache((all) => {
@@ -162,6 +186,9 @@ export default function AgentChat({ agents, locale, initialAgentId, onInitialAge
             };
           });
         })
+        .catch(() => {});
+      void api<ConversationSummaryRevision | null>(`/api/conversations/${selectedId}/summary`)
+        .then((next) => setSummaryCache((all) => ({ ...all, [selectedId]: next })))
         .catch(() => {});
     }, 2500);
     return () => window.clearInterval(timer);
@@ -185,6 +212,7 @@ export default function AgentChat({ agents, locale, initialAgentId, onInitialAge
         ...current,
         [created.id]: { conversation: created, messages: [], has_more: false, next_before: null },
       }));
+      setSummaryCache((current) => ({ ...current, [created.id]: null }));
       setSelectedId(created.id);
       setShowNew(false);
       await refreshSummaries();
@@ -297,7 +325,14 @@ export default function AgentChat({ agents, locale, initialAgentId, onInitialAge
                 <p>{conversation.last_message_preview || (zh ? "还没有消息" : "No messages yet")}</p>
               </div>
               {conversation.queued_count > 0 && (
-                <span className="queued-count" title={zh ? "等待 Agent 处理" : "Waiting for agent"}>
+                <span
+                  className="queued-count"
+                  title={
+                    zh
+                      ? `${conversation.queued_count} 条待回复，其中 ${conversation.undelivered_count} 条尚未投递`
+                      : `${conversation.queued_count} awaiting reply; ${conversation.undelivered_count} not yet delivered`
+                  }
+                >
                   {conversation.queued_count}
                 </span>
               )}
@@ -324,10 +359,38 @@ export default function AgentChat({ agents, locale, initialAgentId, onInitialAge
               </div>
               {selected.queued_count > 0 && (
                 <div className="delivery-note">
-                  {zh ? "Agent 未运行时消息会排队，启动后从 inbox 读取。" : "Messages queue while the agent is not running and are read from inbox on launch."}
+                  {selected.undelivered_count > 0
+                    ? zh
+                      ? `${selected.undelivered_count} 条消息仍在可靠投递队列；Morrows 会在 Agent runtime 可用时送达。`
+                      : `${selected.undelivered_count} message(s) remain in the durable delivery queue and will be delivered when the agent runtime is available.`
+                    : zh
+                      ? "消息已投递到 Agent runtime，等待回复。"
+                      : "Messages have reached the agent runtime and are awaiting a reply."}
                 </div>
               )}
             </header>
+
+            <details className="conversation-summary-card">
+              <summary>
+                {zh ? "结构化摘要" : "Structured summary"}
+                {summary?.current_state ? ` · ${summary.current_state}` : ""}
+              </summary>
+              {summary ? (
+                <div className="conversation-summary-body">
+                  <strong>{summary.goal || (zh ? "未记录目标" : "No recorded goal")}</strong>
+                  <p>{summary.current_state || (zh ? "暂无当前状态" : "No current state")}</p>
+                  <div className="summary-grid">
+                    <span>{zh ? "重要发现" : "Findings"}<pre>{JSON.stringify(summary.important_findings, null, 2)}</pre></span>
+                    <span>{zh ? "决策" : "Decisions"}<pre>{JSON.stringify(summary.decisions, null, 2)}</pre></span>
+                    <span>{zh ? "阻塞项" : "Blockers"}<pre>{JSON.stringify(summary.blockers, null, 2)}</pre></span>
+                    <span>{zh ? "下一步" : "Next steps"}<pre>{JSON.stringify(summary.next_steps, null, 2)}</pre></span>
+                  </div>
+                  <small>{summary.created_by} · {formatAge(locale, summary.created_at)}</small>
+                </div>
+              ) : (
+                <p className="summary-empty">{zh ? "这个对话还没有结构化摘要。" : "This conversation has no structured summary yet."}</p>
+              )}
+            </details>
 
             <div className="message-scroll">
               {history?.has_more && (
@@ -345,7 +408,11 @@ export default function AgentChat({ agents, locale, initialAgentId, onInitialAge
                       {" · "}
                       {new Date(message.created_at).toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" })}
                       {message.author_type === "human" && message.status === "queued"
-                        ? (zh ? " · 等待 Agent" : " · queued")
+                        ? message.delivery_status === "delivered"
+                          ? (zh ? " · 已投递，等待回复" : " · delivered, awaiting reply")
+                          : message.delivery_status === "claimed"
+                            ? (zh ? " · 正在投递" : " · delivering")
+                            : (zh ? " · 等待投递" : " · queued for delivery")
                         : ""}
                     </small>
                   </div>

@@ -1,5 +1,7 @@
+mod auth;
 mod collaboration;
 mod conversation;
+mod delivery;
 mod dispatch;
 mod fleet;
 mod launch;
@@ -10,6 +12,7 @@ use anyhow::Context;
 use axum::{
     Json, Router,
     extract::{Path, State},
+    middleware,
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -113,6 +116,12 @@ async fn main() -> anyhow::Result<()> {
         .or_else(|_| env::var("AC_BIND"))
         .unwrap_or_else(|_| "127.0.0.1:8787".into());
     let addr: SocketAddr = bind.parse().context("parse MORROWS_BIND")?;
+    if !addr.ip().is_loopback() {
+        anyhow::bail!(
+            "Morrows control plane is local-only and refuses non-loopback MORROWS_BIND={addr}; operator authentication is not implemented yet"
+        );
+    }
+    let require_agent_auth = env_bool("MORROWS_REQUIRE_AGENT_AUTH", false)?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let store = Store::connect(&db_url)
         .await
@@ -120,6 +129,13 @@ async fn main() -> anyhow::Result<()> {
     let recovered = store.recover_launch_jobs_after_restart().await?;
     if recovered > 0 {
         tracing::warn!(recovered, "reconciled interrupted launch jobs");
+    }
+    let recovered_deliveries = store.recover_agent_delivery_claims().await?;
+    if recovered_deliveries > 0 {
+        tracing::warn!(
+            recovered_deliveries,
+            "returned abandoned Agent delivery claims to the queue"
+        );
     }
     let state = AppState {
         store: store.clone(),
@@ -139,9 +155,11 @@ async fn main() -> anyhow::Result<()> {
         .route("/runs", post(start_run))
         .route("/runs/{id}/checkpoint", post(checkpoint_run))
         .route("/runs/{id}/complete", post(complete_run))
+        .merge(auth::routes())
         .merge(collaboration::routes())
         .merge(conversation::routes())
         .merge(dispatch::routes())
+        .merge(delivery::routes())
         .merge(fleet::routes())
         .merge(launch::routes())
         .with_state(state);
@@ -167,9 +185,17 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    let dispatch_store = store.clone();
+    tokio::spawn(async move {
+        dispatch::scheduler_loop(dispatch_store).await;
+    });
     let launch_store = store.clone();
     tokio::spawn(async move {
         launch::worker_loop(launch_store).await;
+    });
+    let delivery_store = store.clone();
+    tokio::spawn(async move {
+        launch::delivery_worker_loop(delivery_store).await;
     });
     let runtime_store = store.clone();
     tokio::spawn(async move {
@@ -179,10 +205,15 @@ async fn main() -> anyhow::Result<()> {
     let web_dir = env::var("MORROWS_WEB_DIR")
         .or_else(|_| env::var("AC_WEB_DIR"))
         .unwrap_or_else(|_| "web/dist".into());
+    let auth_state = auth::AgentAuthState::new(store.clone(), require_agent_auth);
     let app = Router::new()
         .nest("/api", api)
         .nest_service("/mcp", mcp_service)
         .fallback_service(ServeDir::new(web_dir).append_index_html_on_directories(true))
+        .layer(middleware::from_fn_with_state(
+            auth_state,
+            auth::authenticate_agent_requests,
+        ))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http());
 
@@ -191,8 +222,23 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn env_bool(name: &str, default: bool) -> anyhow::Result<bool> {
+    let Ok(value) = env::var(name) else {
+        return Ok(default);
+    };
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        _ => anyhow::bail!("{name} must be a boolean"),
+    }
+}
+
 async fn health() -> Json<Value> {
-    Json(json!({"ok": true, "service": "morrows"}))
+    Json(json!({
+        "ok": true,
+        "service": "morrows",
+        "mcp": {"ready": true, "path": "/mcp"}
+    }))
 }
 
 async fn list_tasks(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {

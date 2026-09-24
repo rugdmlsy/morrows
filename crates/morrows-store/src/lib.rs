@@ -212,11 +212,17 @@ impl Store {
     }
 
     pub async fn task_runs(&self, task_id: Id) -> Result<Vec<Run>, DomainError> {
-        let rows = sqlx::query("SELECT * FROM runs WHERE task_id=? ORDER BY started_at DESC")
-            .bind(task_id.to_string())
-            .fetch_all(&self.pool)
-            .await
-            .map_err(storage)?;
+        let rows = sqlx::query(
+            "SELECT runs.*, rcr.context_revision_id
+             FROM runs
+             LEFT JOIN run_context_revisions rcr ON rcr.run_id=runs.id
+             WHERE runs.task_id=?
+             ORDER BY runs.started_at DESC",
+        )
+        .bind(task_id.to_string())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage)?;
         rows.into_iter().map(row_to_run).collect()
     }
 
@@ -367,9 +373,31 @@ impl Store {
         }
         let id = Uuid::new_v4();
         let now = Utc::now();
+        let current_ctx_rev: Option<String> = sqlx::query_scalar(
+            "SELECT current_context_revision_id FROM tasks WHERE id=?",
+        )
+        .bind(task_id.to_string())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(storage)?
+        .flatten();
+
         sqlx::query("INSERT INTO runs(id,task_id,assignment_id,agent_instance_id,external_session_ref,status,started_at) VALUES(?,?,?,?,?,'running',?)")
             .bind(id.to_string()).bind(task_id.to_string()).bind(assignment_id.to_string()).bind(agent_id.to_string())
             .bind(&external_session_ref).bind(now.to_rfc3339()).execute(&mut *tx).await.map_err(storage)?;
+
+        if let Some(ctx_id) = current_ctx_rev {
+            sqlx::query(
+                "INSERT INTO run_context_revisions(run_id,context_revision_id,pinned_at) VALUES(?,?,?)",
+            )
+            .bind(id.to_string())
+            .bind(ctx_id)
+            .bind(now.to_rfc3339())
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?;
+        }
+
         append_event_tx(
             &mut tx,
             "agent_instance",
@@ -386,12 +414,17 @@ impl Store {
     }
 
     pub async fn get_run(&self, id: Id) -> Result<Run, DomainError> {
-        let row = sqlx::query("SELECT * FROM runs WHERE id=?")
-            .bind(id.to_string())
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(storage)?
-            .ok_or_else(|| DomainError::NotFound(format!("run {id}")))?;
+        let row = sqlx::query(
+            "SELECT runs.*, rcr.context_revision_id
+             FROM runs
+             LEFT JOIN run_context_revisions rcr ON rcr.run_id=runs.id
+             WHERE runs.id=?",
+        )
+        .bind(id.to_string())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage)?
+        .ok_or_else(|| DomainError::NotFound(format!("run {id}")))?;
         row_to_run(row)
     }
 
@@ -679,6 +712,7 @@ fn row_to_run(row: sqlx::sqlite::SqliteRow) -> Result<Run, DomainError> {
         result: parse_opt_json(row.try_get("result_json").map_err(storage)?)?,
         started_at: parse_dt(row.try_get("started_at").map_err(storage)?)?,
         ended_at: parse_opt_dt(row.try_get("ended_at").map_err(storage)?)?,
+        context_revision_id: parse_opt_id(row.try_get("context_revision_id").ok().flatten())?,
     })
 }
 
@@ -746,3 +780,9 @@ mod dispatch;
 mod launch;
 
 mod conversation;
+
+mod context_package;
+
+mod delivery;
+
+mod auth;
