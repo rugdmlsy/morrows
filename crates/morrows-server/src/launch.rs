@@ -629,14 +629,7 @@ async fn execute_codebuddy_with_root(
     let stdout_file = std::fs::File::create(&stdout_path)?;
     let stderr_file = std::fs::File::create(&stderr_path)?;
 
-    let resume_session = if let Some(previous_id) = execution.attempt.resume_from_attempt_id {
-        store
-            .get_launch_attempt(previous_id)
-            .await?
-            .external_session_ref
-    } else {
-        None
-    };
+    let resume_session = resolve_launch_provider_ref(&store, &execution).await?;
     let session_ref = resume_session
         .clone()
         .unwrap_or_else(|| format!("morrows-{}", execution.attempt.id));
@@ -876,14 +869,7 @@ async fn execute_codex_with_root(
     let stdout_file = std::fs::File::create(&stdout_path)?;
     let stderr_file = std::fs::File::create(&stderr_path)?;
 
-    let resume_session = if let Some(previous_id) = execution.attempt.resume_from_attempt_id {
-        store
-            .get_launch_attempt(previous_id)
-            .await?
-            .external_session_ref
-    } else {
-        None
-    };
+    let resume_session = resolve_launch_provider_ref(&store, &execution).await?;
 
     let mut args = codex_args(
         &execution.profile,
@@ -915,6 +901,9 @@ async fn execute_codex_with_root(
         "MORROWS_AGENT_INSTANCE_ID",
         execution.attempt.agent_instance_id.to_string(),
     );
+    if let Some(session_id) = execution.attempt.session_id {
+        command.env("MORROWS_SESSION_ID", session_id.to_string());
+    }
     if let Some(binding) = &agent_binding {
         command.env("MORROWS_LSM_CAPABILITY", &binding.capability);
     }
@@ -1128,6 +1117,27 @@ pub(crate) fn codex_args(
     args
 }
 
+async fn resolve_launch_provider_ref(
+    store: &Store,
+    execution: &LaunchExecution,
+) -> anyhow::Result<Option<String>> {
+    if let Some(previous_id) = execution.attempt.resume_from_attempt_id {
+        if let Some(provider_ref) = store
+            .get_launch_attempt(previous_id)
+            .await?
+            .external_session_ref
+        {
+            return Ok(Some(provider_ref));
+        }
+    }
+    let Some(session_id) = execution.attempt.session_id else {
+        return Ok(None);
+    };
+    Ok(store
+        .latest_session_provider_ref(session_id, execution.profile.id)
+        .await?)
+}
+
 fn build_prompt(execution: &LaunchExecution) -> String {
     let context = execution.context.as_ref();
     let constraints = context
@@ -1145,7 +1155,8 @@ AgentInstance: {agent}\n\
 Task ID: {task_id}\n\
 Assignment ID: {assignment_id}\n\
 Run ID: {run_id}\n\
-\nUse the configured Morrows MCP server as the durable source of truth. The Assignment and Run already exist; do not claim the task or start another Run. Before substantial work, read task_get and memory_get for Task ID {task_id}. Read instructions_get for management updates. Also check session_inbox for direct company messages addressed to this AgentInstance; load a selected Session with session_get and reply with session_reply when appropriate. After materially advancing a long direct Session, update its structured recovery summary with session_summary_revise. Checkpoint meaningful progress to Run ID {run_id}. If the task is fully complete, call run_complete for Run ID {run_id}. If blocked or incomplete, checkpoint the blocker/progress and exit without calling run_complete.\n\
+Morrows Session ID: {session_id}\n\
+\nUse the configured Morrows MCP server as the durable source of truth. The Assignment and Run already exist; do not claim the task or start another Run. This execution is attached to the durable Morrows Session shown above; use session_get for its conversation history, session_reply for human-facing replies, and session_summary_revise after materially advancing it. Before substantial work, read task_get and memory_get for Task ID {task_id}. Read instructions_get for management updates. Checkpoint meaningful progress to Run ID {run_id}. If the task is fully complete, call run_complete for Run ID {run_id}. If blocked or incomplete, checkpoint the blocker/progress and exit without calling run_complete.\n\
 \nTask title:\n{title}\n\
 \nTask description:\n{description}\n\
 \nContext goal:\n{goal}\n\
@@ -1156,6 +1167,11 @@ Run ID: {run_id}\n\
         task_id = execution.task.id,
         assignment_id = execution.attempt.assignment_id,
         run_id = execution.run.id,
+        session_id = execution
+            .attempt
+            .session_id
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "(legacy-unbound)".into()),
         title = clip(&execution.task.title, 2000),
         description = clip(&execution.task.description, 6000),
         goal = context.map(|v| clip(&v.goal, 4000)).unwrap_or_default(),
@@ -1653,18 +1669,17 @@ mod tests {
             })))
             .await
             .unwrap();
-        let session = store
+        let general_session = store
             .create_session(CreateSession {
                 agent_instance_id: agent.id,
-                title: "CodeBuddy delivery".into(),
+                title: "Unscoped discussion".into(),
             })
             .await
             .unwrap();
         store
-            .create_human_session_message(session.id, "delivery to codebuddy")
+            .create_human_session_message(general_session.id, "do not inject into task")
             .await
             .unwrap();
-        let delivery_id = store.agent_delivery_inbox(agent.id, 80).await.unwrap()[0].id;
 
         let attempt = store
             .enqueue_launch(input(json!({
@@ -1673,6 +1688,25 @@ mod tests {
             })))
             .await
             .unwrap();
+        let task_session_id = attempt
+            .session_id
+            .expect("task launch should bind a Session");
+        let task_message = store
+            .create_human_session_message(task_session_id, "delivery to codebuddy")
+            .await
+            .unwrap();
+        let deliveries = store.agent_delivery_inbox(agent.id, 80).await.unwrap();
+        let task_delivery_id = deliveries
+            .iter()
+            .find(|delivery| delivery.source_id == task_message.id)
+            .unwrap()
+            .id;
+        let general_delivery_id = deliveries
+            .iter()
+            .find(|delivery| delivery.payload["session_id"] == general_session.id.to_string())
+            .unwrap()
+            .id;
+
         store.claim_launch_job().await.unwrap().unwrap();
         let execution = store.begin_launch_attempt(attempt.id).await.unwrap();
         let root = cwd.join("codebuddy-launches");
@@ -1686,13 +1720,27 @@ mod tests {
             finished.external_session_ref.as_deref(),
             Some(format!("morrows-{}", attempt.id).as_str())
         );
-        let delivered = store.get_agent_delivery(delivery_id).await.unwrap();
+        assert_eq!(
+            store
+                .latest_session_provider_ref(task_session_id, profile.id)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(format!("morrows-{}", attempt.id).as_str()),
+            "Task launches and direct Session runtimes must share Provider thread continuity"
+        );
+        let delivered = store.get_agent_delivery(task_delivery_id).await.unwrap();
         assert_eq!(delivered.status, "delivered");
         assert!(
             delivered
                 .delivered_by
                 .as_deref()
                 .is_some_and(|value| value.starts_with("codebuddy_cli:"))
+        );
+        let general = store.get_agent_delivery(general_delivery_id).await.unwrap();
+        assert_eq!(
+            general.status, "queued",
+            "an unscoped Session message must not leak into a Task launch"
         );
         assert!(
             !root

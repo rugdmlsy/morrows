@@ -179,11 +179,11 @@ SQLite 中只保存 hash，列表响应不会返回 token/hash 原文。WebUI �
 
 Task-scoped MCP 的读取和协作写入会验证：调用者是否创建了该请求，或是否拥有该 Task 的 Assignment 历史。MCP 可以汇报与协作，但不能给自己创建 Assignment 或 Run。
 
-Session 与 Task collaboration 相互独立。WebUI 启动时只加载 Session 摘要；选中某个 Session 后，才将最新消息页载入内存缓存；更老历史需要显式加载，并且只有当前选中的 Session 会轮询新消息。
+Session 是独立的持久对话对象，但可以选择作用域：**通用会话**不绑定工作，**项目会话**绑定 Project，**任务会话**绑定 Task（其 Project 自动由 Task 推导）。WebUI 启动时只加载 Session 摘要；选中某个 Session 后，才将最新消息页载入内存缓存；更老历史需要显式加载，并且只有当前选中的 Session 会轮询新消息。
 
 人类消息会持久保存，并在目标 Agent 回复前保持等待状态。独立的事务型 `AgentDelivery` 只暴露两个面向用户的投递状态：**等待投递**与**已投递**；“已投递”表示 Morrows 已成功把消息写入 Agent runtime prompt。消息在 runtime claim 前可以撤回。
 
-WebUI 可以为某个 Session 显式启动/恢复本地 Agent CLI。专用 Session runtime 会绑定 AgentInstance、Account、LaunchProfile、Morrows Session 和持久化 Provider thread/session reference，而不会伪造 Task 或 Run。
+WebUI 可以为某个 Session 显式启动/恢复本地 Agent CLI。专用 Session runtime 会绑定 AgentInstance、Account、LaunchProfile、Morrows Session 和持久化 Provider thread/session reference，而不会伪造 Task 或 Run。Task 启动 Agent 时也会自动绑定该 Task + Agent 的开放 Session（不存在则创建），并与直接 Session runtime 共享同一套 Provider thread 续接来源；Run / LaunchAttempt 只描述执行生命周期，不再承担独立的对话身份。通用会话的消息不会被 Task launch 误领取，也不会唤醒无关的中断 Run。
 
 `lsm_external`、`antigravity_external`、`gemini_external`、`codebuddy_external` 等 external adapter 仍作为兼容 launch backend 存在。它们的生命周期 endpoint 属于控制平面 REST，不再暴露为员工 MCP 工具。当 Provider 存在自动化 API/CLI 时，应优先使用 Provider-specific active launch adapter。
 
@@ -220,7 +220,7 @@ Morrows 明确拆分为三个平面：
 | **持久终端 / 终端** | `PersistentShell` | `shell session` | 运行空间内维持环境和状态的常驻命令行交互终端 |
 | **浏览器实例** | `BrowserInstance` | `browser session` | 运行空间内受控、有状态的浏览器实例 |
 | **模型会话** | `ProviderThread` | `Provider Session` | Codex / Claude / Gemini 模型自身的连续私有对话流 |
-| **会话** | `Session` | `Conversation` | 人类与特定 AgentInstance 之间的一对一持久工作会话，可跨多次 runtime turn 持续存在 |
+| **会话** | `Session` | `Conversation` | 人类与特定 AgentInstance 之间的一对一持久工作会话；可为通用、项目或任务作用域，并跨多次 runtime/Run 持续存在 |
 | **上下文快照** | `ContextSnapshot` | `ContextRevision` | 某次工作执行初始化时冻结的完整工作背景、目标与记忆视图 |
 | **记忆** | `Memory` | `Memory` / `Context` | 跨任务与 Session 长期保存的知识，分 organization/project/Agent/task 等作用域 |
 | **成果物** | `Artifact` | `Artifact` | 被正式归档、持久托管并可全局引用的工作交付物证据 |

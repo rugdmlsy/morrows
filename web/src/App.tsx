@@ -284,6 +284,7 @@ type LaunchAttempt = {
   agent_instance_id: string;
   launch_profile_id: string;
   run_id?: string | null;
+  session_id?: string | null;
   job_id?: string | null;
   resume_from_attempt_id?: string | null;
   status: string;
@@ -297,6 +298,23 @@ type LaunchAttempt = {
   created_at: string;
   started_at?: string | null;
   ended_at?: string | null;
+};
+
+type TaskSession = {
+  id: string;
+  agent_instance_id: string;
+  agent_name: string;
+  project_id?: string | null;
+  project_name?: string | null;
+  task_id?: string | null;
+  task_title?: string | null;
+  title: string;
+  status: string;
+  message_count: number;
+  queued_count: number;
+  undelivered_count: number;
+  last_message_preview?: string | null;
+  updated_at: string;
 };
 
 type LaunchInstruction = {
@@ -450,7 +468,10 @@ export default function App() {
   const [projectMemories, setProjectMemories] = useState<MemoryEntry[]>([]);
   const [selectedProjectMemoryId, setSelectedProjectMemoryId] = useState<string | null>(null);
   const [projectMemoryLoading, setProjectMemoryLoading] = useState(false);
+  const [taskSessions, setTaskSessions] = useState<TaskSession[]>([]);
   const [sessionAgentId, setSessionAgentId] = useState<string | null>(null);
+  const [sessionTargetId, setSessionTargetId] = useState<string | null>(null);
+  const [sessionTaskId, setSessionTaskId] = useState<string | null>(null);
   const [renamingAgentId, setRenamingAgentId] = useState<string | null>(null);
   const [agentNameDraft, setAgentNameDraft] = useState("");
   const [agentRenameBusy, setAgentRenameBusy] = useState(false);
@@ -607,7 +628,7 @@ export default function App() {
   const refreshDetail = useCallback(async () => {
     if (view !== "queue" || !selectedId || selectedProjectId) return;
     try {
-      const [nextAssignments, nextRuns, nextEvents, nextContext, nextContextPackage, nextCollaboration, nextPolicy, nextPreview, nextDispatchDecisions, nextLaunchAttempts, nextLaunchInstructions] = await Promise.all([
+      const [nextAssignments, nextRuns, nextEvents, nextContext, nextContextPackage, nextCollaboration, nextPolicy, nextPreview, nextDispatchDecisions, nextLaunchAttempts, nextLaunchInstructions, nextTaskSessions] = await Promise.all([
         api<Assignment[]>(`/api/tasks/${selectedId}/assignments`),
         api<Run[]>(`/api/tasks/${selectedId}/runs`),
         api<EventItem[]>(`/api/tasks/${selectedId}/events`),
@@ -619,6 +640,7 @@ export default function App() {
         api<DispatchDecision[]>(`/api/tasks/${selectedId}/dispatch-decisions`),
         api<LaunchAttempt[]>(`/api/tasks/${selectedId}/launch-attempts`),
         api<LaunchInstruction[]>(`/api/tasks/${selectedId}/launch-instructions`),
+        api<TaskSession[]>(`/api/sessions?task_id=${encodeURIComponent(selectedId)}`),
       ]);
       setAssignments(nextAssignments);
       setRuns(nextRuns);
@@ -631,6 +653,7 @@ export default function App() {
       setDispatchDecisions(nextDispatchDecisions);
       setLaunchAttempts(nextLaunchAttempts);
       setLaunchInstructions(nextLaunchInstructions);
+      setTaskSessions(nextTaskSessions);
       if (openRunId && nextRuns.some((run) => run.id === openRunId)) {
         void api<RunExecution>(`/api/runs/${openRunId}/execution`)
           .then((execution) => setRunExecutions((current) => ({ ...current, [openRunId]: execution })))
@@ -1722,6 +1745,52 @@ export default function App() {
                         </div>}
                       </div>
 
+                      <div className="task-session-section">
+                        <div className="mini-card-row">
+                          <h3>{locale === "zh-CN" ? "相关会话" : "Related sessions"}</h3>
+                          <button
+                            type="button"
+                            className="secondary"
+                            onClick={() => {
+                              setSessionTaskId(selectedTask.id);
+                              setSessionTargetId(null);
+                              setSessionAgentId(null);
+                              setView("sessions");
+                            }}
+                          >
+                            {locale === "zh-CN" ? "新建任务会话" : "New task session"}
+                          </button>
+                        </div>
+                        <div className="stack">
+                          {taskSessions.map((session) => {
+                            const agent = orderedAgents.find((entry) => entry.instance.id === session.agent_instance_id);
+                            return (
+                              <button
+                                type="button"
+                                className="mini-card task-session-link"
+                                key={session.id}
+                                onClick={() => {
+                                  setSessionTargetId(session.id);
+                                  setSessionTaskId(null);
+                                  setSessionAgentId(null);
+                                  setView("sessions");
+                                }}
+                              >
+                                <div className="mini-card-row">
+                                  <strong>{session.title}</strong>
+                                  <span>{session.queued_count > 0 ? (locale === "zh-CN" ? `${session.queued_count} 待回复` : `${session.queued_count} pending`) : ""}</span>
+                                </div>
+                                <small>{agent ? cleanAgentDisplayName(agent, locale) : session.agent_name} · {formatAge(locale, session.updated_at)}</small>
+                                {session.last_message_preview && <p>{session.last_message_preview}</p>}
+                              </button>
+                            );
+                          })}
+                          {!taskSessions.length && (
+                            <div className="empty compact">{locale === "zh-CN" ? "这个任务还没有会话。" : "No sessions are attached to this task yet."}</div>
+                          )}
+                        </div>
+                      </div>
+
                       <h3>{t("assignments")}</h3>
                       <div className="stack">
                         {assignments.map((item) => (
@@ -1963,9 +2032,15 @@ export default function App() {
               account_id: entry.account?.id ?? null,
               account_email: entry.account?.email ?? null,
             }))}
+            projects={projects.map((project) => ({ id: project.id, name: project.name }))}
+            tasks={tasks.map((task) => ({ id: task.id, project_id: task.project_id, title: task.title }))}
             locale={locale}
             initialAgentId={sessionAgentId}
+            initialSessionId={sessionTargetId}
+            initialTaskId={sessionTaskId}
             onInitialAgentHandled={() => setSessionAgentId(null)}
+            onInitialSessionHandled={() => setSessionTargetId(null)}
+            onInitialTaskHandled={() => setSessionTaskId(null)}
           />
         ) : (
           <section className="fleet-page">
@@ -2168,7 +2243,12 @@ export default function App() {
                       <button
                         type="button"
                         className="agent-chat-button"
-                        onClick={() => { setSessionAgentId(agent.id); setView("sessions"); }}
+                        onClick={() => {
+                          setSessionAgentId(agent.id);
+                          setSessionTargetId(null);
+                          setSessionTaskId(null);
+                          setView("sessions");
+                        }}
                       >
                         {t("openSession")}
                       </button>

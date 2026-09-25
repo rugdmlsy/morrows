@@ -49,7 +49,7 @@ To prevent severe ambiguity caused by bare usages of common words like `session`
 | **持久终端 / 终端** | `PersistentShell` | `shell session` | 运行空间内维持环境与状态的常驻命令行交互终端 |
 | **浏览器实例** | `BrowserInstance` | `browser session` | 运行空间内受控的有状态浏览器实例 |
 | **模型会话** | `ProviderThread` | `Provider Session` | Codex / Claude / Gemini 模型自身的连续私有对话流 |
-| **会话** | `Session` | `Conversation` | 人类与特定 Agent 实例之间的一对一持久化工作会话；属于一个 AgentInstance，可跨多次运行时 turn 持续存在 |
+| **会话** | `Session` | `Conversation` | 人类与特定 Agent 实例之间的一对一持久化工作会话；始终属于一个 AgentInstance，可选绑定 Project 或 Task，并可跨多次 Runtime/Run 持续存在 |
 | **上下文快照** | `ContextSnapshot` | `ContextRevision` | 某次工作执行初始化时冻结的完整工作背景、目标与记忆视图 |
 | **记忆** | `Memory` | `Memory` / `Context` | 长期持久化知识（跨越任务与会话），分组织/项目/员工/工作等作用域 |
 | **成果物** | `Artifact` | `Artifact` | 被正式归档、持久托管并可全局引用的工作交付物证据（Managed Store） |
@@ -217,22 +217,33 @@ AgentInstance remains the worker identity referenced by M1/M2 work. M3 links eac
 9. Daemon restart does not erase Tasks, Runs, checkpoints, or pending durable jobs.
 10. Session list reads return summary metadata only; message history is a separate paged read.
 11. Session MCP access is scoped to the addressed AgentInstance.
-12. **Ultimate Recovery Invariant (终极恢复原则)**: Even if the original Agent process, Provider Session, execution machine, and temporary workspace directories disappear completely, a new Agent can reconstruct full state and proceed solely from Morrows canonical records (WorkItem, ContextSnapshot, Memory, Decision, Artifact, Summary, Handoff, Evidence).
+12. A Session may be general, Project-scoped, or Task-scoped. If `task_id` is present, `project_id` is derived from that Task and cannot contradict it.
+13. Every new local Task launch binds to an open Task-scoped Session for the same AgentInstance, creating one if necessary; Run restart preserves that binding.
+14. Task launches consume only task-scoped messages from their bound Session. General/project-only messages cannot leak into a Task Run or wake an interrupted Task Run.
+15. **Ultimate Recovery Invariant (终极恢复原则)**: Even if the original Agent process, Provider Session, execution machine, and temporary workspace directories disappear completely, a new Agent can reconstruct full state and proceed solely from Morrows canonical records (WorkItem, ContextSnapshot, Memory, Decision, Artifact, Summary, Handoff, Evidence).
 
 ## Agent Sessions
 
-Direct human↔Agent chat is intentionally separate from Task collaboration. A
-`Session` belongs to one AgentInstance and stores only Session metadata; its
-`SessionMessage` rows are paged independently. This keeps the WebUI startup path
-lightweight and prevents opening the application from materializing every chat history.
+A `Session` is the durable human↔Agent conversation container. It always belongs
+to one AgentInstance and may additionally be **general** (no work scope),
+**Project-scoped**, or **Task-scoped**. Task scope implies the Task's Project; callers may
+not attach a Session to a Task while supplying a different Project. `SessionMessage`
+rows are paged independently. This keeps the WebUI startup path lightweight and prevents
+opening the application from materializing every chat history.
+
+Session scope is not execution ownership. A Task-scoped Session may outlive individual
+Runs and launch attempts. Assignment/Run still answer who owns the work and the state of
+one logical execution; Session answers which durable human↔Agent conversation and
+Provider-thread continuity belong to that work.
 
 Control-plane REST:
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| GET | `/sessions` | Summary list only: title, Agent, counts, last-message preview/time |
-| POST | `/sessions` | Create a Session for an AgentInstance |
-| GET | `/sessions/{id}` | Session metadata |
+| GET | `/sessions` | Summary list only; optional `agent_instance_id`, `project_id`, or `task_id` filters |
+| POST | `/sessions` | Create a general, Project-scoped, or Task-scoped Session for an AgentInstance |
+| GET | `/sessions/{id}` | Session metadata including optional Project/Task scope |
+| POST | `/sessions/{id}/scope` | Reassign the Session to general, Project, or Task scope |
 | GET | `/sessions/{id}/messages?limit=&before=&after=` | Lazy/paged history; before loads older, after loads newer |
 | POST | `/sessions/{id}/messages` | Queue a human message |
 | POST | `/sessions/{id}/messages/{message_id}/recall` | Recall a human message while its delivery is still queued |
@@ -270,12 +281,21 @@ the Agent, Account, and Session identifiers to the child environment, issues a s
 Session-scoped Agent credential, and claims only queued messages belonging to that
 Session. For Codex/CodeBuddy local CLI adapters, the first successful start creates a
 provider thread/session; later starts for the same Morrows Session and LaunchProfile
-resume the latest persisted provider session reference. The runtime attempt records PID,
-logs, exit status, and provider session reference.
+resume the latest persisted provider session reference. Task `LaunchAttempt` records
+bound to the same Session participate in that same Provider-reference history, so moving
+between direct Session runtime and formal Task execution does not create a second hidden
+conversation identity. The runtime attempt records PID, logs, exit status, and provider
+session reference.
 
-If no explicit Session runtime is started, queued messages can still be consumed when
-the addressed Agent later runs and reads its Session inbox; existing interrupted
-task-bound local Runs may also be resumed by the delivery worker. Daemon restart marks
+When a local Task launch is enqueued, Morrows reuses the most recently updated open
+Task-scoped Session for that Task + AgentInstance, or creates one automatically. The
+LaunchAttempt stores the Session ID and Run restart copies it forward. A task launcher
+claims management instructions for its Task and Session messages belonging to that
+bound Task Session only. General/project-only Session messages remain in their own
+delivery path and do not make interrupted Task Runs eligible for automatic resume.
+
+If no explicit Session runtime is started, queued messages can still be consumed by a
+later direct Session runtime or by the matching Task execution path. Daemon restart marks
 orphaned Session runtimes failed, revokes their Session credentials, and releases
 unfinished delivery claims back to the queue.
 

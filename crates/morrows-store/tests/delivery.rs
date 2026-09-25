@@ -365,10 +365,14 @@ async fn session_message_cannot_be_recalled_after_delivery() {
 async fn session_message_cannot_be_recalled_after_runtime_claim() {
     let (store, a, _, _, assignment, profile) = setup().await;
     let session = store
-        .create_session(CreateSession {
-            agent_instance_id: a.id,
-            title: "Claimed".into(),
-        })
+        .create_scoped_session(
+            CreateSession {
+                agent_instance_id: a.id,
+                title: "Claimed".into(),
+            },
+            None,
+            Some(assignment.task_id),
+        )
         .await
         .unwrap();
     let message = store

@@ -132,28 +132,44 @@ impl Store {
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(storage)?;
-        let attempt =
-            sqlx::query("SELECT status,agent_instance_id,task_id FROM launch_attempts WHERE id=?")
-                .bind(attempt_id.to_string())
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(storage)?
-                .ok_or_else(|| DomainError::NotFound(format!("launch attempt {attempt_id}")))?;
+        let attempt = sqlx::query(
+            "SELECT status,agent_instance_id,task_id,session_id FROM launch_attempts WHERE id=?",
+        )
+        .bind(attempt_id.to_string())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(storage)?
+        .ok_or_else(|| DomainError::NotFound(format!("launch attempt {attempt_id}")))?;
         let status: String = attempt.try_get("status").map_err(storage)?;
         if status != "running" {
             return Err(DomainError::Conflict(format!("launch attempt is {status}")));
         }
         let agent_instance_id = parse_id(attempt.try_get("agent_instance_id").map_err(storage)?)?;
         let task_id = parse_id(attempt.try_get("task_id").map_err(storage)?)?;
+        let session_id = parse_opt_id(attempt.try_get("session_id").map_err(storage)?)?;
 
         let ids: Vec<String> = sqlx::query_scalar(
-            "SELECT id FROM agent_deliveries
-             WHERE agent_instance_id=? AND status='queued'
-               AND (task_id IS NULL OR task_id=?)
-             ORDER BY created_at,id LIMIT ?",
+            "SELECT d.id FROM agent_deliveries d
+             WHERE d.agent_instance_id=? AND d.status='queued'
+               AND (
+                 (d.kind='launch_instruction' AND d.task_id=?)
+                 OR (
+                   d.kind='session_message' AND d.task_id=?
+                   AND (
+                     ? IS NULL
+                     OR d.source_id IN (
+                       SELECT m.id FROM session_messages m WHERE m.session_id=?
+                     )
+                   )
+                 )
+               )
+             ORDER BY d.created_at,d.id LIMIT ?",
         )
         .bind(agent_instance_id.to_string())
         .bind(task_id.to_string())
+        .bind(task_id.to_string())
+        .bind(session_id.map(|value| value.to_string()))
+        .bind(session_id.map(|value| value.to_string()))
         .bind(limit)
         .fetch_all(&mut *tx)
         .await
@@ -452,7 +468,7 @@ impl Store {
                  SELECT 1 FROM agent_deliveries d
                  WHERE d.agent_instance_id=r.agent_instance_id
                    AND d.status='queued'
-                   AND (d.task_id IS NULL OR d.task_id=r.task_id)
+                   AND d.task_id=r.task_id
                )
                AND EXISTS (
                  SELECT 1

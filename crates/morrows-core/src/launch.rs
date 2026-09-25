@@ -54,6 +54,7 @@ pub struct LaunchAttempt {
     pub agent_instance_id: Id,
     pub launch_profile_id: Id,
     pub run_id: Option<Id>,
+    pub session_id: Option<Id>,
     pub job_id: Option<Id>,
     pub resume_from_attempt_id: Option<Id>,
     pub restart_run_id: Option<Id>,

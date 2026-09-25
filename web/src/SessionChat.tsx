@@ -12,10 +12,25 @@ export type ChatAgent = {
   account_email?: string | null;
 };
 
+export type ChatProject = {
+  id: string;
+  name: string;
+};
+
+export type ChatTask = {
+  id: string;
+  project_id?: string | null;
+  title: string;
+};
+
 type SessionSummary = {
   id: string;
   agent_instance_id: string;
   agent_name: string;
+  project_id?: string | null;
+  project_name?: string | null;
+  task_id?: string | null;
+  task_title?: string | null;
   title: string;
   status: string;
   message_count: number;
@@ -31,6 +46,8 @@ type SessionSummary = {
 type Session = {
   id: string;
   agent_instance_id: string;
+  project_id?: string | null;
+  task_id?: string | null;
   title: string;
   status: string;
   created_at: string;
@@ -113,9 +130,15 @@ type SessionSummaryRevision = {
 
 type Props = {
   agents: ChatAgent[];
+  projects: ChatProject[];
+  tasks: ChatTask[];
   locale: Locale;
   initialAgentId?: string | null;
+  initialSessionId?: string | null;
+  initialTaskId?: string | null;
   onInitialAgentHandled?: () => void;
+  onInitialSessionHandled?: () => void;
+  onInitialTaskHandled?: () => void;
 };
 
 function mergeMessages(current: SessionMessage[], incoming: SessionMessage[]) {
@@ -134,7 +157,18 @@ function mergeMessages(current: SessionMessage[], incoming: SessionMessage[]) {
   );
 }
 
-export default function SessionChat({ agents, locale, initialAgentId, onInitialAgentHandled }: Props) {
+export default function SessionChat({
+  agents,
+  projects,
+  tasks,
+  locale,
+  initialAgentId,
+  initialSessionId,
+  initialTaskId,
+  onInitialAgentHandled,
+  onInitialSessionHandled,
+  onInitialTaskHandled,
+}: Props) {
   const zh = locale === "zh-CN";
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -147,6 +181,9 @@ export default function SessionChat({ agents, locale, initialAgentId, onInitialA
   const [loadingId, setLoadingId] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [newAgentId, setNewAgentId] = useState("");
+  const [newScope, setNewScope] = useState<"general" | "project" | "task">("general");
+  const [newProjectId, setNewProjectId] = useState("");
+  const [newTaskId, setNewTaskId] = useState("");
   const [showNew, setShowNew] = useState(false);
   const [busy, setBusy] = useState(false);
   const [recallBusyId, setRecallBusyId] = useState<string | null>(null);
@@ -185,6 +222,21 @@ export default function SessionChat({ agents, locale, initialAgentId, onInitialA
     [displayAgentName],
   );
 
+  const scopeLabel = useCallback((session: SessionSummary) => {
+    if (session.task_id) {
+      const project = session.project_name ? `${session.project_name} / ` : "";
+      return `${project}${session.task_title || session.task_id}`;
+    }
+    if (session.project_id) return session.project_name || session.project_id;
+    return zh ? "通用会话" : "General";
+  }, [zh]);
+
+  function scopeValue(session: SessionSummary) {
+    if (session.task_id) return `task:${session.task_id}`;
+    if (session.project_id) return `project:${session.project_id}`;
+    return "general";
+  }
+
   useEffect(() => {
     historyCacheRef.current = historyCache;
   }, [historyCache]);
@@ -212,6 +264,14 @@ export default function SessionChat({ agents, locale, initialAgentId, onInitialA
     onInitialAgentHandled?.();
   }, [initialAgentId, onInitialAgentHandled]);
 
+  useEffect(() => {
+    if (!initialTaskId) return;
+    setNewScope("task");
+    setNewTaskId(initialTaskId);
+    setShowNew(true);
+    onInitialTaskHandled?.();
+  }, [initialTaskId, onInitialTaskHandled]);
+
   const loadSession = useCallback(async (id: string, force = false) => {
     if (!force && historyCacheRef.current[id]) return;
     setLoadingId(id);
@@ -235,6 +295,13 @@ export default function SessionChat({ agents, locale, initialAgentId, onInitialA
       setLoadingId((current) => (current === id ? null : current));
     }
   }, []);
+
+  useEffect(() => {
+    if (!initialSessionId) return;
+    setSelectedId(initialSessionId);
+    void loadSession(initialSessionId);
+    onInitialSessionHandled?.();
+  }, [initialSessionId, loadSession, onInitialSessionHandled]);
 
   async function selectSession(id: string) {
     setSelectedId(id);
@@ -288,11 +355,19 @@ export default function SessionChat({ agents, locale, initialAgentId, onInitialA
     if (!agent) return;
     setBusy(true);
     try {
+      const task = newScope === "task" ? tasks.find((item) => item.id === newTaskId) : null;
+      const project = newScope === "project" ? projects.find((item) => item.id === newProjectId) : null;
       const created = await api<Session>("/api/sessions", {
         method: "POST",
         body: JSON.stringify({
           agent_instance_id: agent.id,
-          title: zh ? `与 ${agent.name} 的会话` : `Session with ${agent.name}`,
+          project_id: newScope === "project" ? newProjectId || null : null,
+          task_id: newScope === "task" ? newTaskId || null : null,
+          title: task
+            ? `${task.title} · ${agent.name}`
+            : project
+              ? `${project.name} · ${agent.name}`
+              : zh ? `与 ${agent.name} 的会话` : `Session with ${agent.name}`,
         }),
       });
       setHistoryCache((current) => ({
@@ -304,6 +379,31 @@ export default function SessionChat({ agents, locale, initialAgentId, onInitialA
       setShowNew(false);
       await refreshSummaries();
       await loadSession(created.id, true);
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function updateScope(value: string) {
+    if (!selectedId) return;
+    const [kind, id] = value.split(":", 2);
+    setBusy(true);
+    try {
+      const updated = await api<Session>(`/api/sessions/${selectedId}/scope`, {
+        method: "POST",
+        body: JSON.stringify({
+          project_id: kind === "project" ? id : null,
+          task_id: kind === "task" ? id : null,
+        }),
+      });
+      setHistoryCache((current) => {
+        const cached = current[selectedId];
+        return cached ? { ...current, [selectedId]: { ...cached, session: updated } } : current;
+      });
+      await refreshSummaries();
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -444,7 +544,44 @@ export default function SessionChat({ agents, locale, initialAgentId, onInitialA
                 </option>
               ))}
             </select>
-            <button disabled={!newAgentId || busy}>{zh ? "开始" : "Start"}</button>
+            <select
+              value={newScope}
+              onChange={(event) => {
+                const value = event.target.value as "general" | "project" | "task";
+                setNewScope(value);
+                if (value !== "project") setNewProjectId("");
+                if (value !== "task") setNewTaskId("");
+              }}
+            >
+              <option value="general">{zh ? "通用会话" : "General session"}</option>
+              <option value="project">{zh ? "归属项目" : "Project-scoped"}</option>
+              <option value="task">{zh ? "归属任务" : "Task-scoped"}</option>
+            </select>
+            {newScope === "project" && (
+              <select value={newProjectId} onChange={(event) => setNewProjectId(event.target.value)}>
+                <option value="">{zh ? "选择项目…" : "Select project…"}</option>
+                {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
+              </select>
+            )}
+            {newScope === "task" && (
+              <select value={newTaskId} onChange={(event) => setNewTaskId(event.target.value)}>
+                <option value="">{zh ? "选择任务…" : "Select task…"}</option>
+                {tasks.map((task) => {
+                  const project = projects.find((item) => item.id === task.project_id);
+                  return <option key={task.id} value={task.id}>{project ? `${project.name} / ` : ""}{task.title}</option>;
+                })}
+              </select>
+            )}
+            <button
+              disabled={
+                !newAgentId ||
+                busy ||
+                (newScope === "project" && !newProjectId) ||
+                (newScope === "task" && !newTaskId)
+              }
+            >
+              {zh ? "开始" : "Start"}
+            </button>
           </form>
         )}
 
@@ -462,7 +599,7 @@ export default function SessionChat({ agents, locale, initialAgentId, onInitialA
                   <strong>{displaySessionTitle(session)}</strong>
                   <small>{formatAge(locale, session.last_message_at || session.updated_at)}</small>
                 </div>
-                <span>{displayAgentName(session.agent_instance_id, session.agent_name)}</span>
+                <span>{displayAgentName(session.agent_instance_id, session.agent_name)} · {scopeLabel(session)}</span>
                 <p>{session.last_message_preview || (zh ? "还没有消息" : "No messages yet")}</p>
               </div>
               {session.queued_count > 0 && (
@@ -501,6 +638,29 @@ export default function SessionChat({ agents, locale, initialAgentId, onInitialA
                   {" · "}
                   {selectedAgent?.account_email || (zh ? "未记录邮箱" : "Email not recorded")}
                 </span>
+                <label className="session-scope-control">
+                  <span>{zh ? "归属" : "Scope"}</span>
+                  <select
+                    value={scopeValue(selected)}
+                    disabled={busy}
+                    onChange={(event) => void updateScope(event.target.value)}
+                  >
+                    <option value="general">{zh ? "通用会话" : "General"}</option>
+                    {projects.map((project) => (
+                      <option key={`project:${project.id}`} value={`project:${project.id}`}>
+                        {zh ? "项目" : "Project"} · {project.name}
+                      </option>
+                    ))}
+                    {tasks.map((task) => {
+                      const project = projects.find((item) => item.id === task.project_id);
+                      return (
+                        <option key={`task:${task.id}`} value={`task:${task.id}`}>
+                          {zh ? "任务" : "Task"} · {project ? `${project.name} / ` : ""}{task.title}
+                        </option>
+                      );
+                    })}
+                  </select>
+                </label>
               </div>
               <div className="session-runtime-controls">
                 <label className="session-runtime-select">

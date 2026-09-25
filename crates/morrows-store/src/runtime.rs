@@ -300,7 +300,7 @@ impl Store {
             return Err(DomainError::Conflict("Run Assignment is not active".into()));
         }
         let previous = sqlx::query(
-            "SELECT id,launch_profile_id,cwd,external_session_ref FROM launch_attempts
+            "SELECT id,launch_profile_id,cwd,external_session_ref,session_id FROM launch_attempts
              WHERE run_id=? ORDER BY created_at DESC LIMIT 1",
         )
         .bind(run_id.to_string())
@@ -310,6 +310,7 @@ impl Store {
         .ok_or_else(|| DomainError::Conflict("Run has no launch attempt".into()))?;
         let profile_id: String = previous.try_get("launch_profile_id").map_err(storage)?;
         let cwd: Option<String> = previous.try_get("cwd").map_err(storage)?;
+        let session_id: Option<String> = previous.try_get("session_id").map_err(storage)?;
         let resume_attempt_id: Option<String> = sqlx::query_scalar(
             "SELECT id FROM launch_attempts
              WHERE run_id=? AND external_session_ref IS NOT NULL
@@ -333,11 +334,11 @@ impl Store {
         .await
         .map_err(storage)?;
         sqlx::query("INSERT INTO launch_attempts(id,assignment_id,task_id,agent_instance_id,launch_profile_id,
-                     job_id,resume_from_attempt_id,restart_run_id,status,cwd,created_at)
-                     VALUES(?,?,?,?,?,?,?,?,'queued',?,?)")
+                     session_id,job_id,resume_from_attempt_id,restart_run_id,status,cwd,created_at)
+                     VALUES(?,?,?,?,?,?,?,?,?,'queued',?,?)")
             .bind(attempt_id.to_string()).bind(run.assignment_id.to_string())
             .bind(run.task_id.to_string()).bind(run.agent_instance_id.to_string())
-            .bind(profile_id).bind(job_id.to_string())
+            .bind(profile_id).bind(session_id).bind(job_id.to_string())
             .bind(resume_attempt_id).bind(run_id.to_string())
             .bind(cwd).bind(now.to_rfc3339()).execute(&mut *tx).await.map_err(storage)?;
         append_event_tx(

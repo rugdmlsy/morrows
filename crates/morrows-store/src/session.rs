@@ -2,7 +2,7 @@ use super::*;
 use crate::delivery::enqueue_agent_delivery_tx;
 use morrows_core::{
     CreateSession, CreateSessionSummaryRevision, Session, SessionHistory, SessionMessage,
-    SessionSummary, SessionSummaryRevision,
+    SessionSummary, SessionSummaryRevision, UpdateSessionScope,
 };
 
 impl Store {
@@ -24,7 +24,17 @@ impl Store {
     }
 
     pub async fn create_session(&self, input: CreateSession) -> Result<Session, DomainError> {
+        self.create_scoped_session(input, None, None).await
+    }
+
+    pub async fn create_scoped_session(
+        &self,
+        input: CreateSession,
+        project_id: Option<Id>,
+        task_id: Option<Id>,
+    ) -> Result<Session, DomainError> {
         let agent = self.get_agent(input.agent_instance_id).await?;
+        let (project_id, task_id) = self.resolve_session_scope(project_id, task_id).await?;
         let title = if input.title.trim().is_empty() {
             format!("Session with {}", agent.display_name)
         } else {
@@ -39,11 +49,14 @@ impl Store {
         let now = Utc::now();
         let mut tx = self.pool.begin().await.map_err(storage)?;
         sqlx::query(
-            "INSERT INTO sessions(id,agent_instance_id,title,status,created_at,updated_at)
-             VALUES(?,?,?,'open',?,?)",
+            "INSERT INTO sessions(
+                id,agent_instance_id,project_id,task_id,title,status,created_at,updated_at
+             ) VALUES(?,?,?,?,?,'open',?,?)",
         )
         .bind(id.to_string())
         .bind(input.agent_instance_id.to_string())
+        .bind(project_id.map(|value| value.to_string()))
+        .bind(task_id.map(|value| value.to_string()))
         .bind(&title)
         .bind(now.to_rfc3339())
         .bind(now.to_rfc3339())
@@ -57,12 +70,153 @@ impl Store {
             "session",
             id,
             "session.created",
-            json!({"agent_instance_id": input.agent_instance_id}),
+            json!({
+                "agent_instance_id": input.agent_instance_id,
+                "project_id": project_id,
+                "task_id": task_id,
+            }),
             None,
         )
         .await?;
         tx.commit().await.map_err(storage)?;
         self.get_session(id).await
+    }
+
+    pub async fn update_session_scope(
+        &self,
+        id: Id,
+        input: UpdateSessionScope,
+    ) -> Result<Session, DomainError> {
+        self.get_session(id).await?;
+        let (project_id, task_id) = self
+            .resolve_session_scope(input.project_id, input.task_id)
+            .await?;
+        let now = Utc::now();
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(storage)?;
+        sqlx::query("UPDATE sessions SET project_id=?,task_id=?,updated_at=? WHERE id=?")
+            .bind(project_id.map(|value| value.to_string()))
+            .bind(task_id.map(|value| value.to_string()))
+            .bind(now.to_rfc3339())
+            .bind(id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?;
+        sqlx::query(
+            "UPDATE agent_deliveries
+             SET task_id=?
+             WHERE kind='session_message' AND status='queued'
+               AND source_id IN (SELECT id FROM session_messages WHERE session_id=?)",
+        )
+        .bind(task_id.map(|value| value.to_string()))
+        .bind(id.to_string())
+        .execute(&mut *tx)
+        .await
+        .map_err(storage)?;
+        append_event_tx(
+            &mut tx,
+            "human",
+            "local",
+            "session",
+            id,
+            "session.scope_updated",
+            json!({"project_id": project_id, "task_id": task_id}),
+            None,
+        )
+        .await?;
+        tx.commit().await.map_err(storage)?;
+        self.get_session(id).await
+    }
+
+    async fn resolve_session_scope(
+        &self,
+        project_id: Option<Id>,
+        task_id: Option<Id>,
+    ) -> Result<(Option<Id>, Option<Id>), DomainError> {
+        if let Some(task_id) = task_id {
+            let task = self.get_task(task_id).await?;
+            if project_id.is_some() && project_id != task.project_id {
+                return Err(DomainError::Conflict(
+                    "session project does not match the selected task".into(),
+                ));
+            }
+            return Ok((task.project_id, Some(task_id)));
+        }
+        if let Some(project_id) = project_id {
+            self.get_project(project_id).await?;
+            return Ok((Some(project_id), None));
+        }
+        Ok((None, None))
+    }
+
+    pub(crate) async fn ensure_task_session_for_agent_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        task_id: Id,
+        agent_id: Id,
+    ) -> Result<Id, DomainError> {
+        if let Some(existing) = sqlx::query_scalar::<_, String>(
+            "SELECT id FROM sessions
+             WHERE task_id=? AND agent_instance_id=? AND status='open'
+             ORDER BY updated_at DESC,id DESC LIMIT 1",
+        )
+        .bind(task_id.to_string())
+        .bind(agent_id.to_string())
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(storage)?
+        {
+            return parse_id(existing);
+        }
+
+        let task = sqlx::query("SELECT title,project_id FROM tasks WHERE id=?")
+            .bind(task_id.to_string())
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(storage)?
+            .ok_or_else(|| DomainError::NotFound(format!("task {task_id}")))?;
+        let task_title: String = task.try_get("title").map_err(storage)?;
+        let project_id: Option<String> = task.try_get("project_id").map_err(storage)?;
+        let display_name: String =
+            sqlx::query_scalar("SELECT display_name FROM agent_instances WHERE id=?")
+                .bind(agent_id.to_string())
+                .fetch_optional(&mut **tx)
+                .await
+                .map_err(storage)?
+                .ok_or_else(|| DomainError::NotFound(format!("agent {agent_id}")))?;
+        let id = Uuid::new_v4();
+        let now = Utc::now();
+        let title = format!("{task_title} · {display_name}");
+        sqlx::query(
+            "INSERT INTO sessions(
+                id,agent_instance_id,project_id,task_id,title,status,created_at,updated_at
+             ) VALUES(?,?,?,?,?,'open',?,?)",
+        )
+        .bind(id.to_string())
+        .bind(agent_id.to_string())
+        .bind(project_id)
+        .bind(task_id.to_string())
+        .bind(title)
+        .bind(now.to_rfc3339())
+        .bind(now.to_rfc3339())
+        .execute(&mut **tx)
+        .await
+        .map_err(storage)?;
+        append_event_tx(
+            tx,
+            "system",
+            "launcher",
+            "session",
+            id,
+            "session.created_for_task",
+            json!({"agent_instance_id": agent_id, "task_id": task_id}),
+            None,
+        )
+        .await?;
+        Ok(id)
     }
 
     pub async fn get_session(&self, id: Id) -> Result<Session, DomainError> {
@@ -84,7 +238,7 @@ impl Store {
         }
         let rows = if let Some(id) = agent_id {
             sqlx::query(
-                "SELECT c.*,a.display_name AS agent_name,
+                "SELECT c.*,a.display_name AS agent_name,p.name AS project_name,t.title AS task_title,
                   (SELECT COUNT(*) FROM session_messages m WHERE m.session_id=c.id AND m.recalled_at IS NULL) AS message_count,
                   (SELECT COUNT(*) FROM session_messages m WHERE m.session_id=c.id AND m.author_type='human' AND m.status='queued' AND m.recalled_at IS NULL) AS queued_count,
                   (SELECT COUNT(*) FROM agent_deliveries d
@@ -95,6 +249,8 @@ impl Store {
                   (SELECT m.author_type FROM session_messages m WHERE m.session_id=c.id AND m.recalled_at IS NULL ORDER BY m.created_at DESC,m.id DESC LIMIT 1) AS last_message_author_type,
                   (SELECT m.created_at FROM session_messages m WHERE m.session_id=c.id AND m.recalled_at IS NULL ORDER BY m.created_at DESC,m.id DESC LIMIT 1) AS last_message_at
                  FROM sessions c JOIN agent_instances a ON a.id=c.agent_instance_id
+                 LEFT JOIN projects p ON p.id=c.project_id
+                 LEFT JOIN tasks t ON t.id=c.task_id
                  WHERE c.agent_instance_id=? ORDER BY c.updated_at DESC,c.id DESC",
             )
             .bind(id.to_string())
@@ -103,7 +259,7 @@ impl Store {
             .map_err(storage)?
         } else {
             sqlx::query(
-                "SELECT c.*,a.display_name AS agent_name,
+                "SELECT c.*,a.display_name AS agent_name,p.name AS project_name,t.title AS task_title,
                   (SELECT COUNT(*) FROM session_messages m WHERE m.session_id=c.id AND m.recalled_at IS NULL) AS message_count,
                   (SELECT COUNT(*) FROM session_messages m WHERE m.session_id=c.id AND m.author_type='human' AND m.status='queued' AND m.recalled_at IS NULL) AS queued_count,
                   (SELECT COUNT(*) FROM agent_deliveries d
@@ -114,6 +270,8 @@ impl Store {
                   (SELECT m.author_type FROM session_messages m WHERE m.session_id=c.id AND m.recalled_at IS NULL ORDER BY m.created_at DESC,m.id DESC LIMIT 1) AS last_message_author_type,
                   (SELECT m.created_at FROM session_messages m WHERE m.session_id=c.id AND m.recalled_at IS NULL ORDER BY m.created_at DESC,m.id DESC LIMIT 1) AS last_message_at
                  FROM sessions c JOIN agent_instances a ON a.id=c.agent_instance_id
+                 LEFT JOIN projects p ON p.id=c.project_id
+                 LEFT JOIN tasks t ON t.id=c.task_id
                  ORDER BY c.updated_at DESC,c.id DESC",
             )
             .fetch_all(&self.pool)
@@ -326,7 +484,7 @@ impl Store {
         let delivery_id = enqueue_agent_delivery_tx(
             &mut tx,
             session.agent_instance_id,
-            None,
+            session.task_id,
             "session_message",
             id,
             json!({
@@ -709,6 +867,8 @@ fn row_to_session(row: sqlx::sqlite::SqliteRow) -> Result<Session, DomainError> 
     Ok(Session {
         id: parse_id(row.try_get("id").map_err(storage)?)?,
         agent_instance_id: parse_id(row.try_get("agent_instance_id").map_err(storage)?)?,
+        project_id: parse_opt_id(row.try_get("project_id").map_err(storage)?)?,
+        task_id: parse_opt_id(row.try_get("task_id").map_err(storage)?)?,
         title: row.try_get("title").map_err(storage)?,
         status: row.try_get("status").map_err(storage)?,
         created_at: parse_dt(row.try_get("created_at").map_err(storage)?)?,
@@ -722,6 +882,10 @@ fn row_to_session_summary(row: sqlx::sqlite::SqliteRow) -> Result<SessionSummary
         id: parse_id(row.try_get("id").map_err(storage)?)?,
         agent_instance_id: parse_id(row.try_get("agent_instance_id").map_err(storage)?)?,
         agent_name: row.try_get("agent_name").map_err(storage)?,
+        project_id: parse_opt_id(row.try_get("project_id").map_err(storage)?)?,
+        project_name: row.try_get("project_name").map_err(storage)?,
+        task_id: parse_opt_id(row.try_get("task_id").map_err(storage)?)?,
+        task_title: row.try_get("task_title").map_err(storage)?,
         title: row.try_get("title").map_err(storage)?,
         status: row.try_get("status").map_err(storage)?,
         message_count: row.try_get("message_count").map_err(storage)?,

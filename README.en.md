@@ -179,11 +179,11 @@ Employee MCP tools currently cover:
 
 Task-scoped MCP reads and collaboration writes verify that the caller owns the submitted request or has an Assignment history for that Task. MCP can report or collaborate on work, but it cannot create its own Assignment or Run.
 
-Sessions are separate from Task collaboration. The WebUI loads only Session summaries at startup; selecting a Session loads the latest message page into an in-memory cache, older history is fetched explicitly, and only the selected Session polls for new messages.
+A Session is an independent durable conversation object with an optional scope: a **general Session** is unbound, a **project Session** belongs to a Project, and a **task Session** belongs to a Task (its Project is derived from the Task). The WebUI loads only Session summaries at startup; selecting a Session loads the latest message page into an in-memory cache, older history is fetched explicitly, and only the selected Session polls for new messages.
 
 Human messages are durable and remain awaiting reply until the addressed Agent replies. A separate transactional `AgentDelivery` exposes only two user-facing delivery states: **awaiting delivery** and **delivered**; delivered means Morrows successfully wrote the message into an Agent runtime prompt. Queued messages can be recalled before runtime claim.
 
-The WebUI can explicitly start/resume a local Agent CLI for a Session through a dedicated Session runtime that binds AgentInstance, Account, LaunchProfile, Morrows Session, and the persisted provider thread/session reference without creating a fake Task or Run.
+The WebUI can explicitly start/resume a local Agent CLI for a Session through a dedicated Session runtime that binds AgentInstance, Account, LaunchProfile, Morrows Session, and the persisted provider thread/session reference without creating a fake Task or Run. Task launches also bind to the open Session for that Task + Agent (creating one when necessary) and share the same Provider-thread continuity with direct Session runtimes. Run / LaunchAttempt records describe execution lifecycle rather than a separate conversation identity. General Session messages are never consumed by Task launches and cannot wake unrelated interrupted Runs.
 
 External adapters such as `lsm_external`, `antigravity_external`, `gemini_external`, and `codebuddy_external` remain compatibility launch backends. Their lifecycle endpoints are control-plane REST operations; they are no longer exposed as employee MCP tools. Provider-specific active launch adapters should be preferred when an automation API/CLI exists.
 
@@ -220,7 +220,7 @@ To avoid ambiguity from bare words such as `session` and `run`, Morrows uses col
 | **持久终端 / 终端** | `PersistentShell` | `shell session` | A long-lived command-line environment inside a RuntimeScope |
 | **浏览器实例** | `BrowserInstance` | `browser session` | A controlled stateful browser instance inside a RuntimeScope |
 | **模型会话** | `ProviderThread` | `Provider Session` | A provider-private continuous model conversation, such as Codex / Claude / Gemini |
-| **会话** | `Session` | `Conversation` | A durable one-to-one working conversation between a human and a specific AgentInstance, spanning multiple runtime turns |
+| **会话** | `Session` | `Conversation` | A durable one-to-one working conversation with a specific AgentInstance; it may be general-, project-, or task-scoped and spans multiple runtime/Run attempts |
 | **上下文快照** | `ContextSnapshot` | `ContextRevision` | Frozen work background, goals, and memory view used to initialize a WorkExecution |
 | **记忆** | `Memory` | `Memory` / `Context` | Durable knowledge across tasks and Sessions, scoped to organization/project/Agent/task |
 | **成果物** | `Artifact` | `Artifact` | A formally archived and globally referenceable work product |

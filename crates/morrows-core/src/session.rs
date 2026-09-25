@@ -14,6 +14,8 @@ pub struct CreateSession {
 pub struct Session {
     pub id: Id,
     pub agent_instance_id: Id,
+    pub project_id: Option<Id>,
+    pub task_id: Option<Id>,
     pub title: String,
     pub status: String,
     pub created_at: DateTime<Utc>,
@@ -25,6 +27,10 @@ pub struct SessionSummary {
     pub id: Id,
     pub agent_instance_id: Id,
     pub agent_name: String,
+    pub project_id: Option<Id>,
+    pub project_name: Option<String>,
+    pub task_id: Option<Id>,
+    pub task_title: Option<String>,
     pub title: String,
     pub status: String,
     pub message_count: i64,
@@ -63,6 +69,16 @@ pub struct SessionHistory {
     pub messages: Vec<SessionMessage>,
     pub has_more: bool,
     pub next_before: Option<Id>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct UpdateSessionScope {
+    #[serde(default)]
+    #[schemars(with = "Option<String>")]
+    pub project_id: Option<Id>,
+    #[serde(default)]
+    #[schemars(with = "Option<String>")]
+    pub task_id: Option<Id>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

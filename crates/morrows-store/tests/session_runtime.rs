@@ -97,6 +97,111 @@ async fn restart_recovery_fails_session_runtime_revokes_credential_and_requeues_
 }
 
 #[tokio::test]
+async fn task_launch_and_direct_runtime_are_mutually_exclusive_for_one_session() {
+    let store = Store::connect("sqlite::memory:").await.unwrap();
+    let agent = store
+        .register_agent("session-runtime-exclusion", &[])
+        .await
+        .unwrap();
+    let task = store
+        .create_task(
+            serde_json::from_value(json!({
+                "title": "Scoped execution",
+                "description": "One Provider thread at a time"
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let assignment = store
+        .claim_task(task.id, agent.id, "executor", 600)
+        .await
+        .unwrap();
+    let session = store
+        .create_scoped_session(
+            CreateSession {
+                agent_instance_id: agent.id,
+                title: "Scoped execution".into(),
+            },
+            None,
+            Some(task.id),
+        )
+        .await
+        .unwrap();
+    let profile = store
+        .register_launch_profile(
+            serde_json::from_value::<RegisterLaunchProfile>(json!({
+                "name": "session runtime exclusion",
+                "adapter": "codex_cli",
+                "agent_instance_id": agent.id,
+                "program": "/bin/echo",
+                "default_cwd": std::env::temp_dir(),
+                "enabled": true
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let direct = store
+        .create_session_runtime_attempt(
+            session.id,
+            StartSessionRuntime {
+                launch_profile_id: Some(profile.id),
+                model: None,
+                reasoning_effort: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let blocked_launch = store
+        .enqueue_launch(
+            serde_json::from_value(json!({
+                "assignment_id": assignment.id,
+                "launch_profile_id": profile.id
+            }))
+            .unwrap(),
+        )
+        .await;
+    assert!(matches!(
+        blocked_launch,
+        Err(morrows_core::DomainError::Conflict(_))
+    ));
+
+    store
+        .finish_session_runtime_attempt(direct.id, Some(0), None, None)
+        .await
+        .unwrap();
+    let task_launch = store
+        .enqueue_launch(
+            serde_json::from_value(json!({
+                "assignment_id": assignment.id,
+                "launch_profile_id": profile.id
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(task_launch.session_id, Some(session.id));
+
+    let blocked_direct = store
+        .create_session_runtime_attempt(
+            session.id,
+            StartSessionRuntime {
+                launch_profile_id: Some(profile.id),
+                model: None,
+                reasoning_effort: None,
+            },
+        )
+        .await;
+    assert!(matches!(
+        blocked_direct,
+        Err(morrows_core::DomainError::Conflict(_))
+    ));
+}
+
+#[tokio::test]
 async fn next_session_runtime_inherits_model_and_reasoning_effort() {
     let store = Store::connect("sqlite::memory:").await.unwrap();
     let agent = store

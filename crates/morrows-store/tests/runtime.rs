@@ -540,15 +540,25 @@ async fn queued_delivery_makes_interrupted_codex_run_eligible_for_automatic_resu
     assert_eq!(store.get_run(run_id).await.unwrap().status, "interrupted");
     assert!(store.delivery_resume_candidates().await.unwrap().is_empty());
 
-    let session = store
+    let general_session = store
         .create_session(CreateSession {
             agent_instance_id: assignment.agent_instance_id,
-            title: "Delivery wake".into(),
+            title: "Unrelated discussion".into(),
         })
         .await
         .unwrap();
     store
-        .create_human_session_message(session.id, "continue this turn")
+        .create_human_session_message(general_session.id, "do not wake task run")
+        .await
+        .unwrap();
+    assert!(
+        store.delivery_resume_candidates().await.unwrap().is_empty(),
+        "an unscoped Session must not wake an interrupted Task Run"
+    );
+
+    let task_session_id = first.session_id.expect("task launch should bind a Session");
+    store
+        .create_human_session_message(task_session_id, "continue this turn")
         .await
         .unwrap();
 

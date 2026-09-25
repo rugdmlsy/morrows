@@ -152,6 +152,22 @@ impl Store {
                 "Session already has an active Agent runtime".into(),
             ));
         }
+        let task_launch_active: bool = sqlx::query_scalar(
+            "SELECT EXISTS(
+                SELECT 1 FROM launch_attempts
+                WHERE session_id=?
+                  AND status IN ('queued','starting','running','awaiting_agent')
+            )",
+        )
+        .bind(session_id.to_string())
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(storage)?;
+        if task_launch_active {
+            return Err(DomainError::Conflict(
+                "Session already has an active Task launch".into(),
+            ));
+        }
 
         sqlx::query(
             "INSERT INTO session_runtime_attempts(
@@ -231,12 +247,19 @@ impl Store {
         launch_profile_id: Id,
     ) -> Result<Option<String>, DomainError> {
         let value: Option<String> = sqlx::query_scalar(
-            "SELECT provider_session_ref
-             FROM session_runtime_attempts
-             WHERE session_id=? AND launch_profile_id=?
-               AND provider_session_ref IS NOT NULL
+            "SELECT provider_ref FROM (
+                 SELECT provider_session_ref AS provider_ref,created_at,id
+                 FROM session_runtime_attempts
+                 WHERE session_id=? AND launch_profile_id=? AND provider_session_ref IS NOT NULL
+                 UNION ALL
+                 SELECT external_session_ref AS provider_ref,created_at,id
+                 FROM launch_attempts
+                 WHERE session_id=? AND launch_profile_id=? AND external_session_ref IS NOT NULL
+             )
              ORDER BY created_at DESC,id DESC LIMIT 1",
         )
+        .bind(session_id.to_string())
+        .bind(launch_profile_id.to_string())
         .bind(session_id.to_string())
         .bind(launch_profile_id.to_string())
         .fetch_optional(&self.pool)

@@ -73,7 +73,7 @@
 | **持久终端 / 终端** | `PersistentShell` | `shell session` | 运行空间内维持环境与状态的常驻命令行交互终端 |
 | **浏览器实例** | `BrowserInstance` | `browser session` | 运行空间内受控的有状态浏览器实例 |
 | **模型会话** | `ProviderThread` | `Provider Session` | Codex / Claude / Gemini 模型自身的连续私有对话流 |
-| **会话** | `Session` | `Conversation` | 人类与特定 Agent 实例之间的一对一持久化工作会话；属于一个 AgentInstance，可跨多次运行时 turn 持续存在 |
+| **会话** | `Session` | `Conversation` | 人类与特定 Agent 实例之间的一对一持久化工作会话；始终属于一个 AgentInstance，可为通用/项目/任务作用域，并跨多次运行时与工作执行持续存在 |
 | **上下文快照** | `ContextSnapshot` | `ContextRevision` | 某次工作执行初始化时冻结的完整工作背景、目标与记忆视图 |
 | **记忆** | `Memory` | `Memory` / `Context` | 长期持久化知识（跨越任务与会话），分组织/项目/员工/工作等作用域 |
 | **成果物** | `Artifact` | `Artifact` | 被正式归档、持久托管并可全局引用的工作交付物证据 |
@@ -81,7 +81,21 @@
 | **工作交接** | `Handoff` | `Handoff` | 工作责任从一个执行转交至另一个执行的结构化交接协议 |
 | **执行证据** | `WorkExecutionEvidence` | `RunExecutionEvidence`| 将工作语义状态与底层 LSM Audit、Job Logs 关联的追溯证据 |
 
-### 3.2 Agent 会话与指令规范
+### 3.2 会话作用域与工作执行关系
+
+`Session` 不是 `WorkExecution` 的别名，也不以一次 Run 的开始/结束为生命周期边界。
+
+- **通用会话**：仅绑定 AgentInstance，用于尚未正式归档到某个项目或工作项的讨论。
+- **项目会话**：绑定 Project + AgentInstance，用于项目级讨论；不自动创建 Task。
+- **任务会话**：绑定 Task + AgentInstance；Project 由 Task 自动推导，不能出现与 Task 不一致的 Project。
+- 一个 Task 可以有多个 Session，例如不同 Agent 的实现、review、测试会话；一个 Session 最多绑定一个 Task。
+- 本地 Task launch 必须绑定该 Task + AgentInstance 的开放 Session；若不存在，由 Morrows 自动创建。Run 重启继续使用同一个 Session。
+- Task launch 与显式 Session runtime 共享该 Session + LaunchProfile 下最新的 ProviderThread 引用，因此二者是同一长期对话的不同执行入口，而不是两套隐藏会话。
+- 通用或仅项目作用域的消息不得被 Task launch 消费，也不得触发无关中断 Run 的自动恢复。
+
+因此正式关系是：`WorkItem → WorkAssignment → WorkExecution/AgentLaunch` 表示责任与执行生命周期；`Session → ProviderThread` 表示长期交互连续性。两者在任务执行时通过 Session binding 相交，但不互相取代。
+
+### 3.3 Agent 会话与指令规范
 
 在 Agent 交互、系统 Prompt、MCP 工具说明及日志中，**严禁裸用 `session` 和 `run`**，统一采用标准术语：
 * ❌ 严禁使用：“请恢复上次 session”、“这个 run 执行完了没有”、“更新当前 context”。

@@ -2,7 +2,7 @@ use super::*;
 use axum::extract::Query;
 use morrows_core::{
     CreateSession, CreateSessionSummaryRevision, SessionRuntimeAttempt, SessionSummaryRevision,
-    StartSessionRuntime,
+    StartSessionRuntime, UpdateSessionScope,
 };
 use std::{path::PathBuf, process::Stdio};
 use tokio::{fs, io::AsyncWriteExt, process::Command};
@@ -11,6 +11,7 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/sessions", get(list).post(create))
         .route("/sessions/{id}", get(get_one))
+        .route("/sessions/{id}/scope", post(scope_update))
         .route(
             "/sessions/{id}/messages",
             get(messages).post(message_create),
@@ -32,22 +33,62 @@ pub fn routes() -> Router<AppState> {
 #[derive(Debug, Deserialize)]
 struct SessionListQuery {
     agent_instance_id: Option<Id>,
+    project_id: Option<Id>,
+    task_id: Option<Id>,
 }
 
 async fn list(
     State(state): State<AppState>,
     Query(query): Query<SessionListQuery>,
 ) -> Result<Json<Value>, ApiError> {
-    Ok(Json(json!(
-        state.store.list_sessions(query.agent_instance_id).await?
-    )))
+    let mut sessions = state.store.list_sessions(query.agent_instance_id).await?;
+    if let Some(project_id) = query.project_id {
+        sessions.retain(|session| session.project_id == Some(project_id));
+    }
+    if let Some(task_id) = query.task_id {
+        sessions.retain(|session| session.task_id == Some(task_id));
+    }
+    Ok(Json(json!(sessions)))
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateSessionRequest {
+    agent_instance_id: Id,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    project_id: Option<Id>,
+    #[serde(default)]
+    task_id: Option<Id>,
 }
 
 async fn create(
     State(state): State<AppState>,
-    Json(input): Json<CreateSession>,
+    Json(input): Json<CreateSessionRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    Ok(Json(json!(state.store.create_session(input).await?)))
+    Ok(Json(json!(
+        state
+            .store
+            .create_scoped_session(
+                CreateSession {
+                    agent_instance_id: input.agent_instance_id,
+                    title: input.title,
+                },
+                input.project_id,
+                input.task_id,
+            )
+            .await?
+    )))
+}
+
+async fn scope_update(
+    State(state): State<AppState>,
+    Path(id): Path<Id>,
+    Json(input): Json<UpdateSessionScope>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(json!(
+        state.store.update_session_scope(id, input).await?
+    )))
 }
 
 async fn get_one(
@@ -476,13 +517,14 @@ async fn run_session_runtime_child(
         )
         .await?;
 
+    let session = store.get_session(attempt.session_id).await?;
     let summary = store
         .get_latest_session_summary_revision(attempt.session_id)
         .await?;
     let deliveries = store
         .claim_session_deliveries_for_runtime(attempt.id, 100)
         .await?;
-    let prompt = build_session_runtime_prompt(attempt, summary.as_ref(), &deliveries);
+    let prompt = build_session_runtime_prompt(attempt, &session, summary.as_ref(), &deliveries);
 
     let Some(mut stdin) = child.stdin.take() else {
         let _ = child.kill().await;
@@ -530,6 +572,7 @@ async fn run_session_runtime_child(
 
 fn build_session_runtime_prompt(
     attempt: &SessionRuntimeAttempt,
+    session: &morrows_core::Session,
     summary: Option<&SessionSummaryRevision>,
     deliveries: &[morrows_core::AgentDelivery],
 ) -> String {
@@ -545,10 +588,20 @@ fn build_session_runtime_prompt(
         .unwrap_or_else(|| {
             "(none; use session_get to reconstruct from durable history)".to_owned()
         });
+    let scope = match (session.project_id, session.task_id) {
+        (_, Some(task_id)) => format!(
+            "This Session is scoped to Task {task_id}. Read task_get and memory_get for that Task before substantive work. This direct Session runtime is not itself a Task Run, so do not create or complete Runs unless a separate assigned Run explicitly exists."
+        ),
+        (Some(project_id), None) => format!(
+            "This Session is scoped to Project {project_id}. Use project-scoped durable memory and the Session history as context; do not invent a Task unless work is formally submitted."
+        ),
+        (None, None) => "This is a general Session with no Project or Task scope.".to_owned(),
+    };
     format!(
-        "You are AgentInstance {agent} started for Morrows Session {session}.\nThis is a conversational Session runtime, not a Task Run. Do not claim tasks or create/complete Runs.\nUse the configured Morrows MCP server as the durable source of truth. The latest structured Session summary is injected below as bounded recovery context. Treat it as a recovery aid, not as a substitute for canonical records: use session_summary_get if you need the exact latest structured summary, and use session_get for paged raw history or details not covered by the summary. Process the human messages and respond with session_reply. Update session_summary_revise after materially advancing the Session.\n\nLatest structured Session recovery summary:\n{recovery_summary}\n\nPending human messages already delivered to this runtime:\n{messages}\n",
+        "You are AgentInstance {agent} started for Morrows Session {session_id}.\n{scope}\nUse the configured Morrows MCP server as the durable source of truth. The latest structured Session summary is injected below as bounded recovery context. Treat it as a recovery aid, not as a substitute for canonical records: use session_summary_get if you need the exact latest structured summary, and use session_get for paged raw history or details not covered by the summary. Process the human messages and respond with session_reply. Update session_summary_revise after materially advancing the Session.\n\nLatest structured Session recovery summary:\n{recovery_summary}\n\nPending human messages already delivered to this runtime:\n{messages}\n",
         agent = attempt.agent_instance_id,
-        session = attempt.session_id,
+        session_id = attempt.session_id,
+        scope = scope,
         recovery_summary = recovery_summary,
         messages = if messages.is_empty() {
             "(none; inspect the Session with session_get)".to_owned()
@@ -672,6 +725,100 @@ mod tests {
         let status = response.status();
         let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
         (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    #[tokio::test]
+    async fn session_scope_can_follow_task_or_project_and_be_reassigned() {
+        let store = Store::connect("sqlite::memory:").await.unwrap();
+        let agent = store.register_agent("scoped-agent", &[]).await.unwrap();
+        let project = store
+            .create_project(morrows_core::CreateProject {
+                name: "Morrows".into(),
+                description: "Agent work OS".into(),
+            })
+            .await
+            .unwrap();
+        let task = store
+            .create_task(
+                serde_json::from_value(json!({
+                    "project_id": project.id,
+                    "title": "Unify sessions",
+                    "description": "Bind task execution to durable sessions"
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let app = routes().with_state(AppState {
+            store: store.clone(),
+        });
+
+        let (status, session) = response_json(
+            &app,
+            Request::builder()
+                .method("POST")
+                .uri("/sessions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "agent_instance_id": agent.id,
+                        "task_id": task.id,
+                        "title": "Task chat"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{session}");
+        assert_eq!(session["task_id"], json!(task.id));
+        assert_eq!(session["project_id"], json!(project.id));
+        let session_id = session["id"].as_str().unwrap();
+
+        let (status, task_sessions) = response_json(
+            &app,
+            Request::builder()
+                .uri(format!("/sessions?task_id={}", task.id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(task_sessions.as_array().unwrap().len(), 1);
+        assert_eq!(task_sessions[0]["project_name"], "Morrows");
+        assert_eq!(task_sessions[0]["task_title"], "Unify sessions");
+
+        let (status, project_scoped) = response_json(
+            &app,
+            Request::builder()
+                .method("POST")
+                .uri(format!("/sessions/{session_id}/scope"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"project_id": project.id, "task_id": null}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(project_scoped["project_id"], json!(project.id));
+        assert!(project_scoped["task_id"].is_null());
+
+        let (status, general) = response_json(
+            &app,
+            Request::builder()
+                .method("POST")
+                .uri(format!("/sessions/{session_id}/scope"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"project_id": null, "task_id": null}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(general["project_id"].is_null());
+        assert!(general["task_id"].is_null());
     }
 
     #[tokio::test]

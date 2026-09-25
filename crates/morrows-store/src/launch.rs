@@ -200,6 +200,51 @@ impl Store {
                 ));
             }
         }
+        let session_id = if let Some(resume_id) = input.resume_from_attempt_id {
+            let previous = row_to_launch_attempt(
+                sqlx::query("SELECT * FROM launch_attempts WHERE id=?")
+                    .bind(resume_id.to_string())
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(storage)?
+                    .ok_or_else(|| DomainError::NotFound(format!("launch attempt {resume_id}")))?,
+            )?;
+            match previous.session_id {
+                Some(session_id) => session_id,
+                None => {
+                    self.ensure_task_session_for_agent_tx(
+                        &mut tx,
+                        assignment.task_id,
+                        assignment.agent_instance_id,
+                    )
+                    .await?
+                }
+            }
+        } else {
+            self.ensure_task_session_for_agent_tx(
+                &mut tx,
+                assignment.task_id,
+                assignment.agent_instance_id,
+            )
+            .await?
+        };
+
+        let session_runtime_active: bool = sqlx::query_scalar(
+            "SELECT EXISTS(
+                SELECT 1 FROM session_runtime_attempts
+                WHERE session_id=? AND status IN ('queued','running')
+            )",
+        )
+        .bind(session_id.to_string())
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(storage)?;
+        if session_runtime_active {
+            return Err(DomainError::Conflict(
+                "Session already has an active direct Agent runtime".into(),
+            ));
+        }
+
         let already_active: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM launch_attempts WHERE assignment_id=? AND status IN ('queued','starting','running'))",
         )
@@ -229,14 +274,15 @@ impl Store {
             .map_err(storage)?;
         }
         sqlx::query(
-            "INSERT INTO launch_attempts(id,assignment_id,task_id,agent_instance_id,launch_profile_id,job_id,resume_from_attempt_id,status,cwd,created_at)
-             VALUES(?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO launch_attempts(id,assignment_id,task_id,agent_instance_id,launch_profile_id,session_id,job_id,resume_from_attempt_id,status,cwd,created_at)
+             VALUES(?,?,?,?,?,?,?,?,?,?,?)",
         )
         .bind(attempt_id.to_string())
         .bind(assignment.id.to_string())
         .bind(assignment.task_id.to_string())
         .bind(assignment.agent_instance_id.to_string())
         .bind(profile.id.to_string())
+        .bind(session_id.to_string())
         .bind(job_id.map(|value| value.to_string()))
         .bind(input.resume_from_attempt_id.map(|value| value.to_string()))
         .bind(if external { "awaiting_agent" } else { "queued" })
@@ -252,7 +298,7 @@ impl Store {
             "task",
             assignment.task_id,
             if external { "launch.awaiting_agent" } else { "launch.queued" },
-            json!({"launch_attempt_id":attempt_id,"assignment_id":assignment.id,"launch_profile_id":profile.id,"job_id":job_id,"resume_from_attempt_id":input.resume_from_attempt_id}),
+            json!({"launch_attempt_id":attempt_id,"assignment_id":assignment.id,"launch_profile_id":profile.id,"session_id":session_id,"job_id":job_id,"resume_from_attempt_id":input.resume_from_attempt_id}),
             None,
         )
         .await?;
@@ -452,14 +498,13 @@ impl Store {
             run_id
         } else {
             let run_id = Uuid::new_v4();
-            let current_ctx_rev: Option<String> = sqlx::query_scalar(
-                "SELECT current_context_revision_id FROM tasks WHERE id=?",
-            )
-            .bind(assignment.task_id.to_string())
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(storage)?
-            .flatten();
+            let current_ctx_rev: Option<String> =
+                sqlx::query_scalar("SELECT current_context_revision_id FROM tasks WHERE id=?")
+                    .bind(assignment.task_id.to_string())
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(storage)?
+                    .flatten();
 
             sqlx::query(
                 "INSERT INTO runs(id,task_id,assignment_id,agent_instance_id,status,started_at)
@@ -887,14 +932,13 @@ impl Store {
             ));
         }
         let run_id = Uuid::new_v4();
-        let current_ctx_rev: Option<String> = sqlx::query_scalar(
-            "SELECT current_context_revision_id FROM tasks WHERE id=?",
-        )
-        .bind(assignment.task_id.to_string())
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(storage)?
-        .flatten();
+        let current_ctx_rev: Option<String> =
+            sqlx::query_scalar("SELECT current_context_revision_id FROM tasks WHERE id=?")
+                .bind(assignment.task_id.to_string())
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(storage)?
+                .flatten();
 
         sqlx::query(
             "INSERT INTO runs(id,task_id,assignment_id,agent_instance_id,external_session_ref,status,started_at)
@@ -973,14 +1017,13 @@ impl Store {
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(storage)?;
-        let attempt_row = sqlx::query(
-            "SELECT status,task_id,agent_instance_id FROM launch_attempts WHERE id=?",
-        )
-        .bind(input.launch_attempt_id.to_string())
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(storage)?
-        .ok_or_else(|| DomainError::NotFound("launch attempt".into()))?;
+        let attempt_row =
+            sqlx::query("SELECT status,task_id,agent_instance_id FROM launch_attempts WHERE id=?")
+                .bind(input.launch_attempt_id.to_string())
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(storage)?
+                .ok_or_else(|| DomainError::NotFound("launch attempt".into()))?;
         let status: String = attempt_row.try_get("status").map_err(storage)?;
         let task_id = parse_id(attempt_row.try_get("task_id").map_err(storage)?)?;
         let agent_instance_id =
@@ -1389,6 +1432,7 @@ fn row_to_launch_attempt(row: sqlx::sqlite::SqliteRow) -> Result<LaunchAttempt, 
         agent_instance_id: parse_id(row.try_get("agent_instance_id").map_err(storage)?)?,
         launch_profile_id: parse_id(row.try_get("launch_profile_id").map_err(storage)?)?,
         run_id: parse_opt_id(row.try_get("run_id").map_err(storage)?)?,
+        session_id: parse_opt_id(row.try_get("session_id").map_err(storage)?)?,
         job_id: parse_opt_id(row.try_get("job_id").map_err(storage)?)?,
         resume_from_attempt_id: parse_opt_id(
             row.try_get("resume_from_attempt_id").map_err(storage)?,
