@@ -1,63 +1,68 @@
 # Morrows
 
-Local-first, agent-native work coordination for humans and multiple AI agent products/accounts.
+**简体中文** | [English](README.en.md)
 
-The current local vertical slice separates company control from employee operations:
+Morrows 是一个本地优先、Agent 原生的工作协作系统，用于协调人类与多个 AI Agent 产品、账号和运行环境。
 
-```
-Human / Web UI / automation
+当前的本地纵向切片明确区分“公司控制面”和“员工操作面”：
+
+```text
+人类 / Web UI / 自动化
           ↓ REST
-   Morrows control plane
-   ├─ registry / fleet
-   ├─ dispatcher
-   ├─ assignment / Run lifecycle
-   └─ provider launch adapters
+   Morrows 控制平面
+   ├─ 注册表 / Agent 团队
+   ├─ 调度器
+   ├─ 工作分配 / 执行生命周期
+   └─ Provider 启动适配器
           ↓
         Agent
-          ↓ employee MCP
-   work / memory / collaboration / reporting
+          ↓ 员工 MCP
+   工作 / 记忆 / 协作 / 汇报
 ```
 
-## Current implementation
+## 当前实现
 
 - Rust + Tokio
-- Axum HTTP server
+- Axum HTTP 服务
 - SQLite + SQLx migrations
-- React + Vite Web UI, served by the Rust daemon in production mode
-- MCP Streamable HTTP server using `rmcp 3.x`
-- Durable Task / Assignment / Run / ContextRevision / Event records
-- Atomic concurrent task claiming
-- Assignment lease renewal and automatic expiry scan
-- Run ownership checks at the store/domain boundary
-- Immutable context revisions
-- Long-term `MemoryEntry` records scoped to organization / project / Agent / task, with provenance and supersede chains
-- Durable Artifact / Decision / MessageThread / Message / Handoff / TaskDependency records
-- Directed agent messages with reply/correlation metadata
-- Atomic handoff creation and explicit acceptance linked to the accepting Run
-- Dependency cycle prevention and executor gating
-- Normalized AgentProfile / Account / Machine / AgentInstance identities
-- Owned heartbeats, append-only capacity observations, and joined Agent Fleet UI
-- Durable per-task dispatch policies and append-only dispatch decisions
-- Explainable capacity-aware Dispatcher with atomic Assignment creation
-- Durable executor LaunchProfile / LaunchAttempt records and background launch jobs
-- Safe Codex CLI launch, session resume, stop, and Run/session reconciliation
-- Durable launch instructions, visible in the Web UI and over the employee MCP
-- First-class Agent Sessions with summary-only list loading and paged message history
-- Session WebUI cache: history is fetched only after selection, then incrementally refreshed for the open Session
-- Employee Session inbox/read/reply MCP tools backed by a durable Agent delivery outbox
-- Issued/revocable Agent Bearer credentials; runtime credentials are short-lived and Run-bound, bridge credentials are explicitly issued by the local control plane
-- Issued/revocable control-plane Operator credentials with `viewer` / `operator` / `admin` RBAC; WebUI can persist an Operator token locally
-- External handoff adapters for LSM, Antigravity, and Gemini with owned accept/status
-- Startup recovery for interrupted local launch jobs
-- Optional LSM Run integration: one durable Logical Session per Run, scoped Codex MCP access, separate control API, execution evidence, explicit restart and bounded cleanup
-- Chinese/English Web UI with Chinese as the first-visit default
-- SQLite durable jobs for launcher work and a transactional Agent delivery outbox with provider resume
+- React + Vite Web UI；生产模式下由 Rust daemon 直接提供
+- 基于 `rmcp 3.x` 的 MCP Streamable HTTP 服务
+- 持久化 Task / Assignment / Run / ContextRevision / Event 记录
+- 原子化并发任务领取
+- Assignment lease 续期与自动过期扫描
+- 在 store/domain 边界进行 Run 所有权校验
+- 不可变 ContextRevision
+- 按 organization / project / Agent / task 作用域保存的长期 `MemoryEntry`，支持来源追踪与 supersede 链
+- 持久化 Artifact / Decision / MessageThread / Message / Handoff / TaskDependency
+- 支持 reply/correlation metadata 的 Agent 定向消息
+- 原子化 Handoff 创建，以及与接受方 Run 关联的显式接受流程
+- 依赖环检测与 executor gating
+- 规范化 AgentProfile / Account / Machine / AgentInstance 身份模型
+- 受所有权约束的 heartbeat、append-only capacity 观测，以及聚合 Agent Fleet UI
+- 持久化的逐任务调度策略与 append-only dispatch decision
+- 可解释、容量感知的 Dispatcher，以及原子 Assignment 创建
+- 持久化 executor LaunchProfile / LaunchAttempt 与后台 launch job
+- 安全的 Codex CLI 启动、Session 恢复、停止，以及 Run/Session 对账
+- 持久化 launch instruction，可在 Web UI 和员工 MCP 中查看
+- 一等公民 Agent Session：列表只加载摘要，消息历史分页读取
+- Session WebUI 缓存：只有选中 Session 后才拉取历史，并仅对当前 Session 增量刷新
+- 基于持久化 Agent delivery outbox 的员工 Session inbox/read/reply MCP 工具
+- 可签发/撤销的 Agent Bearer credential；runtime credential 短期且绑定 Run，bridge credential 由本地控制面显式签发
+- 可签发/撤销的控制平面 Operator credential，支持 `viewer` / `operator` / `admin` RBAC；WebUI 可在本地保存 Operator token
+- LSM、Antigravity、Gemini 等 external handoff adapter，以及受所有权约束的 accept/status
+- 本地 launch job 中断后的启动恢复
+- 可选 LSM Run 集成：每个 Run 一个持久 Logical Session、作用域化 Codex MCP 权限、独立 control API、执行证据、显式 restart 与有界 cleanup
+- 中英文 Web UI，首次访问默认中文
+- SQLite 持久化 launcher job 与支持 provider resume 的事务型 Agent delivery outbox
+- Agent Fleet 可手动添加 Codex Agent：选择现有 `auth.json`，自动解析已验证邮箱，并导入到独立 `CODEX_HOME`
+- 每个受管 Codex Account 使用独立认证目录；认证文件不写入 Morrows 数据库，也不会提交到 Git
+- 可复用的本地部署脚本 `scripts/deploy.sh`，负责构建、重启 tmux 服务并执行健康检查
 
-Not yet implemented: direct process control for all external agent products, interactive multi-user accounts/SSO, built-in TLS termination, or distributed deployment. External adapters invite an existing agent session; they do not open those products automatically.
+尚未实现：所有外部 Agent 产品的直接进程控制、交互式多用户账号/SSO、内置 TLS 终止、分布式部署。当前 external adapter 会邀请已有 Agent Session，而不会自动打开对应产品。
 
-## Run
+## 运行
 
-From the repository root, local development can still be started directly:
+从仓库根目录开始。用于本地开发时仍可直接运行：
 
 ```bash
 cd web
@@ -68,59 +73,62 @@ cd ..
 cargo run -p morrows-server
 ```
 
-For the normal local deployment/restart flow, use:
+正常的本地部署/重启流程推荐使用：
 
 ```bash
 ./scripts/deploy.sh
 ```
 
-This runs the Rust workspace tests, builds the Web UI and server, restarts the dedicated
-`tmux -L morrows` / `morrows-server` session, and waits for `/api/health`.
-When the current changes have already been tested and only a rebuild/restart is needed:
+该脚本会运行 Rust workspace 测试、构建 Web UI 与后端、重启专用的
+`tmux -L morrows` / `morrows-server` Session，并等待 `/api/health` 成功。
+
+如果当前代码已经测试过，只需要重新构建并重启：
 
 ```bash
 ./scripts/deploy.sh --fast
 ```
 
-Then open:
+随后打开：
 
-```
+```text
 http://127.0.0.1:8787
 ```
 
-Environment variables:
+环境变量：
 
 ```bash
 MORROWS_DATABASE_URL=sqlite://data/morrows.db
 MORROWS_BIND=127.0.0.1:8787
 MORROWS_WEB_DIR=web/dist
 MORROWS_LAUNCH_DIR=data/launches
-# Optional loopback LSM integration
+
+# 可选：loopback LSM 集成
 MORROWS_LSM_CONTROL_URL=http://127.0.0.1:8765
 MORROWS_LSM_CONTROL_KEY=<same value as LOCAL_SHELL_MCP_CONTROL_API_KEY>
 MORROWS_LSM_SUBJECT=local-mcp-client
 MORROWS_AGENT_RESTART_GRACE_SECONDS=600
-# Optional on loopback; required for any remote-facing deployment
+
+# loopback 上可选；任何面向远程的部署都要求开启
 MORROWS_REQUIRE_AGENT_AUTH=1
 MORROWS_REQUIRE_OPERATOR_AUTH=1
 
-# Bootstrap admin credential used only to mint the first durable admin token.
-# Remove it from the environment after bootstrapping.
+# Bootstrap admin credential，仅用于签发第一个持久 admin token。
+# 完成 bootstrap 后应从环境中移除并重启。
 MORROWS_BOOTSTRAP_OPERATOR_TOKEN=mrw_operator_<secret>
 
-# Direct non-loopback plaintext HTTP remains blocked by default.
-# Prefer loopback + TLS reverse proxy. Development override only:
+# 默认禁止直接通过非 loopback 的明文 HTTP 暴露服务。
+# 推荐 loopback + TLS reverse proxy。以下仅用于隔离开发环境：
 MORROWS_ALLOW_INSECURE_REMOTE_HTTP=0
 ```
 
-## Test
+## 测试
 
 ```bash
 cargo test --workspace
 cd web && npm run build
 ```
 
-or:
+或：
 
 ```bash
 ./scripts/check.sh
@@ -128,85 +136,107 @@ or:
 
 ## MCP
 
-Morrows exposes a Streamable HTTP MCP endpoint for **employee operations**, not for company administration:
+Morrows 暴露一个 Streamable HTTP MCP endpoint，用于**员工操作**，而不是公司管理：
 
-```
+```text
 http://127.0.0.1:8787/mcp
 ```
 
-Employee MCP calls support issued Bearer credentials:
+员工 MCP 调用支持签发的 Bearer credential：
 
-```
+```text
 Authorization: Bearer mrw_agent_<secret>
-X-Agent-Instance-Id: <uuid>   # optional with Bearer; if present it must match
+X-Agent-Instance-Id: <uuid>   # 使用 Bearer 时可选；若提供则必须匹配
 ```
 
-The local control plane can issue/list/revoke bridge credentials with `/api/agents/{id}/credentials` and `/api/agent-credentials/{id}/revoke`. Provider launchers use separate Run-bound runtime credentials and revoke them when the launch attempt finishes. Set `MORROWS_REQUIRE_AGENT_AUTH=1` to reject the legacy identity-header-only path even on loopback.
+本地控制面可通过 `/api/agents/{id}/credentials` 和 `/api/agent-credentials/{id}/revoke` 签发、列出和撤销 bridge credential。Provider launcher 使用独立的、绑定 Run 的 runtime credential，并在 launch attempt 结束后撤销。设置 `MORROWS_REQUIRE_AGENT_AUTH=1` 后，即使在 loopback 上也会拒绝旧的仅 identity-header 模式。
 
-The MCP surface intentionally does **not** expose agent/profile/account/machine registration, fleet state, capacity, dispatch policy, dispatch, assignment claiming, Run creation, launch profile management, launch/cancel operations, or dependency graph administration. Those remain control-plane responsibilities through REST/store/provider adapters.
+MCP surface 有意**不提供** Agent/profile/account/machine 注册、fleet 状态、capacity、dispatch policy、dispatch、Assignment 领取、Run 创建、LaunchProfile 管理、launch/cancel 或 dependency graph 管理。这些仍属于控制平面的 REST/store/provider adapter 职责。
 
-## Control-plane Operator auth
+## 控制平面 Operator 认证
 
-Control-plane REST supports issued `mrw_operator_*` Bearer credentials. `viewer` can read control-plane state; `operator` can mutate ordinary work/dispatch/launch state; `admin` additionally manages identities and Agent/Operator credentials. Bootstrap access uses `MORROWS_BOOTSTRAP_OPERATOR_TOKEN` as temporary admin authority; after issuing a durable admin credential, remove the bootstrap token from the environment and restart.
+控制平面 REST 支持签发的 `mrw_operator_*` Bearer credential。`viewer` 可读取控制面状态；`operator` 可修改普通 work/dispatch/launch 状态；`admin` 还可以管理身份以及 Agent/Operator credential。
 
-Credential management endpoints are `GET/POST /api/operator-credentials` and `POST /api/operator-credentials/{id}/revoke`. Only hashes are stored in SQLite and list responses never return token/hash material. The WebUI top bar can store one Operator token in browser local storage and attaches it to `/api/*` control-plane requests.
+Bootstrap 阶段使用 `MORROWS_BOOTSTRAP_OPERATOR_TOKEN` 作为临时 admin 权限；签发持久 admin credential 后，应从环境中移除 bootstrap token 并重启。
 
-Employee MCP tools currently cover:
+Credential 管理 endpoint：
 
-- `session_inbox`, `session_get`, `session_reply`: receive and answer Agent Sessions addressed to the caller.
-- `work_request_submit`: submit a new work request without choosing priority, assignee, or launcher.
-- `task_get`: read work owned by or assigned to the caller.
-- `memory_get` / `memory_revise`: pull or revise durable task working memory. `memory_get` includes relevant organization/project/Agent/task long-term `MemoryEntry` records, current context, collaboration records, and the caller's Run history.
-- `instructions_get`: read management instructions attached to the caller's work.
-- `artifact_create`, `decision_create`, `thread_create`, `message_create`: record work products and collaboration.
-- `handoff_create`, `handoff_get`, `handoff_accept`, `task_collaboration`: continue work across employees without sharing provider chat history.
-- `assignment_renew`, `run_checkpoint`, `run_complete`, `task_events`: maintain an existing assignment and report progress/completion.
+- `GET/POST /api/operator-credentials`
+- `POST /api/operator-credentials/{id}/revoke`
 
-Task-scoped MCP reads and collaboration writes verify that the caller owns the submitted request or has an Assignment history for that Task. MCP can report or collaborate on work, but it cannot create its own Assignment or Run.
+SQLite 中只保存 hash，列表响应不会返回 token/hash 原文。WebUI 顶栏可在浏览器 local storage 中保存一个 Operator token，并自动附加到 `/api/*` 控制平面请求。
 
-Sessions are separate from Task collaboration. The WebUI loads only Session summaries at startup; selecting a Session loads the latest message page into an in-memory cache, older history is fetched explicitly, and only the selected Session polls for new messages. Human messages are durable and remain awaiting reply until the addressed Agent replies. A separate transactional `AgentDelivery` exposes only two user-facing delivery states: awaiting delivery and delivered; delivered means Morrows successfully wrote the message into an Agent runtime prompt. Queued messages can be recalled before runtime claim. The WebUI can explicitly start/resume a local Agent CLI for a Session through a dedicated Session runtime that binds AgentInstance, Account, LaunchProfile, Morrows Session, and the persisted provider thread/session reference without creating a fake Task or Run.
+当前员工 MCP 工具包括：
 
-External adapters such as `lsm_external`, `antigravity_external`, `gemini_external`, and `codebuddy_external` remain compatibility launch backends. Their lifecycle endpoints are control-plane REST operations; they are no longer exposed as employee MCP tools. Provider-specific active launch adapters should be preferred when an automation API/CLI exists.
+- `session_inbox`、`session_get`、`session_reply`：接收并回复发给当前 Agent 的 Session。
+- `work_request_submit`：提交新的工作请求，但不能自行选择优先级、负责人或 launcher。
+- `task_get`：读取当前 Agent 创建或被分配到的工作。
+- `memory_get` / `memory_revise`：读取或修订持久工作记忆。`memory_get` 同时包含相关 organization/project/Agent/task 长期 `MemoryEntry`、当前上下文、协作记录和当前 Agent 的 Run 历史。
+- `instructions_get`：读取管理层附加到当前工作的指令。
+- `artifact_create`、`decision_create`、`thread_create`、`message_create`：记录成果与协作信息。
+- `handoff_create`、`handoff_get`、`handoff_accept`、`task_collaboration`：无需共享 Provider chat history 即可跨 Agent 延续工作。
+- `assignment_renew`、`run_checkpoint`、`run_complete`、`task_events`：维护已有 Assignment 并汇报进度/完成状态。
 
-`MORROWS_*` settings take precedence; the former `AC_*` settings remain accepted during migration.
+Task-scoped MCP 的读取和协作写入会验证：调用者是否创建了该请求，或是否拥有该 Task 的 Assignment 历史。MCP 可以汇报与协作，但不能给自己创建 Assignment 或 Run。
 
-`X-Agent-Instance-Id` remains an identity binding hint, not a secret. Issued Agent and Operator Bearer credentials are stored only as SHA-256 hashes, and the two credential classes cannot cross their authorization planes. Morrows still refuses direct non-loopback plaintext HTTP by default even when both auth systems are strict, because Bearer credentials require transport security. For remote use, keep Morrows on loopback and expose it through a TLS reverse proxy; `MORROWS_ALLOW_INSECURE_REMOTE_HTTP=1` exists only for isolated development.
+Session 与 Task collaboration 相互独立。WebUI 启动时只加载 Session 摘要；选中某个 Session 后，才将最新消息页载入内存缓存；更老历史需要显式加载，并且只有当前选中的 Session 会轮询新消息。
 
-## Three-Plane Architecture & Core Invariant
+人类消息会持久保存，并在目标 Agent 回复前保持等待状态。独立的事务型 `AgentDelivery` 只暴露两个面向用户的投递状态：**等待投递**与**已投递**；“已投递”表示 Morrows 已成功把消息写入 Agent runtime prompt。消息在 runtime claim 前可以撤回。
 
-Morrows cleanly decouples into three planes:
-1. **Morrows Control Plane**: Source of truth for work semantics, assignments, context snapshots, long-term memory, decisions, and artifacts.
-2. **LSM Runtime Plane**: Source of truth for host execution resources, isolated runtime scopes, jobs, shells, and execution audit.
-3. **Provider Plane**: Source of truth for model-private rollout sessions, tool representations, and reasoning traces. Provider sessions are private and never directly shared.
+WebUI 可以为某个 Session 显式启动/恢复本地 Agent CLI。专用 Session runtime 会绑定 AgentInstance、Account、LaunchProfile、Morrows Session 和持久化 Provider thread/session reference，而不会伪造 Task 或 Run。
 
-> **Ultimate Recovery Invariant (终极恢复原则)**:
-> Task identity is independent of model, account, machine, Morrows Session, and Provider Thread. Even if the original Agent process, Provider Session, execution machine, and temporary workspace directories disappear completely, a new Agent can reconstruct full state and proceed solely from Morrows canonical records.
+`lsm_external`、`antigravity_external`、`gemini_external`、`codebuddy_external` 等 external adapter 仍作为兼容 launch backend 存在。它们的生命周期 endpoint 属于控制平面 REST，不再暴露为员工 MCP 工具。当 Provider 存在自动化 API/CLI 时，应优先使用 Provider-specific active launch adapter。
 
-### Normalized Naming Model (去歧义术语对照)
+`MORROWS_*` 配置优先；旧的 `AC_*` 设置在迁移阶段仍兼容。
 
-To avoid ambiguity from bare words like `session` and `run`, Morrows adopts a collaborative, Feishu-inspired user layer and precise system-layer definitions:
+`X-Agent-Instance-Id` 仍只是身份绑定提示，不是 secret。Agent 与 Operator Bearer credential 都只以 SHA-256 hash 形式存储，且两个 credential class 不能跨授权平面使用。
+
+即使 Agent/Operator 认证都处于严格模式，Morrows 默认仍拒绝直接面向非 loopback 的明文 HTTP，因为 Bearer credential 需要传输层安全。远程使用时，应让 Morrows 继续监听 loopback，并通过 TLS reverse proxy 暴露；`MORROWS_ALLOW_INSECURE_REMOTE_HTTP=1` 只用于隔离开发环境。
+
+## 三平面架构与核心恢复原则
+
+Morrows 明确拆分为三个平面：
+
+1. **Morrows Control Plane**：工作语义、工作分配、上下文快照、长期记忆、决策和成果物的事实来源。
+2. **LSM Runtime Plane**：主机执行资源、隔离运行空间、Job、Shell 和执行审计的事实来源。
+3. **Provider Plane**：模型私有 rollout Session、工具表示和 reasoning trace 的事实来源。Provider Session 属于私有状态，不直接在 Agent 之间共享。
+
+> **终极恢复原则（Ultimate Recovery Invariant）**
+>
+> Task 身份独立于模型、账号、机器、Morrows Session 和 Provider Thread。即使原 Agent 进程、Provider Session、执行机器和临时 workspace 全部消失，新 Agent 仍应能仅依靠 Morrows 的 canonical records 重建完整状态并继续工作。
+
+### 规范化命名模型
+
+为避免裸用 `session`、`run` 等词造成歧义，Morrows 在用户层采用偏协作产品的中文命名，在系统层保留精确定义：
 
 | 用户层 / 沟通词汇 | 系统层正式英文 | 历史代码别名 | 核心定义与语义范围 |
 | :--- | :--- | :--- | :--- |
-| **工作项** | `WorkItem` | `Task` | 组织内需要完成的一件客观工作任务，具独立生命周期 |
-| **工作分配** | `WorkAssignment` | `Assignment` | 某个 Agent 实例对工作项中某特定角色的有期限责任（带租约 Lease） |
+| **工作项** | `WorkItem` | `Task` | 组织内需要完成的一件客观工作，具有独立生命周期 |
+| **工作分配** | `WorkAssignment` | `Assignment` | 某个 Agent 实例对工作项中某特定角色的有期限责任，带 Lease |
 | **工作执行**（前端：执行记录） | `WorkExecution` | `Run` | 某个 Agent 对一次工作分配的具体逻辑执行过程 |
-| **启动记录 / 启动尝试** | `AgentLaunch` | `LaunchAttempt` | 系统为推进工作执行，实际启动一次具体 Agent 进程的记录 |
-| **运行空间** | `RuntimeScope` | LSM `Logical Session` | LSM 运行时为一次工作执行划定的安全隔离执行范围与权限作用域 |
-| **执行任务** | `RuntimeJob` | LSM `Job` | 在运行空间内异步执行的具体机器任务（如 `cargo test`） |
-| **持久终端 / 终端** | `PersistentShell` | `shell session` | 运行空间内维持环境与状态的常驻命令行交互终端 |
-| **浏览器实例** | `BrowserInstance` | `browser session` | 运行空间内受控的有状态浏览器实例 |
+| **启动记录 / 启动尝试** | `AgentLaunch` | `LaunchAttempt` | 系统为推进工作执行而实际启动一次具体 Agent 进程的记录 |
+| **运行空间** | `RuntimeScope` | LSM `Logical Session` | LSM 为一次工作执行划定的安全隔离范围与权限作用域 |
+| **执行任务** | `RuntimeJob` | LSM `Job` | 在运行空间内异步执行的具体机器任务，例如 `cargo test` |
+| **持久终端 / 终端** | `PersistentShell` | `shell session` | 运行空间内维持环境和状态的常驻命令行交互终端 |
+| **浏览器实例** | `BrowserInstance` | `browser session` | 运行空间内受控、有状态的浏览器实例 |
 | **模型会话** | `ProviderThread` | `Provider Session` | Codex / Claude / Gemini 模型自身的连续私有对话流 |
-| **会话** | `Session` | `Conversation` | 人类与特定 Agent 实例之间的一对一持久化工作会话；属于一个 AgentInstance，可跨多次运行时 turn 持续存在 |
+| **会话** | `Session` | `Conversation` | 人类与特定 AgentInstance 之间的一对一持久工作会话，可跨多次 runtime turn 持续存在 |
 | **上下文快照** | `ContextSnapshot` | `ContextRevision` | 某次工作执行初始化时冻结的完整工作背景、目标与记忆视图 |
-| **记忆** | `Memory` | `Memory` / `Context` | 长期持久化知识（跨越任务与会话），分组织/项目/员工/工作等作用域 |
-| **成果物** | `Artifact` | `Artifact` | 被正式归档、持久托管并可全局引用的工作交付物证据（Managed Store） |
-| **决策记录** | `Decision` | `Decision` | 经确认的、对后续工作产生约束与指导的技术或业务决断 |
+| **记忆** | `Memory` | `Memory` / `Context` | 跨任务与 Session 长期保存的知识，分 organization/project/Agent/task 等作用域 |
+| **成果物** | `Artifact` | `Artifact` | 被正式归档、持久托管并可全局引用的工作交付物证据 |
+| **决策记录** | `Decision` | `Decision` | 经确认、会约束或指导后续工作的技术或业务决策 |
 | **工作交接** | `Handoff` | `Handoff` | 工作责任从一个执行转交至另一个执行的结构化交接协议 |
-| **执行证据** | `WorkExecutionEvidence` | `RunExecutionEvidence`| 将工作语义状态与底层 LSM Audit、Job Logs 关联的追溯证据 |
+| **执行证据** | `WorkExecutionEvidence` | `RunExecutionEvidence` | 将工作语义状态与底层 LSM Audit / Job Logs 关联的追溯证据 |
 
-> 完整规范请参阅：[docs/agent-work-and-context-spec.md](file:///Users/huayuxue/workspaces/morrows/docs/agent-work-and-context-spec.md) 与 [docs/architecture.md](file:///Users/huayuxue/workspaces/morrows/docs/architecture.md)
+完整规范见：
 
-## Live handoff validation
+- [docs/agent-work-and-context-spec.md](docs/agent-work-and-context-spec.md)
+- [docs/architecture.md](docs/architecture.md)
 
-M2.1 was exercised with two separate `codex-personal` CLI sessions and two distinct AgentInstances. Agent A created a typed artifact, decision, directed message, and pending handoff, which released A's assignment and ended A's Run as handed off. After the control plane assigned Agent B and created its Run, B reconstructed the state through employee MCP only, accepted the handoff, replied in the original thread, checkpointed the recovered state, and completed the task. No Codex session/chat history was shared between A and B.
+## 实际 Handoff 验证
+
+M2.1 曾使用两个独立的 `codex-personal` CLI Session 和两个不同的 AgentInstance 做过完整验证。
+
+Agent A 创建 typed artifact、decision、directed message 和 pending handoff；Handoff 创建后释放 A 的 Assignment，并将 A 的 Run 结束为 handed off。随后控制平面把工作分配给 Agent B 并创建它的 Run。Agent B **只通过员工 MCP** 重建状态、接受 Handoff、在原 thread 中回复、checkpoint 恢复后的状态并完成任务。
+
+整个过程中，A 与 B 之间没有共享任何 Codex Session/chat history。
