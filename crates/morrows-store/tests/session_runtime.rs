@@ -1,4 +1,4 @@
-use morrows_core::{CreateSession, RegisterLaunchProfile, StartSessionRuntime};
+use morrows_core::{CreateSession, RegisterLaunchProfile, StartSessionRuntime, UpdateSessionScope};
 use morrows_store::Store;
 use serde_json::json;
 
@@ -197,6 +197,20 @@ async fn task_launch_and_direct_runtime_are_mutually_exclusive_for_one_session()
         .await;
     assert!(matches!(
         blocked_direct,
+        Err(morrows_core::DomainError::Conflict(_))
+    ));
+
+    let blocked_scope_change = store
+        .update_session_scope(
+            session.id,
+            UpdateSessionScope {
+                project_id: None,
+                task_id: None,
+            },
+        )
+        .await;
+    assert!(matches!(
+        blocked_scope_change,
         Err(morrows_core::DomainError::Conflict(_))
     ));
 }

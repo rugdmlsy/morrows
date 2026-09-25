@@ -54,7 +54,18 @@ impl MorrowsMcp {
         {
             return Ok(());
         }
-        Err("task is not owned by or assigned to the authenticated agent instance".into())
+        if self
+            .store
+            .agent_has_open_task_session(task_id, agent_id)
+            .await
+            .map_err(|e| e.to_string())?
+        {
+            return Ok(());
+        }
+        Err(
+            "task is not owned by, assigned to, or shared through an open Task Session with the authenticated agent instance"
+                .into(),
+        )
     }
 }
 
@@ -636,7 +647,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Pull the current durable working memory for a work item owned by or assigned to the authenticated employee. Requires authenticated Agent identity."
+        description = "Pull the current durable working memory for a work item owned by, assigned to, or explicitly shared through an open Task Session with the authenticated employee. Requires authenticated Agent identity."
     )]
     async fn memory_get(
         &self,
@@ -689,7 +700,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Write a new immutable working-memory revision for a work item owned by or assigned to the authenticated employee. Requires authenticated Agent identity."
+        description = "Write a new immutable working-memory revision for a work item owned by, assigned to, or explicitly shared through an open Task Session with the authenticated employee. Requires authenticated Agent identity."
     )]
     async fn memory_revise(
         &self,
@@ -791,7 +802,7 @@ impl ServerHandler for MorrowsMcp {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_instructions(
-                "Morrows employee interface. The company control plane owns registration, fleet state, dispatch, assignment, Run creation, launch, cancellation, and scheduling. Employees may read their durable delivery inbox and acknowledge deliveries, read/reply to direct company sessions, maintain structured summaries for sessions addressed to them, access only work they own or have been assigned, pull/update working memory, receive instructions, collaborate, hand off work, renew an existing lease, and report progress or completion. Use the issued Bearer Agent credential; X-Agent-Instance-Id is an optional subject binding and must match when present. Loopback legacy mode may temporarily accept the identity header without a Bearer credential."
+                "Morrows employee interface. The company control plane owns registration, fleet state, dispatch, assignment, Run creation, launch, cancellation, and scheduling. Employees may read their durable delivery inbox and acknowledge deliveries, read/reply to direct company sessions, maintain structured summaries for sessions addressed to them, access work they own, have been assigned, or were explicitly shared through an open Task Session, pull/update working memory, receive instructions, collaborate, hand off work, renew an existing lease, and report progress or completion. Use the issued Bearer Agent credential; X-Agent-Instance-Id is an optional subject binding and must match when present. Loopback legacy mode may temporarily accept the identity header without a Bearer credential."
             )
     }
 }
@@ -842,6 +853,50 @@ mod tests {
                 "{field} must be an object JSON Schema for strict MCP clients"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn task_scoped_session_grants_explicit_task_access() {
+        let store = Store::connect("sqlite::memory:").await.unwrap();
+        let agent = store.register_agent("session-reader", &[]).await.unwrap();
+        let task = store
+            .create_task(
+                serde_json::from_value(json!({
+                    "title": "Scoped task",
+                    "description": "Share through a Session"
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let mcp = MorrowsMcp::new(store.clone());
+
+        assert!(mcp.ensure_task_access(task.id, agent.id).await.is_err());
+
+        let session = store
+            .create_scoped_session(
+                morrows_core::CreateSession {
+                    agent_instance_id: agent.id,
+                    title: "Task discussion".into(),
+                },
+                None,
+                Some(task.id),
+            )
+            .await
+            .unwrap();
+        assert!(mcp.ensure_task_access(task.id, agent.id).await.is_ok());
+
+        store
+            .update_session_scope(
+                session.id,
+                morrows_core::UpdateSessionScope {
+                    project_id: None,
+                    task_id: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(mcp.ensure_task_access(task.id, agent.id).await.is_err());
     }
 
     #[tokio::test]

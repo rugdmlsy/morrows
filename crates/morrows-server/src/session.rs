@@ -593,7 +593,7 @@ fn build_session_runtime_prompt(
             "This Session is scoped to Task {task_id}. Read task_get and memory_get for that Task before substantive work. This direct Session runtime is not itself a Task Run, so do not create or complete Runs unless a separate assigned Run explicitly exists."
         ),
         (Some(project_id), None) => format!(
-            "This Session is scoped to Project {project_id}. Use project-scoped durable memory and the Session history as context; do not invent a Task unless work is formally submitted."
+            "This Session is scoped to Project {project_id}. Treat the Project association and Session history as durable context; do not invent a Task unless work is formally submitted."
         ),
         (None, None) => "This is a general Session with no Project or Task scope.".to_owned(),
     };

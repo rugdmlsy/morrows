@@ -97,6 +97,32 @@ impl Store {
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(storage)?;
+        let active_runtime: bool = sqlx::query_scalar(
+            "SELECT EXISTS(
+                SELECT 1 FROM session_runtime_attempts
+                WHERE session_id=? AND status IN ('queued','running')
+            )",
+        )
+        .bind(id.to_string())
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(storage)?;
+        if active_runtime {
+            return Err(DomainError::Conflict(
+                "cannot change Session scope while its Agent runtime is active".into(),
+            ));
+        }
+        let launch_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM launch_attempts WHERE session_id=?")
+                .bind(id.to_string())
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(storage)?;
+        if launch_count > 0 {
+            return Err(DomainError::Conflict(
+                "cannot change Session scope after it has been used by a Task launch".into(),
+            ));
+        }
         sqlx::query("UPDATE sessions SET project_id=?,task_id=?,updated_at=? WHERE id=?")
             .bind(project_id.map(|value| value.to_string()))
             .bind(task_id.map(|value| value.to_string()))
@@ -217,6 +243,26 @@ impl Store {
         )
         .await?;
         Ok(id)
+    }
+
+    pub async fn agent_has_open_task_session(
+        &self,
+        task_id: Id,
+        agent_id: Id,
+    ) -> Result<bool, DomainError> {
+        self.get_task(task_id).await?;
+        self.get_agent(agent_id).await?;
+        sqlx::query_scalar(
+            "SELECT EXISTS(
+                SELECT 1 FROM sessions
+                WHERE task_id=? AND agent_instance_id=? AND status='open'
+            )",
+        )
+        .bind(task_id.to_string())
+        .bind(agent_id.to_string())
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage)
     }
 
     pub async fn get_session(&self, id: Id) -> Result<Session, DomainError> {
