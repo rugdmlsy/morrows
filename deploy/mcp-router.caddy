@@ -1,0 +1,35 @@
+# Morrows shares the existing mcp.xycdev.com Cloudflare Tunnel.
+# Cloudflared continues to target 127.0.0.1:8765. Caddy owns that local
+# listener and passes non-Morrows traffic unchanged to Local Shell MCP :8766.
+http://127.0.0.1:8765 {
+	@morrows_mcp path /morrows /morrows/
+	handle @morrows_mcp {
+		rewrite * /mcp
+		reverse_proxy 127.0.0.1:8787
+	}
+
+	@morrows_health path /morrows/health
+	handle @morrows_health {
+		rewrite * /api/health
+		reverse_proxy 127.0.0.1:8787
+	}
+
+	handle /morrows/api/* {
+		uri strip_prefix /morrows
+		reverse_proxy 127.0.0.1:8787
+	}
+
+	handle /morrows/ui/* {
+		uri strip_prefix /morrows/ui
+		reverse_proxy 127.0.0.1:8787
+	}
+
+	@morrows_ui_root path /morrows/ui
+	handle @morrows_ui_root {
+		redir /morrows/ui/ 308
+	}
+
+	handle {
+		reverse_proxy 127.0.0.1:8766
+	}
+}

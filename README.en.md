@@ -73,26 +73,41 @@ cd ..
 cargo run -p morrows-server
 ```
 
-For the normal local deployment/restart flow, use:
+Production is deployed to the OVH VPS by default. After committing and pushing, run locally:
+
+```bash
+./scripts/deploy-vps.sh
+```
+
+The script synchronizes `main` on the VPS, builds the Web UI and release server, and
+restarts `morrows.service`. Morrows itself listens only on VPS loopback
+`127.0.0.1:8787`; the public MCP endpoint is exposed through the existing Cloudflare
+Tunnel and VPS routing layer at:
+
+```text
+https://mcp.xycdev.com/morrows
+```
+
+The same instance exposes the WebUI at:
+
+```text
+https://mcp.xycdev.com/morrows/ui/
+```
+
+Public control-plane API calls require an Operator Bearer credential; the WebUI top bar can persist that token.
+
+Local Shell MCP on the VPS moves to `127.0.0.1:8766`. A loopback router owns
+`127.0.0.1:8765`: only `/morrows` is sent to Morrows and every other path continues
+to Local Shell MCP, so the existing `https://mcp.xycdev.com/mcp` endpoint is unchanged.
+
+For local development, the previous tmux deployment remains available:
 
 ```bash
 ./scripts/deploy.sh
-```
-
-This runs the Rust workspace tests, builds the Web UI and server, restarts the dedicated
-`tmux -L morrows` / `morrows-server` Session, and waits for `/api/health`.
-
-When the current changes have already been tested and only a rebuild/restart is needed:
-
-```bash
 ./scripts/deploy.sh --fast
 ```
 
-Then open:
-
-```text
-http://127.0.0.1:8787
-```
+The local development address remains `http://127.0.0.1:8787`.
 
 Environment variables:
 
@@ -103,7 +118,7 @@ MORROWS_WEB_DIR=web/dist
 MORROWS_LAUNCH_DIR=data/launches
 
 # Optional loopback LSM integration
-MORROWS_LSM_CONTROL_URL=http://127.0.0.1:8765
+MORROWS_LSM_CONTROL_URL=http://127.0.0.1:8766
 MORROWS_LSM_CONTROL_KEY=<same value as LOCAL_SHELL_MCP_CONTROL_API_KEY>
 MORROWS_LSM_SUBJECT=local-mcp-client
 MORROWS_AGENT_RESTART_GRACE_SECONDS=600

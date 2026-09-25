@@ -1,0 +1,19 @@
+[Unit]
+Description=Morrows Agent Work OS
+After=network-online.target local-shell-mcp.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=morrow
+Group=morrow
+WorkingDirectory=/srv/morrow/workspaces/morrows
+Environment=HOME=/home/morrow
+EnvironmentFile=/home/morrow/.config/morrows/service.env
+ExecStart=/srv/morrow/workspaces/morrows/target/release/morrows-server
+Restart=on-failure
+RestartSec=3
+KillMode=control-group
+
+[Install]
+WantedBy=multi-user.target

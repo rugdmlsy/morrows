@@ -9,9 +9,16 @@ export function setOperatorToken(token: string) {
   window.dispatchEvent(new CustomEvent("morrows-operator-token-changed"));
 }
 
+function publicPath(path: string) {
+  const hostedUnderMorrows = window.location.pathname === "/morrows/ui"
+    || window.location.pathname.startsWith("/morrows/ui/");
+  if (hostedUnderMorrows && path.startsWith("/api/")) return `/morrows${path}`;
+  return path;
+}
+
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const operatorToken = path.startsWith("/api/") ? getOperatorToken() : "";
-  const response = await fetch(path, {
+  const response = await fetch(publicPath(path), {
     ...init,
     headers: {
       "Content-Type": "application/json",

@@ -206,6 +206,13 @@ export default function SessionChat({
   const selectedAgent = selected
     ? agents.find((agent) => agent.id === selected.agent_instance_id) ?? null
     : null;
+  const scopeDirty = selected
+    ? scopeDraft === "general"
+      ? !!selected.project_id || !!selected.task_id
+      : scopeDraft === "project"
+        ? selected.task_id != null || selected.project_id !== scopeProjectId
+        : selected.task_id !== scopeTaskId
+    : false;
   const runtimeActive = runtime?.status === "queued" || runtime?.status === "running";
   const selectedModelOption = runtimeOptions?.models.find((model) => model.id === runtimeModel);
   const runtimeEffortOptions = selectedModelOption?.reasoning_efforts?.length
@@ -746,18 +753,20 @@ export default function SessionChat({
                       ))}
                     </select>
                   )}
-                  <button
-                    type="button"
-                    className="session-scope-save"
-                    disabled={
-                      busy ||
-                      (scopeDraft === "project" && (!scopeProjectId || scopeProjectId === unclassifiedProjectKey)) ||
-                      (scopeDraft === "task" && !scopeTaskId)
-                    }
-                    onClick={() => void saveScope()}
-                  >
-                    {busy ? (zh ? "保存中…" : "Saving…") : (zh ? "保存归属" : "Save scope")}
-                  </button>
+                  {scopeDirty && (
+                    <button
+                      type="button"
+                      className="session-scope-save"
+                      disabled={
+                        busy ||
+                        (scopeDraft === "project" && (!scopeProjectId || scopeProjectId === unclassifiedProjectKey)) ||
+                        (scopeDraft === "task" && !scopeTaskId)
+                      }
+                      onClick={() => void saveScope()}
+                    >
+                      {busy ? (zh ? "保存中…" : "Saving…") : (zh ? "保存归属" : "Save scope")}
+                    </button>
+                  )}
                 </div>
               </div>
               <div className="session-runtime-controls">

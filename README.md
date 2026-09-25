@@ -73,26 +73,40 @@ cd ..
 cargo run -p morrows-server
 ```
 
-正常的本地部署/重启流程推荐使用：
+生产部署默认运行在 OVH VPS。提交并 push 后，从本机执行：
+
+```bash
+./scripts/deploy-vps.sh
+```
+
+该脚本会在 VPS 上同步 `main`、构建 Web UI 和 release 后端，并通过
+`morrows.service` 重启服务。Morrows 本身只监听 VPS loopback
+`127.0.0.1:8787`；公网 MCP 通过现有 Cloudflare Tunnel 与 VPS 路由层暴露为：
+
+```text
+https://mcp.xycdev.com/morrows
+```
+
+WebUI 同一实例暴露在：
+
+```text
+https://mcp.xycdev.com/morrows/ui/
+```
+
+控制平面 API 在公网模式强制 Operator Bearer 认证；WebUI 顶栏可保存对应 token。
+
+VPS 上的 Local Shell MCP 已移到 `127.0.0.1:8766`。本地路由层占用
+`127.0.0.1:8765`：仅 `/morrows` 转发到 Morrows，其余路径继续转发给
+Local Shell MCP，因此原有 `https://mcp.xycdev.com/mcp` 保持不变。
+
+本地开发仍可使用旧的 tmux 部署：
 
 ```bash
 ./scripts/deploy.sh
-```
-
-该脚本会运行 Rust workspace 测试、构建 Web UI 与后端、重启专用的
-`tmux -L morrows` / `morrows-server` Session，并等待 `/api/health` 成功。
-
-如果当前代码已经测试过，只需要重新构建并重启：
-
-```bash
 ./scripts/deploy.sh --fast
 ```
 
-随后打开：
-
-```text
-http://127.0.0.1:8787
-```
+本地开发地址仍为 `http://127.0.0.1:8787`。
 
 环境变量：
 
@@ -103,7 +117,7 @@ MORROWS_WEB_DIR=web/dist
 MORROWS_LAUNCH_DIR=data/launches
 
 # 可选：loopback LSM 集成
-MORROWS_LSM_CONTROL_URL=http://127.0.0.1:8765
+MORROWS_LSM_CONTROL_URL=http://127.0.0.1:8766
 MORROWS_LSM_CONTROL_KEY=<same value as LOCAL_SHELL_MCP_CONTROL_API_KEY>
 MORROWS_LSM_SUBJECT=local-mcp-client
 MORROWS_AGENT_RESTART_GRACE_SECONDS=600
