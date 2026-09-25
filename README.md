@@ -124,9 +124,11 @@ MORROWS_MCP_URL=https://mcp.xycdev.com/morrows
 
 # 可选：loopback LSM 集成
 MORROWS_LSM_CONTROL_URL=http://127.0.0.1:8766
-MORROWS_LSM_CONTROL_KEY=<same value as LOCAL_SHELL_MCP_CONTROL_API_KEY>
 MORROWS_LSM_SUBJECT=local-mcp-client
 MORROWS_AGENT_RESTART_GRACE_SECONDS=600
+# VPS 上无需复制 MORROWS_LSM_CONTROL_KEY：
+# scripts/run-vps.sh 只从 LSM 的私密 service.env 读取
+# LOCAL_SHELL_MCP_CONTROL_API_KEY，并在进程启动时映射。
 
 # loopback 上可选；任何面向远程的部署都要求开启
 MORROWS_REQUIRE_AGENT_AUTH=1

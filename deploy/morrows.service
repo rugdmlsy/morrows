@@ -10,7 +10,7 @@ Group=morrow
 WorkingDirectory=/srv/morrow/workspaces/morrows
 Environment=HOME=/home/morrow
 EnvironmentFile=/home/morrow/.config/morrows/service.env
-ExecStart=/srv/morrow/workspaces/morrows/target/release/morrows-server
+ExecStart=/srv/morrow/workspaces/morrows/scripts/run-vps.sh
 Restart=on-failure
 RestartSec=3
 KillMode=control-group

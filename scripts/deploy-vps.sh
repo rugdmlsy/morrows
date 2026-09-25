@@ -31,6 +31,7 @@ fi
 
 cd "$root"
 mkdir -p data/launches data/session-runtimes
+chmod 755 scripts/run-vps.sh
 (
   cd web
   npm ci
@@ -46,6 +47,14 @@ sudo systemctl restart morrows.service
 deadline=$((SECONDS + 45))
 while (( SECONDS < deadline )); do
   if body="$(curl -fsS "$health" 2>/dev/null)"; then
+    pid="$(systemctl show morrows.service -p MainPID --value)"
+    test -n "$pid"
+    test "$pid" != 0
+    env_names="$(tr '\0' '\n' < "/proc/$pid/environ")"
+    grep -q '^MORROWS_LSM_CONTROL_URL=http://127.0.0.1:8766$' <<<"$env_names"
+    grep -q '^MORROWS_LSM_CONTROL_KEY=.' <<<"$env_names"
+    ! grep -q '^CLOUDFLARE_TUNNEL_TOKEN=' <<<"$env_names"
+    ! grep -q '^LOCAL_SHELL_MCP_OAUTH_ADMIN_PIN=' <<<"$env_names"
     printf '%s\n' "$body"
     exit 0
   fi
