@@ -25,7 +25,7 @@
 │ 1. Morrows Control Plane (控制平面)                                      │
 │    工作语义与持久知识的 Source of Truth                                    │
 │    负责：工作项、工作分配、工作执行生命周期、上下文快照、记忆、成果物托管、           │
-│          决策记录、工作交接、工作对话、摘要聚合、执行证据关联等                │
+│          决策记录、工作交接、工作会话、摘要聚合、执行证据关联等                │
 └────────────────────────────────────┬────────────────────────────────────┘
                                      │
                      /api/control    │ (受控 loopback)
@@ -73,7 +73,7 @@
 | **持久终端 / 终端** | `PersistentShell` | `shell session` | 运行空间内维持环境与状态的常驻命令行交互终端 |
 | **浏览器实例** | `BrowserInstance` | `browser session` | 运行空间内受控的有状态浏览器实例 |
 | **模型会话** | `ProviderThread` | `Provider Session` | Codex / Claude / Gemini 模型自身的连续私有对话流 |
-| **工作对话** | `DirectConversation` | `Conversation` | 人类与特定 Agent 实例直接进行的一对一持久化双向沟通 |
+| **会话** | `Session` | `Conversation` | 人类与特定 Agent 实例之间的一对一持久化工作会话；属于一个 AgentInstance，可跨多次运行时 turn 持续存在 |
 | **上下文快照** | `ContextSnapshot` | `ContextRevision` | 某次工作执行初始化时冻结的完整工作背景、目标与记忆视图 |
 | **记忆** | `Memory` | `Memory` / `Context` | 长期持久化知识（跨越任务与会话），分组织/项目/员工/工作等作用域 |
 | **成果物** | `Artifact` | `Artifact` | 被正式归档、持久托管并可全局引用的工作交付物证据 |
@@ -81,7 +81,7 @@
 | **工作交接** | `Handoff` | `Handoff` | 工作责任从一个执行转交至另一个执行的结构化交接协议 |
 | **执行证据** | `WorkExecutionEvidence` | `RunExecutionEvidence`| 将工作语义状态与底层 LSM Audit、Job Logs 关联的追溯证据 |
 
-### 3.2 Agent 对话与指令规范
+### 3.2 Agent 会话与指令规范
 
 在 Agent 交互、系统 Prompt、MCP 工具说明及日志中，**严禁裸用 `session` 和 `run`**，统一采用标准术语：
 * ❌ 严禁使用：“请恢复上次 session”、“这个 run 执行完了没有”、“更新当前 context”。

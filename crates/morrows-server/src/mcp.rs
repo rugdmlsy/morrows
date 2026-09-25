@@ -1,7 +1,7 @@
 use axum::http::request::Parts;
 use morrows_core::{
-    ConversationHistoryRequest, ConversationReply, CreateArtifact,
-    CreateConversationSummaryRevision, CreateDecision, CreateHandoff, CreateMessage, CreateThread,
+    CreateArtifact, CreateDecision, CreateHandoff, CreateMessage, CreateSessionSummaryRevision,
+    CreateThread, SessionHistoryRequest, SessionReply,
 };
 use morrows_core::{CreateContextRevision, CreateTask, Id, TaskState};
 use morrows_store::Store;
@@ -147,8 +147,8 @@ pub struct HandoffIdRequest {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct ConversationSummaryRequest {
-    pub conversation_id: String,
+pub struct SessionSummaryRequest {
+    pub session_id: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -162,8 +162,8 @@ pub struct DeliveryAckRequest {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct ReviseConversationSummaryRequest {
-    pub conversation_id: String,
+pub struct ReviseSessionSummaryRequest {
+    pub session_id: String,
     #[serde(default)]
     pub goal: String,
     #[serde(default)]
@@ -185,48 +185,39 @@ pub struct ReviseConversationSummaryRequest {
 #[tool_router(router = tool_router)]
 impl MorrowsMcp {
     #[tool(
-        description = "List direct company conversations with queued human messages addressed to the authenticated employee. Returns summaries only; use conversation_get to load one history. Requires authenticated Agent identity."
+        description = "List direct company sessions with queued human messages addressed to the authenticated employee. Returns summaries only; use session_get to load one history. Requires authenticated Agent identity."
     )]
-    async fn conversation_inbox(
-        &self,
-        Extension(parts): Extension<Parts>,
-    ) -> Result<String, String> {
+    async fn session_inbox(&self, Extension(parts): Extension<Parts>) -> Result<String, String> {
         let value = self
             .store
-            .agent_conversation_inbox(authenticated_agent(&parts)?)
+            .agent_session_inbox(authenticated_agent(&parts)?)
             .await
             .map_err(|e| e.to_string())?;
         serde_json::to_string(&value).map_err(|e| e.to_string())
     }
 
     #[tool(
-        description = "Read one direct company conversation addressed to the authenticated employee. History is paged; before_message_id loads older messages and after_message_id loads newer messages. Requires authenticated Agent identity."
+        description = "Read one direct company session addressed to the authenticated employee. History is paged; before_message_id loads older messages and after_message_id loads newer messages. Requires authenticated Agent identity."
     )]
-    async fn conversation_get(
+    async fn session_get(
         &self,
-        Parameters(req): Parameters<ConversationHistoryRequest>,
+        Parameters(req): Parameters<SessionHistoryRequest>,
         Extension(parts): Extension<Parts>,
     ) -> Result<String, String> {
         let before = req.before_message_id.as_deref().map(parse_id).transpose()?;
         let after = req.after_message_id.as_deref().map(parse_id).transpose()?;
-        let conversation_id = parse_id(&req.conversation_id)?;
+        let session_id = parse_id(&req.session_id)?;
         let agent_id = authenticated_agent(&parts)?;
         let value = self
             .store
-            .agent_conversation_history(
-                conversation_id,
-                agent_id,
-                before,
-                after,
-                req.limit.unwrap_or(80),
-            )
+            .agent_session_history(session_id, agent_id, before, after, req.limit.unwrap_or(80))
             .await
             .map_err(|e| e.to_string())?;
         self.store
-            .acknowledge_conversation_deliveries(
-                conversation_id,
+            .acknowledge_session_deliveries(
+                session_id,
                 agent_id,
-                &format!("conversation_get:{agent_id}"),
+                &format!("session_get:{agent_id}"),
             )
             .await
             .map_err(|e| e.to_string())?;
@@ -234,17 +225,17 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Reply to a direct company conversation addressed to the authenticated employee. The reply marks queued human messages in that conversation delivered. Requires authenticated Agent identity."
+        description = "Reply to a direct company session addressed to the authenticated employee. The reply marks queued human messages in that session delivered. Requires authenticated Agent identity."
     )]
-    async fn conversation_reply(
+    async fn session_reply(
         &self,
-        Parameters(req): Parameters<ConversationReply>,
+        Parameters(req): Parameters<SessionReply>,
         Extension(parts): Extension<Parts>,
     ) -> Result<String, String> {
         let value = self
             .store
-            .agent_reply_conversation(
-                parse_id(&req.conversation_id)?,
+            .agent_reply_session(
+                parse_id(&req.session_id)?,
                 authenticated_agent(&parts)?,
                 &req.body,
             )
@@ -254,67 +245,67 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Read the latest structured summary revision for a direct company conversation addressed to the authenticated employee. Requires authenticated Agent identity."
+        description = "Read the latest structured summary revision for a direct company session addressed to the authenticated employee. Requires authenticated Agent identity."
     )]
-    async fn conversation_summary_get(
+    async fn session_summary_get(
         &self,
-        Parameters(req): Parameters<ConversationSummaryRequest>,
+        Parameters(req): Parameters<SessionSummaryRequest>,
         Extension(parts): Extension<Parts>,
     ) -> Result<String, String> {
-        let conversation_id = parse_id(&req.conversation_id)?;
+        let session_id = parse_id(&req.session_id)?;
         let agent_id = authenticated_agent(&parts)?;
-        let conversation = self
+        let session = self
             .store
-            .get_conversation(conversation_id)
+            .get_session(session_id)
             .await
             .map_err(|e| e.to_string())?;
-        if conversation.agent_instance_id != agent_id {
-            return Err("conversation belongs to another agent instance".into());
+        if session.agent_instance_id != agent_id {
+            return Err("session belongs to another agent instance".into());
         }
         let summary = self
             .store
-            .get_latest_conversation_summary_revision(conversation_id)
+            .get_latest_session_summary_revision(session_id)
             .await
             .map_err(|e| e.to_string())?;
         serde_json::to_string(&summary).map_err(|e| e.to_string())
     }
 
     #[tool(
-        description = "Create a new structured summary revision for a direct company conversation addressed to the authenticated employee. Morrows automatically links the previous summary revision and covers the latest message currently in the conversation. Requires authenticated Agent identity."
+        description = "Create a new structured summary revision for a direct company session addressed to the authenticated employee. Morrows automatically links the previous summary revision and covers the latest message currently in the session. Requires authenticated Agent identity."
     )]
-    async fn conversation_summary_revise(
+    async fn session_summary_revise(
         &self,
-        Parameters(req): Parameters<ReviseConversationSummaryRequest>,
+        Parameters(req): Parameters<ReviseSessionSummaryRequest>,
         Extension(parts): Extension<Parts>,
     ) -> Result<String, String> {
-        let conversation_id = parse_id(&req.conversation_id)?;
+        let session_id = parse_id(&req.session_id)?;
         let agent_id = authenticated_agent(&parts)?;
-        let conversation = self
+        let session = self
             .store
-            .get_conversation(conversation_id)
+            .get_session(session_id)
             .await
             .map_err(|e| e.to_string())?;
-        if conversation.agent_instance_id != agent_id {
-            return Err("conversation belongs to another agent instance".into());
+        if session.agent_instance_id != agent_id {
+            return Err("session belongs to another agent instance".into());
         }
 
         let previous_revision_id = self
             .store
-            .get_latest_conversation_summary_revision(conversation_id)
+            .get_latest_session_summary_revision(session_id)
             .await
             .map_err(|e| e.to_string())?
             .map(|summary| summary.id);
         let history = self
             .store
-            .conversation_history(conversation_id, None, None, 1)
+            .session_history(session_id, None, None, 1)
             .await
             .map_err(|e| e.to_string())?;
         let covers_until_message_id = history.messages.last().map(|message| message.id);
 
         let summary = self
             .store
-            .create_conversation_summary_revision(CreateConversationSummaryRevision {
-                conversation_id,
+            .create_session_summary_revision(CreateSessionSummaryRevision {
+                session_id,
                 previous_revision_id,
                 covers_until_message_id,
                 goal: req.goal,
@@ -333,7 +324,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "List durable Morrows deliveries queued for the authenticated employee. A delivery references an existing conversation message or launch instruction; process the referenced source and then call delivery_ack. Requires authenticated Agent identity."
+        description = "List durable Morrows deliveries queued for the authenticated employee. A delivery references an existing session message or launch instruction; process the referenced source and then call delivery_ack. Requires authenticated Agent identity."
     )]
     async fn delivery_inbox(
         &self,
@@ -669,6 +660,11 @@ impl MorrowsMcp {
             ),
             None => None,
         };
+        let long_term_memory = self
+            .store
+            .memories_for_task(task_id, agent_id)
+            .await
+            .map_err(|e| e.to_string())?;
         let collaboration = self
             .store
             .task_collaboration(task_id)
@@ -684,6 +680,7 @@ impl MorrowsMcp {
             .collect::<Vec<_>>();
         serde_json::to_string(&json!({
             "task": task,
+            "long_term_memory": long_term_memory,
             "context": context,
             "collaboration": collaboration,
             "my_runs": my_runs,
@@ -794,7 +791,7 @@ impl ServerHandler for MorrowsMcp {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_instructions(
-                "Morrows employee interface. The company control plane owns registration, fleet state, dispatch, assignment, Run creation, launch, cancellation, and scheduling. Employees may read their durable delivery inbox and acknowledge deliveries, read/reply to direct company conversations, maintain structured summaries for conversations addressed to them, access only work they own or have been assigned, pull/update working memory, receive instructions, collaborate, hand off work, renew an existing lease, and report progress or completion. Use the issued Bearer Agent credential; X-Agent-Instance-Id is an optional subject binding and must match when present. Loopback legacy mode may temporarily accept the identity header without a Bearer credential."
+                "Morrows employee interface. The company control plane owns registration, fleet state, dispatch, assignment, Run creation, launch, cancellation, and scheduling. Employees may read their durable delivery inbox and acknowledge deliveries, read/reply to direct company sessions, maintain structured summaries for sessions addressed to them, access only work they own or have been assigned, pull/update working memory, receive instructions, collaborate, hand off work, renew an existing lease, and report progress or completion. Use the issued Bearer Agent credential; X-Agent-Instance-Id is an optional subject binding and must match when present. Loopback legacy mode may temporarily accept the identity header without a Bearer credential."
             )
     }
 }
@@ -852,9 +849,9 @@ mod tests {
         let store = Store::connect("sqlite::memory:").await.unwrap();
         let mcp = MorrowsMcp::new(store);
         for name in [
-            "conversation_inbox",
-            "conversation_get",
-            "conversation_reply",
+            "session_inbox",
+            "session_get",
+            "session_reply",
             "work_request_submit",
             "task_get",
             "memory_get",
@@ -872,8 +869,8 @@ mod tests {
             "run_checkpoint",
             "run_complete",
             "task_events",
-            "conversation_summary_get",
-            "conversation_summary_revise",
+            "session_summary_get",
+            "session_summary_revise",
             "delivery_inbox",
             "delivery_ack",
             "context_package_get",
@@ -885,6 +882,11 @@ mod tests {
             );
         }
         for name in [
+            "conversation_inbox",
+            "conversation_get",
+            "conversation_reply",
+            "conversation_summary_get",
+            "conversation_summary_revise",
             "agent_profile_register",
             "agent_profile_list",
             "account_register",
@@ -919,25 +921,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn direct_conversations_are_scoped_to_the_addressed_employee() {
+    async fn direct_sessions_are_scoped_to_the_addressed_employee() {
         let store = Store::connect("sqlite::memory:").await.unwrap();
         let a = store.register_agent("chat-a", &[]).await.unwrap();
         let b = store.register_agent("chat-b", &[]).await.unwrap();
-        let conversation = store
-            .create_conversation(morrows_core::CreateConversation {
+        let session = store
+            .create_session(morrows_core::CreateSession {
                 agent_instance_id: a.id,
                 title: "Direct".into(),
             })
             .await
             .unwrap();
         store
-            .create_human_conversation_message(conversation.id, "hello")
+            .create_human_session_message(session.id, "hello")
             .await
             .unwrap();
         let mcp = MorrowsMcp::new(store.clone());
 
         let inbox: Value = serde_json::from_str(
-            &mcp.conversation_inbox(Extension(parts(Some(a.id))))
+            &mcp.session_inbox(Extension(parts(Some(a.id))))
                 .await
                 .unwrap(),
         )
@@ -977,15 +979,15 @@ mod tests {
         assert_eq!(delivered["status"], "delivered");
 
         store
-            .create_human_conversation_message(conversation.id, "follow-up")
+            .create_human_session_message(session.id, "follow-up")
             .await
             .unwrap();
         assert_eq!(store.agent_delivery_inbox(a.id, 20).await.unwrap().len(), 1);
 
         assert!(
-            mcp.conversation_get(
-                Parameters(ConversationHistoryRequest {
-                    conversation_id: conversation.id.to_string(),
+            mcp.session_get(
+                Parameters(SessionHistoryRequest {
+                    session_id: session.id.to_string(),
                     before_message_id: None,
                     after_message_id: None,
                     limit: Some(20),
@@ -995,9 +997,9 @@ mod tests {
             .await
             .is_err()
         );
-        mcp.conversation_get(
-            Parameters(ConversationHistoryRequest {
-                conversation_id: conversation.id.to_string(),
+        mcp.session_get(
+            Parameters(SessionHistoryRequest {
+                session_id: session.id.to_string(),
                 before_message_id: None,
                 after_message_id: None,
                 limit: Some(20),
@@ -1014,28 +1016,22 @@ mod tests {
                 .is_empty()
         );
 
-        mcp.conversation_reply(
-            Parameters(ConversationReply {
-                conversation_id: conversation.id.to_string(),
+        mcp.session_reply(
+            Parameters(SessionReply {
+                session_id: session.id.to_string(),
                 body: "hi".into(),
             }),
             Extension(parts(Some(a.id))),
         )
         .await
         .unwrap();
-        assert!(
-            store
-                .agent_conversation_inbox(a.id)
-                .await
-                .unwrap()
-                .is_empty()
-        );
+        assert!(store.agent_session_inbox(a.id).await.unwrap().is_empty());
 
-        // conversation_summary_get: other agent cannot access
+        // session_summary_get: other agent cannot access
         assert!(
-            mcp.conversation_summary_get(
-                Parameters(ConversationSummaryRequest {
-                    conversation_id: conversation.id.to_string(),
+            mcp.session_summary_get(
+                Parameters(SessionSummaryRequest {
+                    session_id: session.id.to_string(),
                 }),
                 Extension(parts(Some(b.id))),
             )
@@ -1043,11 +1039,11 @@ mod tests {
             .is_err()
         );
 
-        // conversation_summary_get: owner agent gets null when none exists
+        // session_summary_get: owner agent gets null when none exists
         let none_summary = mcp
-            .conversation_summary_get(
-                Parameters(ConversationSummaryRequest {
-                    conversation_id: conversation.id.to_string(),
+            .session_summary_get(
+                Parameters(SessionSummaryRequest {
+                    session_id: session.id.to_string(),
                 }),
                 Extension(parts(Some(a.id))),
             )
@@ -1055,11 +1051,11 @@ mod tests {
             .unwrap();
         assert_eq!(none_summary, "null");
 
-        // Other agents cannot revise this conversation summary.
+        // Other agents cannot revise this session summary.
         assert!(
-            mcp.conversation_summary_revise(
-                Parameters(ReviseConversationSummaryRequest {
-                    conversation_id: conversation.id.to_string(),
+            mcp.session_summary_revise(
+                Parameters(ReviseSessionSummaryRequest {
+                    session_id: session.id.to_string(),
                     goal: "Wrong owner".into(),
                     current_state: "Should fail".into(),
                     important_findings: vec![],
@@ -1077,9 +1073,9 @@ mod tests {
 
         // The addressed agent can create a summary; Morrows pins it to the latest message.
         let rev: Value = serde_json::from_str(
-            &mcp.conversation_summary_revise(
-                Parameters(ReviseConversationSummaryRequest {
-                    conversation_id: conversation.id.to_string(),
+            &mcp.session_summary_revise(
+                Parameters(ReviseSessionSummaryRequest {
+                    session_id: session.id.to_string(),
                     goal: "Resolve support inquiry".into(),
                     current_state: "Assisted".into(),
                     important_findings: vec!["Human asked for help".into()],
@@ -1103,9 +1099,9 @@ mod tests {
         assert!(rev["covers_until_message_id"].is_string());
 
         let got_summary: Value = serde_json::from_str(
-            &mcp.conversation_summary_get(
-                Parameters(ConversationSummaryRequest {
-                    conversation_id: conversation.id.to_string(),
+            &mcp.session_summary_get(
+                Parameters(SessionSummaryRequest {
+                    session_id: session.id.to_string(),
                 }),
                 Extension(parts(Some(a.id))),
             )
@@ -1199,6 +1195,64 @@ mod tests {
                 .await
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_get_materializes_project_long_term_memory() {
+        let store = Store::connect("sqlite::memory:").await.unwrap();
+        let agent = store.register_agent("memory-reader", &[]).await.unwrap();
+        let project = store
+            .create_project(morrows_core::CreateProject {
+                name: "Memory project".into(),
+                description: String::new(),
+            })
+            .await
+            .unwrap();
+        let task = store
+            .create_task(CreateTask {
+                project_id: Some(project.id),
+                title: "Read project memory".into(),
+                description: String::new(),
+                owner_actor_id: format!("agent:{}", agent.id),
+                state: TaskState::Ready,
+                priority: 0,
+            })
+            .await
+            .unwrap();
+        store
+            .create_memory_entry(morrows_core::CreateMemoryEntry {
+                scope_type: "project".into(),
+                project_id: Some(project.id),
+                agent_instance_id: None,
+                task_id: None,
+                title: "Imported project memory".into(),
+                content: json!({"constraint":"preserve project context"}),
+                source_kind: "chatgpt_history_import".into(),
+                source_ref: Some("chatgpt:test".into()),
+                visibility: "shared".into(),
+                supersedes_memory_id: None,
+            })
+            .await
+            .unwrap();
+
+        let mcp = MorrowsMcp::new(store);
+        let value: Value = serde_json::from_str(
+            &mcp.memory_get(
+                Parameters(TaskIdRequest {
+                    task_id: task.id.to_string(),
+                }),
+                Extension(parts(Some(agent.id))),
+            )
+            .await
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(value["long_term_memory"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            value["long_term_memory"][0]["content"]["constraint"],
+            "preserve project context"
         );
     }
 
@@ -1386,10 +1440,13 @@ mod tests {
         let a = store.register_agent("agent-a", &[]).await.unwrap();
         let b = store.register_agent("agent-b", &[]).await.unwrap();
         let task = store
-            .create_task(serde_json::from_value(json!({
-                "title": "Build feature X",
-                "description": "Implement feature X with full test coverage"
-            })).unwrap())
+            .create_task(
+                serde_json::from_value(json!({
+                    "title": "Build feature X",
+                    "description": "Implement feature X with full test coverage"
+                }))
+                .unwrap(),
+            )
             .await
             .unwrap();
         let assignment = store

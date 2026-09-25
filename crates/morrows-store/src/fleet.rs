@@ -43,8 +43,11 @@ impl Store {
     pub async fn register_account(&self, input: RegisterAccount) -> Result<Account, DomainError> {
         nonempty(&input.label, "label")?;
         let now = Utc::now().to_rfc3339();
-        sqlx::query("INSERT INTO accounts(id,provider,label,external_account_ref,status,metadata_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(provider,label) DO NOTHING")
-            .bind(Uuid::new_v4().to_string()).bind(&input.provider).bind(&input.label).bind(&input.external_account_ref).bind(&input.status).bind(serde_json::to_string(&input.metadata).map_err(storage)?)
+        if let Some(email) = input.email.as_deref() {
+            nonempty(email, "email")?;
+        }
+        sqlx::query("INSERT INTO accounts(id,provider,label,email,external_account_ref,status,metadata_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(provider,label) DO UPDATE SET email=COALESCE(excluded.email,accounts.email),updated_at=excluded.updated_at")
+            .bind(Uuid::new_v4().to_string()).bind(&input.provider).bind(&input.label).bind(input.email.as_deref()).bind(&input.external_account_ref).bind(&input.status).bind(serde_json::to_string(&input.metadata).map_err(storage)?)
             .bind(&now).bind(&now).execute(&self.pool).await.map_err(storage)?;
         let row = sqlx::query("SELECT * FROM accounts WHERE provider=? AND label=?")
             .bind(&input.provider)
@@ -132,6 +135,7 @@ fn row_to_account(row: sqlx::sqlite::SqliteRow) -> Result<Account, DomainError> 
         id: parse_id(row.try_get("id").map_err(storage)?)?,
         provider: row.try_get("provider").map_err(storage)?,
         label: row.try_get("label").map_err(storage)?,
+        email: row.try_get("email").map_err(storage)?,
         external_account_ref: row.try_get("external_account_ref").map_err(storage)?,
         status: row.try_get("status").map_err(storage)?,
         metadata: serde_json::from_str(
@@ -169,6 +173,85 @@ fn nonempty(value: &str, field: &str) -> Result<(), DomainError> {
         )));
     }
     Ok(())
+}
+
+fn validate_display_name(value: &str) -> Result<(), DomainError> {
+    let length = value.chars().count();
+    if length == 0 || length > 80 {
+        return Err(DomainError::InvalidInput(
+            "agent display name must contain 1 to 80 characters".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn profile_display_base(profile: &AgentProfile) -> String {
+    let name = profile.name.to_ascii_lowercase();
+    if name.contains("codebuddy") {
+        return "codebuddy".into();
+    }
+    if name.contains("codex") {
+        return "codex".into();
+    }
+    if name.contains("chatgpt") {
+        return "chatgpt".into();
+    }
+    let normalized = name
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+        .collect::<String>()
+        .split('-')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    if normalized.is_empty() {
+        "agent".into()
+    } else {
+        normalized
+    }
+}
+
+async fn ensure_display_name_available(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    display_name: &str,
+    except_id: Option<Id>,
+) -> Result<(), DomainError> {
+    let conflict: Option<String> = sqlx::query_scalar(
+        "SELECT id FROM agent_instances WHERE archived_at IS NULL AND display_name=? AND (? IS NULL OR id<>?) LIMIT 1",
+    )
+    .bind(display_name)
+    .bind(except_id.map(|id| id.to_string()))
+    .bind(except_id.map(|id| id.to_string()))
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(storage)?;
+    if conflict.is_some() {
+        return Err(DomainError::Conflict(format!(
+            "agent display name already exists: {display_name}"
+        )));
+    }
+    Ok(())
+}
+
+async fn next_display_name(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    base: &str,
+) -> Result<String, DomainError> {
+    for index in 0..100_000 {
+        let candidate = format!("{base}-{index}");
+        let exists: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM agent_instances WHERE display_name=?")
+                .bind(&candidate)
+                .fetch_one(&mut **tx)
+                .await
+                .map_err(storage)?;
+        if exists == 0 {
+            return Ok(candidate);
+        }
+    }
+    Err(DomainError::Storage(
+        "could not allocate agent display name".into(),
+    ))
 }
 
 impl Store {
@@ -209,8 +292,9 @@ impl Store {
                     .map_err(storage)?;
             sqlx::query("INSERT INTO machines(id,name,hostname,os,arch,status,metadata_json,last_seen_at,created_at,updated_at) VALUES(?,?,'unknown','unknown','unknown','unknown','{\"legacy\":true}',?,?,?)")
                 .bind(id.to_string()).bind(format!("legacy:{id}")).bind(&now).bind(&now).bind(&now).execute(&mut *tx).await.map_err(storage)?;
-            sqlx::query("INSERT INTO agent_instances(id,name,status,capabilities_json,last_heartbeat_at,profile_id,account_id,machine_id,created_at) VALUES(?,?,'online',?,?,?,?,?,?)")
-                .bind(id.to_string()).bind(name).bind(json!(capabilities).to_string()).bind(&now).bind(LEGACY_PROFILE).bind(account_id).bind(id.to_string()).bind(&now).execute(&mut *tx).await.map_err(storage)?;
+            let display_name = next_display_name(&mut tx, "agent").await?;
+            sqlx::query("INSERT INTO agent_instances(id,name,display_name,status,capabilities_json,last_heartbeat_at,profile_id,account_id,machine_id,created_at) VALUES(?,?,?,'online',?,?,?,?,?,?)")
+                .bind(id.to_string()).bind(name).bind(display_name).bind(json!(capabilities).to_string()).bind(&now).bind(LEGACY_PROFILE).bind(account_id).bind(id.to_string()).bind(&now).execute(&mut *tx).await.map_err(storage)?;
             id
         };
         tx.commit().await.map_err(storage)?;
@@ -239,6 +323,7 @@ impl Store {
         if let Some(id) = input.machine_id {
             self.get_machine(id).await?;
         }
+        let display_base = profile_display_base(&profile);
         let capabilities = input.capabilities.unwrap_or(profile.default_capabilities);
         let now = Utc::now().to_rfc3339();
         let mut tx = self
@@ -262,18 +347,223 @@ impl Store {
                     "agent name already has different identity links".into(),
                 ));
             }
-            sqlx::query("UPDATE agent_instances SET status='online',capabilities_json=?,last_heartbeat_at=? WHERE id=?")
+            sqlx::query("UPDATE agent_instances SET status='online',capabilities_json=?,last_heartbeat_at=?,archived_at=NULL WHERE id=?")
                 .bind(json!(capabilities).to_string()).bind(&now).bind(instance.id.to_string()).execute(&mut *tx).await.map_err(storage)?;
             instance.id
         } else {
             let id = Uuid::new_v4();
-            sqlx::query("INSERT INTO agent_instances(id,name,status,capabilities_json,last_heartbeat_at,profile_id,account_id,machine_id,external_instance_ref,created_at) VALUES(?,?,'online',?,?,?,?,?,?,?)")
-                .bind(id.to_string()).bind(input.name.trim()).bind(json!(capabilities).to_string()).bind(&now)
+            let requested_display_name = input
+                .display_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            if let Some(display_name) = requested_display_name {
+                validate_display_name(display_name)?;
+                ensure_display_name_available(&mut tx, display_name, None).await?;
+            }
+            let display_name = match requested_display_name {
+                Some(value) => value.to_owned(),
+                None => next_display_name(&mut tx, &display_base).await?,
+            };
+            sqlx::query("INSERT INTO agent_instances(id,name,display_name,status,capabilities_json,last_heartbeat_at,profile_id,account_id,machine_id,external_instance_ref,created_at) VALUES(?,?,?,'online',?,?,?,?,?,?,?)")
+                .bind(id.to_string()).bind(input.name.trim()).bind(display_name).bind(json!(capabilities).to_string()).bind(&now)
                 .bind(input.profile_id.to_string()).bind(input.account_id.map(|x|x.to_string())).bind(input.machine_id.map(|x|x.to_string())).bind(input.external_instance_ref).bind(&now).execute(&mut *tx).await.map_err(storage)?;
             id
         };
         tx.commit().await.map_err(storage)?;
         self.get_agent(id).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn provision_managed_codex_agent(
+        &self,
+        profile_id: Id,
+        machine_id: Option<Id>,
+        email: &str,
+        display_name: Option<&str>,
+        program: &str,
+        codex_home: &str,
+        default_cwd: &str,
+        model: Option<&str>,
+    ) -> Result<(Account, AgentInstance, LaunchProfile), DomainError> {
+        let email = email.trim().to_ascii_lowercase();
+        if email.is_empty()
+            || !email.contains('@')
+            || email.chars().any(char::is_whitespace)
+            || email.chars().count() > 320
+        {
+            return Err(DomainError::InvalidInput(
+                "a valid account email is required".into(),
+            ));
+        }
+        nonempty(program, "program")?;
+        nonempty(codex_home, "codex_home")?;
+        nonempty(default_cwd, "default_cwd")?;
+
+        let profile = self.get_profile(profile_id).await?;
+        if profile.provider != "openai" || !profile.name.to_ascii_lowercase().contains("codex") {
+            return Err(DomainError::InvalidInput(
+                "managed Codex agents require an OpenAI Codex profile".into(),
+            ));
+        }
+        if let Some(id) = machine_id {
+            self.get_machine(id).await?;
+        }
+
+        let requested_display_name = display_name
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned);
+        if let Some(value) = requested_display_name.as_deref() {
+            validate_display_name(value)?;
+        }
+
+        let now = Utc::now();
+        let now_text = now.to_rfc3339();
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(storage)?;
+
+        let existing_account_id: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM accounts WHERE provider='openai' AND lower(email)=lower(?) LIMIT 1",
+        )
+        .bind(&email)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(storage)?;
+        let account_metadata = json!({
+            "managed_by": "morrows",
+            "auth_isolation": {
+                "kind": "codex_home",
+                "credential_store": "file",
+                "path": codex_home,
+                "version": 1
+            }
+        });
+
+        let account_id = if let Some(raw) = existing_account_id {
+            let id = parse_id(raw)?;
+            let linked: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM agent_instances WHERE account_id=? AND archived_at IS NULL",
+            )
+            .bind(id.to_string())
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(storage)?;
+            if linked > 0 {
+                return Err(DomainError::Conflict(format!(
+                    "Codex account {email} is already bound to an active Agent"
+                )));
+            }
+            sqlx::query(
+                "UPDATE accounts SET label=?,status='active',metadata_json=?,updated_at=? WHERE id=?",
+            )
+            .bind(&email)
+            .bind(account_metadata.to_string())
+            .bind(&now_text)
+            .bind(id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?;
+            id
+        } else {
+            let id = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO accounts(id,provider,label,email,status,metadata_json,created_at,updated_at)
+                 VALUES(?,'openai',?,?,'active',?,?,?)",
+            )
+            .bind(id.to_string())
+            .bind(&email)
+            .bind(&email)
+            .bind(account_metadata.to_string())
+            .bind(&now_text)
+            .bind(&now_text)
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?;
+            id
+        };
+
+        let display_name = match requested_display_name {
+            Some(value) => {
+                ensure_display_name_available(&mut tx, &value, None).await?;
+                value
+            }
+            None => next_display_name(&mut tx, "codex").await?,
+        };
+        let agent_id = Uuid::new_v4();
+        let agent_name = format!("codex-managed:{agent_id}");
+        sqlx::query(
+            "INSERT INTO agent_instances(
+                id,name,display_name,status,capabilities_json,last_heartbeat_at,
+                profile_id,account_id,machine_id,external_instance_ref,created_at
+             ) VALUES(?,?,?,'online',?,?,?,?,?,NULL,?)",
+        )
+        .bind(agent_id.to_string())
+        .bind(&agent_name)
+        .bind(&display_name)
+        .bind(json!(profile.default_capabilities).to_string())
+        .bind(&now_text)
+        .bind(profile_id.to_string())
+        .bind(account_id.to_string())
+        .bind(machine_id.map(|id| id.to_string()))
+        .bind(&now_text)
+        .execute(&mut *tx)
+        .await
+        .map_err(storage)?;
+
+        let launch_profile_id = Uuid::new_v4();
+        let launch_metadata = json!({
+            "managed_by": "morrows",
+            "account_id": account_id,
+            "auth_isolation": "codex_home_file",
+        });
+        sqlx::query(
+            "INSERT INTO launch_profiles(
+                id,name,adapter,agent_instance_id,program,codex_home,default_cwd,
+                model,enabled,metadata_json,created_at,updated_at
+             ) VALUES(?,?,'codex_cli',?,?,?,?,?,1,?,?,?)",
+        )
+        .bind(launch_profile_id.to_string())
+        .bind(format!("{display_name} · Morrows"))
+        .bind(agent_id.to_string())
+        .bind(program)
+        .bind(codex_home)
+        .bind(default_cwd)
+        .bind(model)
+        .bind(launch_metadata.to_string())
+        .bind(&now_text)
+        .bind(&now_text)
+        .execute(&mut *tx)
+        .await
+        .map_err(storage)?;
+
+        append_event_tx(
+            &mut tx,
+            "system",
+            "fleet",
+            "agent_instance",
+            agent_id,
+            "agent.managed_codex_provisioned",
+            json!({
+                "account_id": account_id,
+                "profile_id": profile_id,
+                "launch_profile_id": launch_profile_id,
+                "machine_id": machine_id,
+                "auth_isolation": "codex_home_file"
+            }),
+            None,
+        )
+        .await?;
+
+        tx.commit().await.map_err(storage)?;
+        Ok((
+            self.get_account(account_id).await?,
+            self.get_agent(agent_id).await?,
+            self.get_launch_profile(launch_profile_id).await?,
+        ))
     }
 
     pub async fn get_agent(&self, id: Id) -> Result<AgentInstance, DomainError> {
@@ -287,13 +577,72 @@ impl Store {
         )
     }
     pub async fn list_agents(&self) -> Result<Vec<AgentInstance>, DomainError> {
-        sqlx::query("SELECT * FROM agent_instances ORDER BY name")
+        sqlx::query("SELECT * FROM agent_instances ORDER BY display_name,name")
             .fetch_all(&self.pool)
             .await
             .map_err(storage)?
             .into_iter()
             .map(row_to_agent)
             .collect()
+    }
+
+    pub async fn rename_agent(
+        &self,
+        id: Id,
+        display_name: &str,
+    ) -> Result<AgentInstance, DomainError> {
+        let display_name = display_name.trim();
+        validate_display_name(display_name)?;
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(storage)?;
+        let archived_at: Option<String> =
+            sqlx::query_scalar("SELECT archived_at FROM agent_instances WHERE id=?")
+                .bind(id.to_string())
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(storage)?
+                .ok_or_else(|| DomainError::NotFound(format!("agent {id}")))?;
+        if archived_at.is_some() {
+            return Err(DomainError::InvalidState(
+                "archived agent cannot be renamed".into(),
+            ));
+        }
+        ensure_display_name_available(&mut tx, display_name, Some(id)).await?;
+        sqlx::query("UPDATE agent_instances SET display_name=? WHERE id=?")
+            .bind(display_name)
+            .bind(id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?;
+        tx.commit().await.map_err(storage)?;
+        self.get_agent(id).await
+    }
+
+    pub async fn archive_agent(&self, id: Id) -> Result<AgentInstance, DomainError> {
+        self.get_agent(id).await?;
+        let now = Utc::now().to_rfc3339();
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(storage)?;
+        sqlx::query("UPDATE agent_instances SET archived_at=?,status='archived' WHERE id=?")
+            .bind(&now)
+            .bind(id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?;
+        sqlx::query("UPDATE sessions SET status='archived',updated_at=? WHERE agent_instance_id=? AND status='open'")
+            .bind(&now)
+            .bind(id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?;
+        tx.commit().await.map_err(storage)?;
+        self.get_agent(id).await
     }
 
     /// Identity ownership is checked before mutation. The heartbeat, host clock,
@@ -386,6 +735,9 @@ impl Store {
     pub async fn agent_fleet(&self) -> Result<Vec<FleetEntry>, DomainError> {
         let mut fleet = Vec::new();
         for instance in self.list_agents().await? {
+            if instance.archived_at.is_some() {
+                continue;
+            }
             fleet.push(FleetEntry {
                 profile: self.get_profile(instance.profile_id).await?,
                 account: match instance.account_id {
@@ -463,6 +815,7 @@ fn row_to_agent(row: sqlx::sqlite::SqliteRow) -> Result<AgentInstance, DomainErr
     Ok(AgentInstance {
         id: parse_id(row.try_get("id").map_err(storage)?)?,
         name: row.try_get("name").map_err(storage)?,
+        display_name: row.try_get("display_name").map_err(storage)?,
         status: row.try_get("status").map_err(storage)?,
         capabilities: serde_json::from_str(
             &row.try_get::<String, _>("capabilities_json")
@@ -475,5 +828,6 @@ fn row_to_agent(row: sqlx::sqlite::SqliteRow) -> Result<AgentInstance, DomainErr
         machine_id: parse_opt_id(row.try_get("machine_id").map_err(storage)?)?,
         external_instance_ref: row.try_get("external_instance_ref").map_err(storage)?,
         created_at: parse_dt(row.try_get("created_at").map_err(storage)?)?,
+        archived_at: parse_opt_dt(row.try_get("archived_at").map_err(storage)?)?,
     })
 }

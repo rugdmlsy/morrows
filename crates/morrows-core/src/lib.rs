@@ -50,6 +50,23 @@ impl std::str::FromStr for TaskState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Project {
+    pub id: Id,
+    pub name: String,
+    pub description: String,
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateProject {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Task {
     pub id: Id,
     pub project_id: Option<Id>,
@@ -93,9 +110,11 @@ pub struct AgentInstance {
     pub created_at: DateTime<Utc>,
     pub id: Id,
     pub name: String,
+    pub display_name: String,
     pub status: String,
     pub capabilities: Vec<String>,
     pub last_heartbeat_at: DateTime<Utc>,
+    pub archived_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -198,8 +217,8 @@ pub use dispatch::*;
 mod launch;
 pub use launch::*;
 
-mod conversation;
-pub use conversation::*;
+mod session;
+pub use session::*;
 
 mod context_package;
 pub use context_package::*;
@@ -212,3 +231,6 @@ pub use agent_auth::*;
 
 mod operator_auth;
 pub use operator_auth::*;
+
+mod memory;
+pub use memory::*;

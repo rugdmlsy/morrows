@@ -4,6 +4,8 @@
 /data/artifacts/*
 !/data/artifacts/.gitkeep
 /data/launches/
+/data/codex-accounts/
+/data/session-runtimes/
 /web/node_modules
 /web/dist
 .DS_Store

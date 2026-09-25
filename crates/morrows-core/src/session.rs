@@ -4,14 +4,14 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CreateConversation {
+pub struct CreateSession {
     pub agent_instance_id: Id,
     #[serde(default)]
     pub title: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Conversation {
+pub struct Session {
     pub id: Id,
     pub agent_instance_id: Id,
     pub title: String,
@@ -21,7 +21,7 @@ pub struct Conversation {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConversationSummary {
+pub struct SessionSummary {
     pub id: Id,
     pub agent_instance_id: Id,
     pub agent_name: String,
@@ -40,13 +40,17 @@ pub struct ConversationSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConversationMessage {
+pub struct SessionMessage {
     pub id: Id,
-    pub conversation_id: Id,
+    pub session_id: Id,
     pub author_type: String,
     pub author_agent_instance_id: Option<Id>,
     pub body: String,
-    /// Conversation processing state. Human messages remain queued until an Agent reply.
+    /// Stable client-generated idempotency key for human messages.
+    pub client_message_id: Option<String>,
+    /// A recalled message remains durable for audit but is excluded from delivery semantics.
+    pub recalled_at: Option<DateTime<Utc>>,
+    /// Session processing state. Human messages remain queued until an Agent reply.
     pub status: String,
     /// Runtime delivery state is independent from reply/processing state.
     pub delivery_status: Option<String>,
@@ -54,22 +58,56 @@ pub struct ConversationMessage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConversationHistory {
-    pub conversation: Conversation,
-    pub messages: Vec<ConversationMessage>,
+pub struct SessionHistory {
+    pub session: Session,
+    pub messages: Vec<SessionMessage>,
     pub has_more: bool,
     pub next_before: Option<Id>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct ConversationReply {
-    pub conversation_id: String,
+pub struct StartSessionRuntime {
+    #[serde(default)]
+    #[schemars(with = "Option<String>")]
+    pub launch_profile_id: Option<Id>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionRuntimeAttempt {
+    pub id: Id,
+    pub session_id: Id,
+    pub agent_instance_id: Id,
+    pub account_id: Option<Id>,
+    pub launch_profile_id: Id,
+    pub adapter: String,
+    pub status: String,
+    pub model: Option<String>,
+    pub reasoning_effort: Option<String>,
+    pub cwd: Option<String>,
+    pub provider_session_ref: Option<String>,
+    pub pid: Option<i64>,
+    pub exit_code: Option<i64>,
+    pub stdout_path: Option<String>,
+    pub stderr_path: Option<String>,
+    pub error: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub ended_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SessionReply {
+    pub session_id: String,
     pub body: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct ConversationHistoryRequest {
-    pub conversation_id: String,
+pub struct SessionHistoryRequest {
+    pub session_id: String,
     #[serde(default)]
     pub before_message_id: Option<String>,
     #[serde(default)]
@@ -79,9 +117,9 @@ pub struct ConversationHistoryRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConversationSummaryRevision {
+pub struct SessionSummaryRevision {
     pub id: Id,
-    pub conversation_id: Id,
+    pub session_id: Id,
     pub previous_revision_id: Option<Id>,
     pub covers_until_message_id: Option<Id>,
     pub goal: String,
@@ -97,9 +135,9 @@ pub struct ConversationSummaryRevision {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CreateConversationSummaryRevision {
+pub struct CreateSessionSummaryRevision {
     #[serde(default)]
-    pub conversation_id: Id,
+    pub session_id: Id,
     #[serde(default)]
     pub previous_revision_id: Option<Id>,
     #[serde(default)]

@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { FormEvent } from "react";
 import "./App.css";
-import AgentChat from "./AgentChat";
+import SessionChat from "./SessionChat";
 import { api, getOperatorToken, setOperatorToken } from "./api";
 import {
   formatAge,
+  formatDateTime,
   formatDispatchReason,
   formatOutcome,
   formatRole,
@@ -14,8 +15,34 @@ import {
 } from "./i18n";
 import type { Locale, TranslationKey } from "./i18n";
 
+type Project = {
+  id: string;
+  name: string;
+  description: string;
+  status: string;
+  created_at: string;
+  updated_at: string;
+};
+
+type MemoryEntry = {
+  id: string;
+  scope_type: string;
+  project_id?: string | null;
+  agent_instance_id?: string | null;
+  task_id?: string | null;
+  title: string;
+  content: unknown;
+  source_kind: string;
+  source_ref?: string | null;
+  visibility: string;
+  supersedes_memory_id?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
 type Task = {
   id: string;
+  project_id?: string | null;
   title: string;
   description: string;
   owner_actor_id: string;
@@ -59,15 +86,18 @@ type Collaboration = {
 type Agent = {
   id: string;
   name: string;
+  display_name: string;
   status: string;
   capabilities: string[];
   last_heartbeat_at: string;
+  external_instance_ref?: string | null;
+  archived_at?: string | null;
 };
 
 type FleetEntry = {
   instance: Agent;
   profile: { id: string; name: string; provider: string; kind: string };
-  account: { id: string; label: string; provider: string; status: string } | null;
+  account: { id: string; label: string; email?: string | null; provider: string; status: string } | null;
   machine: { id: string; name: string; hostname: string; os: string; arch: string } | null;
   latest_capacity: {
     status: string;
@@ -231,6 +261,22 @@ type LaunchProfile = {
   updated_at: string;
 };
 
+type ManagedCodexProvision = {
+  provider: string;
+  account: {
+    id: string;
+    provider: string;
+    label: string;
+    email?: string | null;
+    status: string;
+  };
+  instance: Agent;
+  launch_profile: LaunchProfile;
+  codex_home: string;
+  credential_backend: string;
+  auth_imported: boolean;
+};
+
 type LaunchAttempt = {
   id: string;
   assignment_id: string;
@@ -270,6 +316,84 @@ function StateBadge({ state, locale }: { state: string; locale: Locale }) {
   return <span className={`badge state-${state}`}>{formatState(locale, state)}</span>;
 }
 
+function providerDisplayName(provider: string, locale: Locale) {
+  const key = provider.trim().toLowerCase();
+  if (key === "openai") return "OpenAI";
+  if (key === "tencent") return "Tencent";
+  if (key === "local") return locale === "zh-CN" ? "本地" : "Local";
+  if (key === "legacy") return locale === "zh-CN" ? "历史兼容" : "Legacy";
+  return provider || (locale === "zh-CN" ? "未知来源" : "Unknown");
+}
+
+function agentKindDisplayName(kind: string, locale: Locale) {
+  const key = kind.trim().toLowerCase();
+  if (key === "coding_agent") return locale === "zh-CN" ? "编码 Agent" : "Coding agent";
+  if (key === "orchestrator") return locale === "zh-CN" ? "协调 Agent" : "Orchestrator";
+  if (key === "validation") return locale === "zh-CN" ? "验证 Agent" : "Validation agent";
+  if (key === "legacy") return locale === "zh-CN" ? "历史记录" : "Legacy record";
+  return kind.replaceAll("_", " ");
+}
+
+function cleanAgentDisplayName(entry: FleetEntry, locale: Locale) {
+  const { instance, profile, machine } = entry;
+  if (instance.display_name?.trim()) return instance.display_name.trim();
+  if (profile.kind === "legacy" || profile.provider === "legacy") {
+    const raw = instance.name.toLowerCase();
+    if (raw.startsWith("codex-personal-handoff-")) {
+      const suffix = raw.slice("codex-personal-handoff-".length).toUpperCase();
+      return locale === "zh-CN" ? `Codex · 交接 ${suffix}` : `Codex · Handoff ${suffix}`;
+    }
+    if (raw === "codex-personal-macbook") return "Codex · MacBook";
+    return instance.name.replaceAll("-", " ");
+  }
+
+  const base = profile.name || instance.name;
+  const atIndex = instance.name.indexOf("@");
+  if (atIndex >= 0) {
+    const suffix = instance.name.slice(atIndex + 1).replace(/-session$/i, "");
+    if (suffix && suffix !== machine?.name) {
+      if (/^m\d+$/i.test(suffix)) return `${base} · ${suffix.toUpperCase()}`;
+    }
+  }
+  return base;
+}
+
+function accountDisplayName(entry: FleetEntry, locale: Locale) {
+  if (!entry.account) return locale === "zh-CN" ? "未绑定账号" : "No account";
+  return entry.account.email?.trim() || (locale === "zh-CN" ? "未记录邮箱" : "Email not recorded");
+}
+
+function machineDisplayName(entry: FleetEntry, locale: Locale) {
+  const machine = entry.machine;
+  if (!machine) return locale === "zh-CN" ? "Provider 托管" : "Provider managed";
+  if (machine.name.startsWith("legacy:") || entry.profile.kind === "legacy") {
+    return locale === "zh-CN" ? "历史记录" : "Legacy record";
+  }
+  return `${machine.name}${machine.os && machine.os !== "unknown" ? ` · ${machine.os}` : ""}`;
+}
+
+function agentAvailabilityRank(entry: FleetEntry) {
+  if (entry.instance.status === "online" && entry.latest_capacity?.status === "available") return 0;
+  if (entry.instance.status === "online") return 1;
+  if (entry.latest_capacity?.status === "busy" || entry.latest_capacity?.status === "throttled") return 2;
+  return 3;
+}
+
+function parseCodexAuthEmail(authJson: string) {
+  const auth = JSON.parse(authJson) as { tokens?: { id_token?: string } };
+  const idToken = auth.tokens?.id_token;
+  if (!idToken) throw new Error("tokens.id_token missing");
+  const payload = idToken.split(".")[1];
+  if (!payload) throw new Error("invalid id_token");
+  const base64 = payload.replaceAll("-", "+").replaceAll("_", "/").padEnd(Math.ceil(payload.length / 4) * 4, "=");
+  const bytes = Uint8Array.from(atob(base64), (char) => char.charCodeAt(0));
+  const claims = JSON.parse(new TextDecoder().decode(bytes)) as { email?: string; email_verified?: boolean };
+  if (claims.email_verified === false) throw new Error("email is not verified");
+  const email = claims.email?.trim();
+  if (!email || !email.includes("@")) throw new Error("email missing");
+  return email.toLowerCase();
+}
+
 export default function App() {
   const [locale, setLocale] = useState<Locale>(initialLocale);
   const [theme, setTheme] = useState<"dark" | "light">(() => {
@@ -277,7 +401,13 @@ export default function App() {
     if (saved === "dark" || saved === "light") return saved;
     return window.matchMedia?.("(prefers-color-scheme: light)").matches ? "light" : "dark";
   });
-  const [view, setView] = useState<"conversations" | "queue" | "agents">("conversations");
+  const [fontScale, setFontScale] = useState(() => {
+    const saved = Number(window.localStorage.getItem("morrows.fontScale"));
+    return Number.isFinite(saved) && saved >= 0.85 && saved <= 1.5 ? saved : 1.15;
+  });
+  const [showSettings, setShowSettings] = useState(false);
+  const [view, setView] = useState<"sessions" | "queue" | "agents">("sessions");
+  const [projects, setProjects] = useState<Project[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [agents, setAgents] = useState<FleetEntry[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -308,11 +438,106 @@ export default function App() {
   const [dispatchBusy, setDispatchBusy] = useState(false);
   const [title, setTitle] = useState("");
   const [priority, setPriority] = useState(0);
-  const [chatAgentId, setChatAgentId] = useState<string | null>(null);
+  const [newTaskProjectId, setNewTaskProjectId] = useState("");
+  const [projectName, setProjectName] = useState("");
+  const [projectSort, setProjectSort] = useState<"updated_desc" | "created_desc" | "name_asc" | "task_count_desc">(() => {
+    const saved = window.localStorage.getItem("morrows.projectSort");
+    return saved === "created_desc" || saved === "name_asc" || saved === "task_count_desc" ? saved : "updated_desc";
+  });
+  const [showProjectCreate, setShowProjectCreate] = useState(false);
+  const [projectBusy, setProjectBusy] = useState(false);
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+  const [projectMemories, setProjectMemories] = useState<MemoryEntry[]>([]);
+  const [selectedProjectMemoryId, setSelectedProjectMemoryId] = useState<string | null>(null);
+  const [projectMemoryLoading, setProjectMemoryLoading] = useState(false);
+  const [sessionAgentId, setSessionAgentId] = useState<string | null>(null);
+  const [renamingAgentId, setRenamingAgentId] = useState<string | null>(null);
+  const [agentNameDraft, setAgentNameDraft] = useState("");
+  const [agentRenameBusy, setAgentRenameBusy] = useState(false);
+  const [showAgentCreate, setShowAgentCreate] = useState(false);
+  const [newAgentAuthFile, setNewAgentAuthFile] = useState<File | null>(null);
+  const [newAgentDetectedEmail, setNewAgentDetectedEmail] = useState("");
+  const [newAgentDisplayName, setNewAgentDisplayName] = useState("");
+  const [newAgentModel, setNewAgentModel] = useState("");
+  const [agentCreateBusy, setAgentCreateBusy] = useState(false);
+  const [agentCreateResult, setAgentCreateResult] = useState<ManagedCodexProvision | null>(null);
   const [operatorTokenPresent, setOperatorTokenPresent] = useState(() => !!getOperatorToken());
   const [error, setError] = useState<string | null>(null);
 
+  const orderedAgents = useMemo(
+    () => [...agents].sort((a, b) =>
+      agentAvailabilityRank(a) - agentAvailabilityRank(b)
+      || cleanAgentDisplayName(a, locale).localeCompare(cleanAgentDisplayName(b, locale), locale)
+    ),
+    [agents, locale],
+  );
+  const fleetSummary = useMemo(() => ({
+    total: agents.length,
+    online: agents.filter((entry) => entry.instance.status === "online").length,
+    working: agents.filter((entry) =>
+      (entry.latest_capacity?.active_assignments ?? 0) > 0
+      || (entry.latest_capacity?.active_runs ?? 0) > 0
+      || entry.latest_capacity?.status === "busy"
+    ).length,
+    available: agents.filter((entry) =>
+      entry.instance.status === "online" && (entry.latest_capacity?.available_slots ?? 0) > 0
+    ).length,
+  }), [agents]);
+
   const selectedTask = useMemo(() => tasks.find((task) => task.id === selectedId) ?? null, [tasks, selectedId]);
+  const selectedProject = useMemo(
+    () => projects.find((project) => project.id === selectedTask?.project_id) ?? null,
+    [projects, selectedTask?.project_id],
+  );
+  const openedProject = useMemo(
+    () => projects.find((project) => project.id === selectedProjectId) ?? null,
+    [projects, selectedProjectId],
+  );
+  const unclassifiedTasks = useMemo(
+    () => tasks.filter((task) => !task.project_id),
+    [tasks],
+  );
+  const unclassifiedOpen = selectedProjectId === "__unclassified__";
+  const selectedProjectMemory = useMemo(
+    () => projectMemories.find((memory) => memory.id === selectedProjectMemoryId) ?? projectMemories[0] ?? null,
+    [projectMemories, selectedProjectMemoryId],
+  );
+  const projectGroups = useMemo(() => {
+    const grouped: { id: string; project: Project | null; tasks: Task[] }[] = projects.map((project) => ({
+      id: project.id,
+      project,
+      tasks: tasks.filter((task) => task.project_id === project.id),
+    }));
+
+    grouped.sort((a, b) => {
+      if (!a.project || !b.project) return 0;
+      if (projectSort === "created_desc") {
+        return new Date(b.project.created_at).getTime() - new Date(a.project.created_at).getTime();
+      }
+      if (projectSort === "name_asc") {
+        return a.project.name.localeCompare(b.project.name, locale);
+      }
+      if (projectSort === "task_count_desc") {
+        return b.tasks.length - a.tasks.length || a.project.name.localeCompare(b.project.name, locale);
+      }
+      const latestUpdate = (group: { project: Project | null; tasks: Task[] }) =>
+        Math.max(
+          new Date(group.project?.updated_at || 0).getTime(),
+          ...group.tasks.map((task) => new Date(task.updated_at).getTime()),
+        );
+      return latestUpdate(b) - latestUpdate(a);
+    });
+
+    const unclassified = tasks.filter((task) => !task.project_id);
+    if (unclassified.length) {
+      grouped.push({
+        id: "__unclassified__",
+        project: null as Project | null,
+        tasks: unclassified,
+      });
+    }
+    return grouped;
+  }, [projects, tasks, projectSort, locale]);
   const t = (key: TranslationKey) => translate(locale, key);
 
   useEffect(() => {
@@ -324,6 +549,15 @@ export default function App() {
     window.localStorage.setItem("morrows.theme", theme);
     document.documentElement.dataset.theme = theme;
   }, [theme]);
+
+  useEffect(() => {
+    window.localStorage.setItem("morrows.fontScale", String(fontScale));
+    document.documentElement.style.setProperty("--font-scale", String(fontScale));
+  }, [fontScale]);
+
+  useEffect(() => {
+    window.localStorage.setItem("morrows.projectSort", projectSort);
+  }, [projectSort]);
 
   useEffect(() => {
     const sync = () => setOperatorTokenPresent(!!getOperatorToken());
@@ -353,12 +587,14 @@ export default function App() {
 
   const refreshQueueBase = useCallback(async () => {
     try {
-      const [nextTasks, nextPolicies, nextLaunchProfiles] = await Promise.all([
+      const [nextTasks, nextProjects, nextPolicies, nextLaunchProfiles] = await Promise.all([
         api<Task[]>("/api/tasks"),
+        api<Project[]>("/api/projects"),
         api<DispatchPolicy[]>("/api/dispatch-policies"),
         api<LaunchProfile[]>("/api/launch-profiles"),
       ]);
       setTasks(nextTasks);
+      setProjects(nextProjects);
       setDispatchPolicies(nextPolicies);
       setLaunchProfiles(nextLaunchProfiles);
       if (!selectedId && nextTasks.length) setSelectedId(nextTasks[0].id);
@@ -369,7 +605,7 @@ export default function App() {
   }, [selectedId]);
 
   const refreshDetail = useCallback(async () => {
-    if (view !== "queue" || !selectedId) return;
+    if (view !== "queue" || !selectedId || selectedProjectId) return;
     try {
       const [nextAssignments, nextRuns, nextEvents, nextContext, nextContextPackage, nextCollaboration, nextPolicy, nextPreview, nextDispatchDecisions, nextLaunchAttempts, nextLaunchInstructions] = await Promise.all([
         api<Assignment[]>(`/api/tasks/${selectedId}/assignments`),
@@ -403,7 +639,7 @@ export default function App() {
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
-  }, [view, selectedId, openRunId]);
+  }, [view, selectedId, selectedProjectId, openRunId]);
 
   useEffect(() => {
     void refreshHealth();
@@ -431,7 +667,7 @@ export default function App() {
   }, [refreshDetail]);
 
   useEffect(() => {
-    if (view !== "queue" || !selectedId) return;
+    if (view !== "queue" || !selectedId || selectedProjectId) return;
     void api<DispatchPolicy>(`/api/tasks/${selectedId}/dispatch-policy/executor`)
       .then((policy) => {
         setDispatchCapabilities(policy.required_capabilities.join(", "));
@@ -443,7 +679,7 @@ export default function App() {
         setDispatchEnabled(true);
         setDispatchLease(900);
       });
-  }, [view, selectedId]);
+  }, [view, selectedId, selectedProjectId]);
 
   async function saveContext(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -656,41 +892,193 @@ export default function App() {
     }
   }
 
+  function selectTask(taskId: string) {
+    setSelectedProjectId(null);
+    setProjectMemories([]);
+    setSelectedProjectMemoryId(null);
+    setSelectedId(taskId);
+  }
+
+  function openUnclassified() {
+    setSelectedProjectId("__unclassified__");
+    setProjectMemories([]);
+    setSelectedProjectMemoryId(null);
+    setProjectMemoryLoading(false);
+    setError(null);
+  }
+
+  async function openProject(project: Project) {
+    setSelectedProjectId(project.id);
+    setProjectMemoryLoading(true);
+    try {
+      const memories = await api<MemoryEntry[]>(
+        `/api/memories?scope_type=project&project_id=${encodeURIComponent(project.id)}`,
+      );
+      setProjectMemories(memories);
+      setSelectedProjectMemoryId(memories[0]?.id ?? null);
+      setError(null);
+    } catch (e) {
+      setProjectMemories([]);
+      setSelectedProjectMemoryId(null);
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setProjectMemoryLoading(false);
+    }
+  }
+
+  async function renameAgent(agentId: string) {
+    const displayName = agentNameDraft.trim();
+    if (!displayName) return;
+    setAgentRenameBusy(true);
+    try {
+      await api(`/api/agent-instances/${agentId}/rename`, {
+        method: "POST",
+        body: JSON.stringify({ display_name: displayName }),
+      });
+      setRenamingAgentId(null);
+      setAgentNameDraft("");
+      await refreshFleet();
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setAgentRenameBusy(false);
+    }
+  }
+
+  async function selectManagedCodexAuth(file: File | null) {
+    setNewAgentAuthFile(null);
+    setNewAgentDetectedEmail("");
+    if (!file) return;
+    try {
+      if (file.size > 512 * 1024) throw new Error(t("codexAuthTooLarge"));
+      const authJson = await file.text();
+      const email = parseCodexAuthEmail(authJson);
+      setNewAgentAuthFile(file);
+      setNewAgentDetectedEmail(email);
+      setError(null);
+    } catch {
+      setError(t("invalidCodexAuth"));
+    }
+  }
+
+  async function createManagedCodexAgent(event: FormEvent) {
+    event.preventDefault();
+    if (!newAgentAuthFile || !newAgentDetectedEmail || agentCreateBusy) return;
+    setAgentCreateBusy(true);
+    try {
+      const authJson = await newAgentAuthFile.text();
+      const provisioned = await api<ManagedCodexProvision>("/api/agent-fleet/codex", {
+        method: "POST",
+        body: JSON.stringify({
+          auth_json: authJson,
+          display_name: newAgentDisplayName.trim() || null,
+          model: newAgentModel.trim() || null,
+        }),
+      });
+      setAgentCreateResult(provisioned);
+      setNewAgentAuthFile(null);
+      setNewAgentDetectedEmail("");
+      setNewAgentDisplayName("");
+      setNewAgentModel("");
+      await Promise.all([refreshFleet(), refreshQueueBase()]);
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setAgentCreateBusy(false);
+    }
+  }
+
+  function closeAgentCreate() {
+    setShowAgentCreate(false);
+    setAgentCreateResult(null);
+    setNewAgentAuthFile(null);
+    setNewAgentDetectedEmail("");
+    setNewAgentDisplayName("");
+    setNewAgentModel("");
+  }
+
   async function createTask(event: FormEvent) {
     event.preventDefault();
     if (!title.trim()) return;
     try {
       const created = await api<Task>("/api/tasks", {
         method: "POST",
-        body: JSON.stringify({ title: title.trim(), description: "", priority }),
+        body: JSON.stringify({
+          project_id: newTaskProjectId || null,
+          title: title.trim(),
+          description: "",
+          priority,
+        }),
       });
       setTitle("");
       setPriority(0);
-      setSelectedId(created.id);
+      selectTask(created.id);
       await refreshQueueBase();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
   }
 
+  async function createProject(event: FormEvent) {
+    event.preventDefault();
+    const name = projectName.trim();
+    if (!name) return;
+    setProjectBusy(true);
+    try {
+      const created = await api<Project>("/api/projects", {
+        method: "POST",
+        body: JSON.stringify({ name, description: "" }),
+      });
+      setProjectName("");
+      setShowProjectCreate(false);
+      setNewTaskProjectId(created.id);
+      await refreshQueueBase();
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setProjectBusy(false);
+    }
+  }
+
+  async function moveTaskToProject(projectId: string) {
+    if (!selectedTask) return;
+    setProjectBusy(true);
+    try {
+      const next = await api<Task>(`/api/tasks/${selectedTask.id}/project`, {
+        method: "POST",
+        body: JSON.stringify({ project_id: projectId || null }),
+      });
+      setTasks((current) => current.map((task) => task.id === next.id ? next : task));
+      await Promise.all([refreshQueueBase(), refreshDetail()]);
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setProjectBusy(false);
+    }
+  }
+
   const viewMeta = {
-    conversations: {
-      zh: "对话",
-      en: "Direct Conversations",
+    sessions: {
+      zh: "会话",
+      en: "Sessions",
       descZh: "人类与特定 Agent 实例的一对一持久化沟通 · 按需加载历史 · 可靠投递",
-      descEn: "Persistent one-to-one conversations · lazy history · durable delivery",
+      descEn: "Persistent Agent sessions · lazy history · durable delivery",
     },
     queue: {
-      zh: "工作项",
-      en: "Work Items",
-      descZh: "工作队列 · 上下文快照 · 调度 · 执行与恢复证据",
-      descEn: "Work queue · context snapshots · dispatch · execution evidence",
+      zh: "任务",
+      en: "Tasks",
+      descZh: "按项目组织任务 · 上下文快照 · 调度 · 执行与恢复证据",
+      descEn: "Project-organized tasks · context snapshots · dispatch · execution evidence",
     },
     agents: {
       zh: "Agent 集群",
       en: "Agent Fleet",
-      descZh: "Agent 档案 / 账号 / 机器 / 实例身份 · 心跳与容量观测",
-      descEn: "Profiles · accounts · machines · instances · heartbeat and capacity",
+      descZh: "Agent 团队状态 · 工作能力 · 身份与运行位置",
+      descEn: "Team status · work capacity · identity and runtime location",
     },
   }[view];
 
@@ -720,11 +1108,11 @@ export default function App() {
         <nav className="side-nav">
           <div className="nav-group">{locale === "zh-CN" ? "工作 WORK" : "WORK"}</div>
           <button className={view === "queue" ? "nav-active" : ""} onClick={() => setView("queue")}>
-            <span className="nav-label"><span className="nav-icon">▤</span>{locale === "zh-CN" ? "工作项" : "Work Items"}</span>
+            <span className="nav-label"><span className="nav-icon">▤</span>{locale === "zh-CN" ? "任务" : "Tasks"}</span>
             <span className="nav-count">{tasks.length}</span>
           </button>
-          <button className={view === "conversations" ? "nav-active" : ""} onClick={() => setView("conversations")}>
-            <span className="nav-label"><span className="nav-icon">◫</span>{t("conversations")}</span>
+          <button className={view === "sessions" ? "nav-active" : ""} onClick={() => setView("sessions")}>
+            <span className="nav-label"><span className="nav-icon">◫</span>{t("sessions")}</span>
           </button>
 
           <div className="nav-group">{locale === "zh-CN" ? "资源 RESOURCES" : "RESOURCES"}</div>
@@ -791,6 +1179,62 @@ export default function App() {
             >
               {theme === "dark" ? "☼" : "◐"}
             </button>
+            <div className="settings-wrap">
+              <button
+                type="button"
+                className={`icon-button ${showSettings ? "settings-active" : ""}`}
+                title={t("settings")}
+                aria-expanded={showSettings}
+                onClick={() => setShowSettings((current) => !current)}
+              >
+                ⚙
+              </button>
+              {showSettings && (
+                <div className="settings-menu">
+                  <div className="settings-menu-head">
+                    <div>
+                      <strong>{t("settings")}</strong>
+                      <small>{t("settingsHint")}</small>
+                    </div>
+                    <button
+                      type="button"
+                      className="settings-close"
+                      title={t("close")}
+                      onClick={() => setShowSettings(false)}
+                    >
+                      ×
+                    </button>
+                  </div>
+                  <label className="font-scale-setting">
+                    <div>
+                      <span>{t("fontScale")}</span>
+                      <strong>{Math.round(fontScale * 100)}%</strong>
+                    </div>
+                    <input
+                      type="range"
+                      min="85"
+                      max="150"
+                      step="5"
+                      value={Math.round(fontScale * 100)}
+                      onChange={(event) => setFontScale(Number(event.target.value) / 100)}
+                    />
+                    <div className="font-scale-marks">
+                      <span>85%</span>
+                      <span>115%</span>
+                      <span>150%</span>
+                    </div>
+                  </label>
+                  <button
+                    type="button"
+                    className="settings-reset"
+                    onClick={() => setFontScale(1.15)}
+                  >
+                    {t("resetFontScale")}
+                  </button>
+                  <p className="settings-note">{t("fontScaleExclusion")}</p>
+                </div>
+              )}
+            </div>
             <button
               type="button"
               className={`auth-button ${operatorTokenPresent ? "auth-configured" : ""}`}
@@ -840,7 +1284,53 @@ export default function App() {
         {view === "queue" ? (
           <div className="workspace-grid">
             <section className="panel queue-panel">
+              <div className="task-browser-head">
+                <div>
+                  <strong>{t("projects")}</strong>
+                  <small>{projects.length} {t("projects")} · {tasks.length} {t("tasks")}</small>
+                </div>
+                <div className="task-browser-actions">
+                  <label className="project-sort-control">
+                    <span>{t("sortBy")}</span>
+                    <select value={projectSort} onChange={(event) => setProjectSort(event.target.value as typeof projectSort)}>
+                      <option value="updated_desc">{t("sortUpdatedDesc")}</option>
+                      <option value="created_desc">{t("sortCreatedDesc")}</option>
+                      <option value="name_asc">{t("sortNameAsc")}</option>
+                      <option value="task_count_desc">{t("sortTaskCountDesc")}</option>
+                    </select>
+                  </label>
+                  <button type="button" className="secondary" onClick={() => setShowProjectCreate((current) => !current)}>
+                    {showProjectCreate ? t("cancel") : t("newProject")}
+                  </button>
+                  <button type="button" className="secondary" onClick={() => void dispatchNextTask()} disabled={dispatchBusy}>
+                    {t("dispatchNext")}
+                  </button>
+                </div>
+              </div>
+
+              {showProjectCreate && (
+                <form className="new-project" onSubmit={createProject}>
+                  <input
+                    value={projectName}
+                    onChange={(event) => setProjectName(event.target.value)}
+                    placeholder={t("projectName")}
+                    autoFocus
+                  />
+                  <button type="submit" disabled={projectBusy || !projectName.trim()}>{t("create")}</button>
+                </form>
+              )}
+
               <form className="new-task" onSubmit={createTask}>
+                <select
+                  value={newTaskProjectId}
+                  onChange={(event) => setNewTaskProjectId(event.target.value)}
+                  title={t("project")}
+                >
+                  <option value="">{t("unclassified")}</option>
+                  {projects.map((project) => (
+                    <option key={project.id} value={project.id}>{project.name}</option>
+                  ))}
+                </select>
                 <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder={t("newTask")} />
                 <input
                   className="priority-input"
@@ -850,33 +1340,203 @@ export default function App() {
                   title={t("priority")}
                 />
                 <button type="submit">{t("create")}</button>
-                <button type="button" className="secondary" onClick={() => void dispatchNextTask()} disabled={dispatchBusy}>{t("dispatchNext")}</button>
               </form>
 
-              <div className="task-list">
-                {tasks.map((task) => (
-                  <button
-                    key={task.id}
-                    className={`task-row ${selectedId === task.id ? "selected" : ""}`}
-                    onClick={() => setSelectedId(task.id)}
-                  >
-                    <div className="task-row-main">
-                      <span className="task-id">{shortId(task.id)}</span>
-                      <strong>{task.title}</strong>
+              <div className="task-list project-task-list">
+                {projectGroups.map((group) => (
+                  <section className="project-group" key={group.id}>
+                    <button
+                      type="button"
+                      className={`project-group-head ${
+                        selectedProjectId === group.id ? "selected" : ""
+                      }`}
+                      onClick={() => group.project ? void openProject(group.project) : openUnclassified()}
+                    >
+                      <div className="project-folder">⌑</div>
+                      <div>
+                        <strong>{group.project?.name || t("unclassified")}</strong>
+                        <small>
+                          {group.project?.description || (group.project ? t("activeProject") : t("unclassifiedHint"))}
+                        </small>
+                      </div>
+                      <span className="project-task-count">{group.tasks.length}</span>
+                    </button>
+                    <div className="project-task-items">
+                      {group.tasks.map((task) => (
+                        <button
+                          key={task.id}
+                          className={`task-row ${!selectedProjectId && selectedId === task.id ? "selected" : ""}`}
+                          onClick={() => selectTask(task.id)}
+                        >
+                          <div className="task-row-main">
+                            <strong>{task.title}</strong>
+                            <span className="task-id">{shortId(task.id)}</span>
+                          </div>
+                          <div className="task-meta">
+                            <StateBadge state={task.state} locale={locale} />
+                            {dispatchPolicies.some((policy) => policy.task_id === task.id && policy.role === "executor" && policy.enabled) && <span className="badge state-online">{t("dispatchEnabled")}</span>}
+                            <span>P{task.priority}</span>
+                          </div>
+                        </button>
+                      ))}
+                      {!group.tasks.length && <div className="project-empty">{t("noProjectTasks")}</div>}
                     </div>
-                    <div className="task-meta">
-                      <StateBadge state={task.state} locale={locale} />
-                      {dispatchPolicies.some((policy) => policy.task_id === task.id && policy.role === "executor" && policy.enabled) && <span className="badge state-online">{t("dispatchEnabled")}</span>}
-                      <span>P{task.priority}</span>
-                    </div>
-                  </button>
+                  </section>
                 ))}
-                {!tasks.length && <div className="empty">{t("noTasks")}</div>}
+                {!projectGroups.length && <div className="empty">{t("noTasks")}</div>}
               </div>
             </section>
 
             <section className="panel detail-panel">
-              {selectedTask ? (
+              {unclassifiedOpen ? (
+                <>
+                  <div className="detail-heading">
+                    <div>
+                      <span className="eyebrow">{t("project")}</span>
+                      <h2>{t("unclassified")}</h2>
+                    </div>
+                    <span className="badge">{unclassifiedTasks.length} {t("tasks")}</span>
+                  </div>
+                  <p className="description">{t("unclassifiedHint")}</p>
+
+                  <section className="task-metadata-card">
+                    <div className="task-metadata-head">
+                      <div>
+                        <span className="section-caption">{t("unclassifiedGroup")}</span>
+                        <strong>{t("unclassified")}</strong>
+                      </div>
+                    </div>
+                    <div className="task-metadata-grid project-metadata-grid">
+                      <div className="metadata-field">
+                        <span>{t("tasks")}</span>
+                        <strong>{unclassifiedTasks.length}</strong>
+                      </div>
+                      <div className="metadata-field metadata-id">
+                        <span>{t("project")}</span>
+                        <strong>{t("notAProject")}</strong>
+                      </div>
+                    </div>
+                  </section>
+
+                  <h3>{t("tasks")}</h3>
+                  <div className="unclassified-task-grid">
+                    {unclassifiedTasks.map((task) => (
+                      <button
+                        type="button"
+                        className="unclassified-task-card"
+                        key={task.id}
+                        onClick={() => selectTask(task.id)}
+                      >
+                        <div className="mini-card-row">
+                          <strong>{task.title}</strong>
+                          <StateBadge state={task.state} locale={locale} />
+                        </div>
+                        <p>{task.description || t("noDescription")}</p>
+                        <small>{shortId(task.id)} · P{task.priority} · {formatAge(locale, task.updated_at)}</small>
+                      </button>
+                    ))}
+                    {!unclassifiedTasks.length && <div className="empty compact">{t("noUnclassifiedTasks")}</div>}
+                  </div>
+
+                  <h3>{t("projectMemories")}</h3>
+                  <div className="empty compact">{t("unclassifiedNoMemory")}</div>
+                </>
+              ) : openedProject ? (
+                <>
+                  <div className="detail-heading">
+                    <div>
+                      <span className="eyebrow">{t("project")}</span>
+                      <span className="task-id">{openedProject.id}</span>
+                      <h2>{openedProject.name}</h2>
+                    </div>
+                    <StateBadge state={openedProject.status} locale={locale} />
+                  </div>
+                  <p className="description">{openedProject.description || t("noProjectDescription")}</p>
+
+                  <section className="task-metadata-card">
+                    <div className="task-metadata-head">
+                      <div>
+                        <span className="section-caption">{t("projectMetadata")}</span>
+                        <strong>{openedProject.name}</strong>
+                      </div>
+                      <span className="task-id">{shortId(openedProject.id)}</span>
+                    </div>
+                    <div className="task-metadata-grid project-metadata-grid">
+                      <div className="metadata-field">
+                        <span>{t("state")}</span>
+                        <StateBadge state={openedProject.status} locale={locale} />
+                      </div>
+                      <div className="metadata-field">
+                        <span>{t("tasks")}</span>
+                        <strong>{tasks.filter((task) => task.project_id === openedProject.id).length}</strong>
+                      </div>
+                      <div className="metadata-field">
+                        <span>{t("memoryEntries")}</span>
+                        <strong>{projectMemories.length}</strong>
+                      </div>
+                      <div className="metadata-field">
+                        <span>{t("createdAt")}</span>
+                        <strong>{formatDateTime(locale, openedProject.created_at)}</strong>
+                      </div>
+                      <div className="metadata-field">
+                        <span>{t("updatedAt")}</span>
+                        <strong>{formatDateTime(locale, openedProject.updated_at)}</strong>
+                      </div>
+                      <div className="metadata-field metadata-id">
+                        <span>{t("projectId")}</span>
+                        <code>{openedProject.id}</code>
+                      </div>
+                    </div>
+                  </section>
+
+                  <h3>{t("projectMemories")}</h3>
+                  {projectMemoryLoading ? (
+                    <div className="empty compact">{t("loadingMemories")}</div>
+                  ) : projectMemories.length ? (
+                    <div className="project-memory-layout">
+                      <div className="project-memory-list">
+                        {projectMemories.map((memory) => (
+                          <button
+                            type="button"
+                            key={memory.id}
+                            className={`project-memory-row ${selectedProjectMemory?.id === memory.id ? "selected" : ""}`}
+                            onClick={() => setSelectedProjectMemoryId(memory.id)}
+                          >
+                            <strong>{memory.title}</strong>
+                            <small>{memory.source_kind} · {formatAge(locale, memory.created_at)}</small>
+                          </button>
+                        ))}
+                      </div>
+                      {selectedProjectMemory && (
+                        <article className="project-memory-detail">
+                          <div className="project-memory-detail-head">
+                            <div>
+                              <span className="section-caption">{t("longTermMemory")}</span>
+                              <h3>{selectedProjectMemory.title}</h3>
+                            </div>
+                            <span className="badge">{selectedProjectMemory.visibility}</span>
+                          </div>
+                          <dl className="memory-provenance">
+                            <div><dt>{t("memorySource")}</dt><dd>{selectedProjectMemory.source_kind}</dd></div>
+                            <div><dt>{t("sourceRef")}</dt><dd><code>{selectedProjectMemory.source_ref || "—"}</code></dd></div>
+                            <div><dt>{t("createdAt")}</dt><dd>{new Date(selectedProjectMemory.created_at).toLocaleString(locale)}</dd></div>
+                            {selectedProjectMemory.supersedes_memory_id && (
+                              <div><dt>{t("supersedes")}</dt><dd><code>{selectedProjectMemory.supersedes_memory_id}</code></dd></div>
+                            )}
+                          </dl>
+                          <pre className="memory-content">
+                            {typeof selectedProjectMemory.content === "string"
+                              ? selectedProjectMemory.content
+                              : JSON.stringify(selectedProjectMemory.content, null, 2)}
+                          </pre>
+                        </article>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="empty compact">{t("noProjectMemories")}</div>
+                  )}
+                </>
+              ) : selectedTask ? (
                 <>
                   <div className="detail-heading">
                     <div>
@@ -886,6 +1546,60 @@ export default function App() {
                     <StateBadge state={selectedTask.state} locale={locale} />
                   </div>
                   <p className="description">{selectedTask.description || t("noDescription")}</p>
+
+                  <section className="task-metadata-card">
+                    <div className="task-metadata-head">
+                      <div>
+                        <span className="section-caption">{t("taskMetadata")}</span>
+                        <strong>{selectedTask.title}</strong>
+                      </div>
+                      <span className="task-id">{shortId(selectedTask.id)}</span>
+                    </div>
+                    <div className="task-metadata-grid">
+                      <label className="metadata-field metadata-project">
+                        <span>{t("project")}</span>
+                        <select
+                          value={selectedTask.project_id || ""}
+                          onChange={(event) => void moveTaskToProject(event.target.value)}
+                          disabled={projectBusy}
+                        >
+                          <option value="">{t("unclassified")}</option>
+                          {projects.map((project) => (
+                            <option key={project.id} value={project.id}>{project.name}</option>
+                          ))}
+                        </select>
+                        {selectedProject?.description && <small>{selectedProject.description}</small>}
+                      </label>
+                      <div className="metadata-field">
+                        <span>{t("state")}</span>
+                        <StateBadge state={selectedTask.state} locale={locale} />
+                      </div>
+                      <div className="metadata-field">
+                        <span>{t("priority")}</span>
+                        <strong>P{selectedTask.priority}</strong>
+                      </div>
+                      <div className="metadata-field">
+                        <span>{t("owner")}</span>
+                        <code>{selectedTask.owner_actor_id}</code>
+                      </div>
+                      <div className="metadata-field">
+                        <span>{t("contextRevision")}</span>
+                        <code>{selectedTask.current_context_revision_id ? shortId(selectedTask.current_context_revision_id) : "—"}</code>
+                      </div>
+                      <div className="metadata-field">
+                        <span>{t("createdAt")}</span>
+                        <strong>{formatDateTime(locale, selectedTask.created_at)}</strong>
+                      </div>
+                      <div className="metadata-field">
+                        <span>{t("updatedAt")}</span>
+                        <strong>{formatDateTime(locale, selectedTask.updated_at)}</strong>
+                      </div>
+                      <div className="metadata-field metadata-id">
+                        <span>{t("taskId")}</span>
+                        <code>{selectedTask.id}</code>
+                      </div>
+                    </div>
+                  </section>
 
                   <div className="detail-columns">
                     <div>
@@ -1212,7 +1926,7 @@ export default function App() {
                         {!collaboration.threads.length && <div className="empty compact">{t("noDiscussions")}</div>}
                         <h3>{t("prerequisites")}</h3>
                         {collaboration.dependencies.map((dependency) => <div key={dependency.depends_on_task_id}>
-                          <button onClick={() => setSelectedId(dependency.depends_on_task_id)}>
+                          <button onClick={() => selectTask(dependency.depends_on_task_id)}>
                             {tasks.find((task) => task.id === dependency.depends_on_task_id)?.title || shortId(dependency.depends_on_task_id)}
                           </button>
                         </div>)}
@@ -1240,52 +1954,242 @@ export default function App() {
               )}
             </section>
           </div>
-        ) : view === "conversations" ? (
-          <AgentChat
-            agents={agents.map(({ instance }) => ({ id: instance.id, name: instance.name, status: instance.status }))}
+        ) : view === "sessions" ? (
+          <SessionChat
+            agents={orderedAgents.map((entry) => ({
+              id: entry.instance.id,
+              name: cleanAgentDisplayName(entry, locale),
+              status: entry.instance.status,
+              account_id: entry.account?.id ?? null,
+              account_email: entry.account?.email ?? null,
+            }))}
             locale={locale}
-            initialAgentId={chatAgentId}
-            onInitialAgentHandled={() => setChatAgentId(null)}
+            initialAgentId={sessionAgentId}
+            onInitialAgentHandled={() => setSessionAgentId(null)}
           />
         ) : (
-          <section className="agent-grid">
-            {agents.map(({ instance: agent, profile, account, machine, latest_capacity: capacity }) => (
-              <article className="agent-card" key={agent.id}>
-                <div className="agent-card-head">
-                  <div className="avatar">{agent.name.slice(0, 2).toUpperCase()}</div>
-                  <div>
-                    <h2>{agent.name}</h2>
-                    <code>{shortId(agent.id)}</code>
-                  </div>
-                  <StateBadge state={agent.status} locale={locale} />
-                </div>
-                <dl className="fleet-identity">
-                  <div><dt>{t("profile")}</dt><dd>{profile.name} · {profile.provider || t("unknownProvider")}{profile.kind ? ` · ${profile.kind}` : ""}</dd></div>
-                  <div><dt>{t("account")}</dt><dd>{account ? `${account.label} · ${account.provider || t("unknownProvider")} · ${formatState(locale, account.status)}` : t("notLinked")}</dd></div>
-                  <div><dt>{t("machine")}</dt><dd>{machine ? `${machine.name} · ${machine.hostname} · ${machine.os} ${machine.arch}` : t("notLinked")}</dd></div>
-                </dl>
-                <div className="capability-list">
-                  {agent.capabilities.length ? agent.capabilities.map((cap) => <span key={cap}>{cap}</span>) : <span>{t("general")}</span>}
-                </div>
-                <small title={new Date(agent.last_heartbeat_at).toLocaleString(locale)}>{t("heartbeat")} {formatAge(locale, agent.last_heartbeat_at)}</small>
+          <section className="fleet-page">
+            <div className="fleet-overview">
+              <div className="fleet-overview-copy">
+                <span className="eyebrow">{t("agentFleet")}</span>
+                <h2>{t("fleetOverview")}</h2>
+                <p>{t("fleetOverviewHint")}</p>
                 <button
                   type="button"
-                  className="agent-chat-button"
-                  onClick={() => { setChatAgentId(agent.id); setView("conversations"); }}
+                  className="agent-add-button"
+                  onClick={() => {
+                    if (showAgentCreate) closeAgentCreate();
+                    else setShowAgentCreate(true);
+                  }}
                 >
-                  {t("chatWithAgent")}
+                  {t("addAgent")}
                 </button>
-                <div className="fleet-capacity">
-                  {capacity ? <>
-                    <div className="mini-card-row"><strong>{t("capacity")}</strong><StateBadge state={capacity.status} locale={locale} /></div>
-                    <p>{capacity.available_slots} {t("availableSlots")}{capacity.max_concurrency !== null ? ` / ${capacity.max_concurrency} ${t("max")}` : ` · ${t("maxNotReported")}`}</p>
-                    <p>{capacity.active_assignments} {t("activeAssignments")} · {capacity.active_runs} {t("activeRuns")}</p>
-                    <small>{t("quota")}：{capacity.quota_state ? formatState(locale, capacity.quota_state) : t("notReported")} · {t("observed")} {formatAge(locale, capacity.observed_at)}</small>
-                  </> : <p>{t("noCapacity")}</p>}
+              </div>
+              <div className="fleet-stats">
+                <div><span>{t("fleetTotal")}</span><strong>{fleetSummary.total}</strong></div>
+                <div><span>{t("fleetOnline")}</span><strong>{fleetSummary.online}</strong></div>
+                <div><span>{t("fleetWorking")}</span><strong>{fleetSummary.working}</strong></div>
+                <div><span>{t("fleetAvailable")}</span><strong>{fleetSummary.available}</strong></div>
+              </div>
+
+              {showAgentCreate && (
+                <div className="agent-create-panel">
+                  {agentCreateResult ? (
+                    <>
+                      <div className="agent-create-head">
+                        <div>
+                          <span className="section-caption">{t("codexAuthImported")}</span>
+                          <strong>{agentCreateResult.instance.display_name}</strong>
+                          <p>{t("codexAuthImportedHint")}</p>
+                        </div>
+                        <button type="button" className="secondary" onClick={closeAgentCreate}>{t("closeAddAgent")}</button>
+                      </div>
+                      <dl className="agent-create-result-meta">
+                        <div><dt>{t("accountEmail")}</dt><dd>{agentCreateResult.account.email || agentCreateResult.account.label}</dd></div>
+                        <div><dt>{t("isolatedCodexHome")}</dt><dd><code>{agentCreateResult.codex_home}</code></dd></div>
+                        <div><dt>{t("credentialBackend")}</dt><dd><code>{agentCreateResult.credential_backend}</code></dd></div>
+                      </dl>
+                    </>
+                  ) : (
+                    <form onSubmit={(event) => void createManagedCodexAgent(event)}>
+                      <div className="agent-create-head">
+                        <div>
+                          <span className="section-caption">{t("addAgent")}</span>
+                          <strong>Codex</strong>
+                          <p>{t("addAgentHint")}</p>
+                        </div>
+                        <button type="button" className="secondary" onClick={closeAgentCreate}>{t("cancel")}</button>
+                      </div>
+                      <div className="agent-create-fields">
+                        <label>
+                          <span>{t("agentProvider")}</span>
+                          <input value="Codex" disabled />
+                        </label>
+                        <label className="agent-auth-file-field">
+                          <span>{t("codexAuthFile")}</span>
+                          <input
+                            type="file"
+                            accept=".json,application/json"
+                            onChange={(event) => void selectManagedCodexAuth(event.target.files?.[0] ?? null)}
+                          />
+                          <small>
+                            {newAgentAuthFile
+                              ? newAgentAuthFile.name + " · " + newAgentDetectedEmail
+                              : t("codexAuthFileHint")}
+                          </small>
+                        </label>
+                        <label>
+                          <span>{t("agentDisplayNameOptional")}</span>
+                          <input
+                            value={newAgentDisplayName}
+                            onChange={(event) => setNewAgentDisplayName(event.target.value)}
+                            maxLength={80}
+                            placeholder="codex-1"
+                          />
+                          <small>{t("agentDisplayNameHint")}</small>
+                        </label>
+                        <label>
+                          <span>{t("defaultModelOptional")}</span>
+                          <input
+                            value={newAgentModel}
+                            onChange={(event) => setNewAgentModel(event.target.value)}
+                            placeholder="gpt-5.6"
+                          />
+                        </label>
+                      </div>
+                      <div className="agent-create-actions">
+                        <button type="submit" disabled={agentCreateBusy || !newAgentAuthFile || !newAgentDetectedEmail}>
+                          {agentCreateBusy ? t("creatingAgent") : t("createAgent")}
+                        </button>
+                      </div>
+                    </form>
+                  )}
                 </div>
-              </article>
-            ))}
-            {!agents.length && <div className="empty large">{t("noAgents")}</div>}
+              )}
+            </div>
+
+            <div className="agent-grid">
+              {orderedAgents.map((entry) => {
+                const { instance: agent, profile, account, machine, latest_capacity: capacity } = entry;
+                const displayName = cleanAgentDisplayName(entry, locale);
+                const legacy = profile.kind === "legacy" || profile.provider === "legacy";
+                return (
+                  <article className={`agent-card ${legacy ? "agent-card-legacy" : ""}`} key={agent.id}>
+                    <div className="agent-card-head">
+                      <div className="avatar">{displayName.slice(0, 2).toUpperCase()}</div>
+                      <div className="agent-card-title">
+                        {renamingAgentId === agent.id ? (
+                          <form
+                            className="agent-rename-form"
+                            onSubmit={(event) => {
+                              event.preventDefault();
+                              void renameAgent(agent.id);
+                            }}
+                          >
+                            <input
+                              value={agentNameDraft}
+                              onChange={(event) => setAgentNameDraft(event.target.value)}
+                              maxLength={80}
+                              autoFocus
+                              aria-label={t("agentName")}
+                            />
+                            <button type="submit" disabled={agentRenameBusy || !agentNameDraft.trim()}>{t("save")}</button>
+                            <button
+                              type="button"
+                              className="secondary"
+                              onClick={() => {
+                                setRenamingAgentId(null);
+                                setAgentNameDraft("");
+                              }}
+                            >
+                              {t("cancel")}
+                            </button>
+                          </form>
+                        ) : (
+                          <div className="agent-title-line">
+                            <h2>{displayName}</h2>
+                            <button
+                              type="button"
+                              className="agent-rename-button"
+                              title={t("renameAgent")}
+                              onClick={() => {
+                                setRenamingAgentId(agent.id);
+                                setAgentNameDraft(displayName);
+                              }}
+                            >
+                              {locale === "zh-CN" ? "改名" : "Rename"}
+                            </button>
+                            {legacy && <span className="badge">{t("legacyRecord")}</span>}
+                          </div>
+                        )}
+                        <span>{agentKindDisplayName(profile.kind, locale)} · {providerDisplayName(profile.provider, locale)}</span>
+                      </div>
+                      <StateBadge state={agent.status} locale={locale} />
+                    </div>
+
+                    <div className="agent-work-state">
+                      <div>
+                        <span>{t("workState")}</span>
+                        <strong>{capacity ? formatState(locale, capacity.status) : formatState(locale, agent.status)}</strong>
+                      </div>
+                      <div>
+                        <span>{t("concurrency")}</span>
+                        <strong>{capacity ? `${capacity.available_slots}${capacity.max_concurrency !== null ? ` / ${capacity.max_concurrency}` : ""}` : "—"}</strong>
+                      </div>
+                      <div>
+                        <span>{t("currentTasks")}</span>
+                        <strong>{capacity?.active_assignments ?? 0}</strong>
+                      </div>
+                      <div>
+                        <span>{t("runningWork")}</span>
+                        <strong>{capacity?.active_runs ?? 0}</strong>
+                      </div>
+                    </div>
+
+                    <dl className="fleet-identity">
+                      <div><dt>{t("agentType")}</dt><dd>{profile.name} · {agentKindDisplayName(profile.kind, locale)}</dd></div>
+                      <div><dt>{t("identity")}</dt><dd>{accountDisplayName(entry, locale)}{account && account.status !== "active" ? ` · ${formatState(locale, account.status)}` : ""}</dd></div>
+                      <div><dt>{t("runtimeLocation")}</dt><dd>{machineDisplayName(entry, locale)}</dd></div>
+                    </dl>
+
+                    <div className="agent-capability-section">
+                      <span className="section-caption">{t("capabilities")}</span>
+                      <div className="capability-list">
+                        {agent.capabilities.length ? agent.capabilities.map((cap) => <span key={cap}>{cap.replaceAll("_", " ")}</span>) : <span>{t("general")}</span>}
+                      </div>
+                    </div>
+
+                    <div className="agent-card-footer">
+                      <div className="agent-freshness">
+                        <span>{t("lastSeen")}</span>
+                        <strong title={new Date(agent.last_heartbeat_at).toLocaleString(locale)}>{formatAge(locale, agent.last_heartbeat_at)}</strong>
+                        {capacity?.quota_state && <small>{t("quota")} · {formatState(locale, capacity.quota_state)}</small>}
+                      </div>
+                      <button
+                        type="button"
+                        className="agent-chat-button"
+                        onClick={() => { setSessionAgentId(agent.id); setView("sessions"); }}
+                      >
+                        {t("openSession")}
+                      </button>
+                    </div>
+
+                    <details className="agent-technical">
+                      <summary>{t("technicalInfo")}</summary>
+                      <dl>
+                        <div><dt>{t("instanceId")}</dt><dd><code>{agent.id}</code></dd></div>
+                        <div><dt>{t("rawName")}</dt><dd><code>{agent.name}</code></dd></div>
+                        <div><dt>{t("profile")}</dt><dd><code>{profile.name} · {shortId(profile.id)}</code></dd></div>
+                        <div><dt>{t("account")}</dt><dd><code>{account ? `${account.label} · ${shortId(account.id)}` : "—"}</code></dd></div>
+                        <div><dt>{t("machine")}</dt><dd><code>{machine ? `${machine.name} · ${shortId(machine.id)}` : "—"}</code></dd></div>
+                        {agent.external_instance_ref && <div><dt>{t("externalRef")}</dt><dd><code>{agent.external_instance_ref}</code></dd></div>}
+                      </dl>
+                    </details>
+                  </article>
+                );
+              })}
+              {!agents.length && <div className="empty large">{t("noAgents")}</div>}
+            </div>
           </section>
         )}
         </main>

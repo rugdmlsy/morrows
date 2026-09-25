@@ -1,7 +1,7 @@
 use chrono::{DateTime, Duration, Utc};
 use morrows_core::{
-    AgentInstance, Assignment, ContextRevision, CreateContextRevision, CreateTask, DomainError,
-    Event, Id, Run, Task, TaskState,
+    AgentInstance, Assignment, ContextRevision, CreateContextRevision, CreateProject, CreateTask,
+    DomainError, Event, Id, Project, Run, Task, TaskState,
 };
 use serde_json::{Value, json};
 use sqlx::{
@@ -37,11 +37,98 @@ impl Store {
         Ok(Self { pool })
     }
 
+    pub async fn create_project(&self, input: CreateProject) -> Result<Project, DomainError> {
+        let name = input.name.trim();
+        if name.is_empty() {
+            return Err(DomainError::InvalidInput(
+                "project name cannot be empty".into(),
+            ));
+        }
+        if name.chars().count() > 120 {
+            return Err(DomainError::InvalidInput(
+                "project name cannot exceed 120 characters".into(),
+            ));
+        }
+        let id = Uuid::new_v4();
+        let now = Utc::now();
+        sqlx::query(
+            "INSERT INTO projects(id,name,description,status,created_at,updated_at)
+             VALUES(?,?,?,'active',?,?)",
+        )
+        .bind(id.to_string())
+        .bind(name)
+        .bind(&input.description)
+        .bind(now.to_rfc3339())
+        .bind(now.to_rfc3339())
+        .execute(&self.pool)
+        .await
+        .map_err(storage)?;
+        self.get_project(id).await
+    }
+
+    pub async fn list_projects(&self) -> Result<Vec<Project>, DomainError> {
+        let rows = sqlx::query(
+            "SELECT * FROM projects ORDER BY
+             CASE status WHEN 'active' THEN 0 ELSE 1 END,
+             updated_at DESC, name COLLATE NOCASE ASC",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage)?;
+        rows.into_iter().map(row_to_project).collect()
+    }
+
+    pub async fn get_project(&self, id: Id) -> Result<Project, DomainError> {
+        let row = sqlx::query("SELECT * FROM projects WHERE id=?")
+            .bind(id.to_string())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(storage)?
+            .ok_or_else(|| DomainError::NotFound(format!("project {id}")))?;
+        row_to_project(row)
+    }
+
+    pub async fn set_task_project(
+        &self,
+        task_id: Id,
+        project_id: Option<Id>,
+    ) -> Result<Task, DomainError> {
+        self.get_task(task_id).await?;
+        if let Some(project_id) = project_id {
+            self.get_project(project_id).await?;
+        }
+        let now = Utc::now();
+        let mut tx = self.pool.begin().await.map_err(storage)?;
+        sqlx::query("UPDATE tasks SET project_id=?, updated_at=? WHERE id=?")
+            .bind(project_id.map(|value| value.to_string()))
+            .bind(now.to_rfc3339())
+            .bind(task_id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?;
+        append_event_tx(
+            &mut tx,
+            "operator",
+            "control-plane",
+            "task",
+            task_id,
+            "task.project_changed",
+            json!({"project_id": project_id}),
+            None,
+        )
+        .await?;
+        tx.commit().await.map_err(storage)?;
+        self.get_task(task_id).await
+    }
+
     pub async fn create_task(&self, input: CreateTask) -> Result<Task, DomainError> {
         if input.title.trim().is_empty() {
             return Err(DomainError::InvalidInput(
                 "task title cannot be empty".into(),
             ));
+        }
+        if let Some(project_id) = input.project_id {
+            self.get_project(project_id).await?;
         }
         let id = Uuid::new_v4();
         let now = Utc::now();
@@ -373,14 +460,13 @@ impl Store {
         }
         let id = Uuid::new_v4();
         let now = Utc::now();
-        let current_ctx_rev: Option<String> = sqlx::query_scalar(
-            "SELECT current_context_revision_id FROM tasks WHERE id=?",
-        )
-        .bind(task_id.to_string())
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(storage)?
-        .flatten();
+        let current_ctx_rev: Option<String> =
+            sqlx::query_scalar("SELECT current_context_revision_id FROM tasks WHERE id=?")
+                .bind(task_id.to_string())
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(storage)?
+                .flatten();
 
         sqlx::query("INSERT INTO runs(id,task_id,assignment_id,agent_instance_id,external_session_ref,status,started_at) VALUES(?,?,?,?,?,'running',?)")
             .bind(id.to_string()).bind(task_id.to_string()).bind(assignment_id.to_string()).bind(agent_id.to_string())
@@ -660,6 +746,17 @@ impl Store {
     }
 }
 
+fn row_to_project(row: sqlx::sqlite::SqliteRow) -> Result<Project, DomainError> {
+    Ok(Project {
+        id: parse_id(row.try_get("id").map_err(storage)?)?,
+        name: row.try_get("name").map_err(storage)?,
+        description: row.try_get("description").map_err(storage)?,
+        status: row.try_get("status").map_err(storage)?,
+        created_at: parse_dt(row.try_get("created_at").map_err(storage)?)?,
+        updated_at: parse_dt(row.try_get("updated_at").map_err(storage)?)?,
+    })
+}
+
 fn row_to_task(row: sqlx::sqlite::SqliteRow) -> Result<Task, DomainError> {
     let state: String = row.try_get("state").map_err(storage)?;
     Ok(Task {
@@ -779,7 +876,8 @@ mod dispatch;
 
 mod launch;
 
-mod conversation;
+mod session;
+mod session_runtime;
 
 mod context_package;
 
@@ -788,3 +886,5 @@ mod delivery;
 mod auth;
 
 mod operator_auth;
+
+mod memory;

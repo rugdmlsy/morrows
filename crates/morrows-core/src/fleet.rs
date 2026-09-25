@@ -30,6 +30,7 @@ pub struct Account {
     pub id: Id,
     pub provider: String,
     pub label: String,
+    pub email: Option<String>,
     pub external_account_ref: Option<String>,
     pub status: String,
     pub metadata: Value,
@@ -41,6 +42,7 @@ pub struct Account {
 pub struct RegisterAccount {
     pub provider: String,
     pub label: String,
+    pub email: Option<String>,
     pub external_account_ref: Option<String>,
     #[serde(default = "active_status")]
     pub status: String,
@@ -86,6 +88,8 @@ pub struct RegisterAgentInstance {
     #[schemars(with = "Option<String>")]
     pub machine_id: Option<Id>,
     pub name: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
     /// Omitted capabilities inherit the profile defaults; an explicit [] stays empty.
     pub capabilities: Option<Vec<String>>,
     pub external_instance_ref: Option<String>,
@@ -116,6 +120,11 @@ pub struct CapacitySnapshot {
 pub struct AgentHeartbeat {
     pub status: String,
     pub capacity: Option<RecordCapacity>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RenameAgentInstance {
+    pub display_name: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

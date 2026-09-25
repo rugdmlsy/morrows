@@ -18,6 +18,7 @@ impl Store {
             "bridge",
             label,
             None,
+            None,
             ttl_seconds,
             MAX_BRIDGE_TTL_SECONDS,
         )
@@ -48,6 +49,37 @@ impl Store {
             "runtime",
             label,
             Some(run_id),
+            None,
+            ttl_seconds,
+            MAX_RUNTIME_TTL_SECONDS,
+        )
+        .await
+    }
+
+    pub async fn issue_session_runtime_credential(
+        &self,
+        agent_id: Id,
+        session_id: Id,
+        label: &str,
+        ttl_seconds: i64,
+    ) -> Result<IssuedAgentCredential, DomainError> {
+        let session = self.get_session(session_id).await?;
+        if session.agent_instance_id != agent_id {
+            return Err(DomainError::Conflict(
+                "session runtime credential Session belongs to another AgentInstance".into(),
+            ));
+        }
+        if session.status != "open" {
+            return Err(DomainError::Conflict(
+                "session runtime credential requires an open Session".into(),
+            ));
+        }
+        self.issue_agent_credential(
+            agent_id,
+            "session_runtime",
+            label,
+            None,
+            Some(session_id),
             ttl_seconds,
             MAX_RUNTIME_TTL_SECONDS,
         )
@@ -60,6 +92,7 @@ impl Store {
         kind: &str,
         label: &str,
         run_id: Option<Id>,
+        session_id: Option<Id>,
         ttl_seconds: i64,
         max_ttl_seconds: i64,
     ) -> Result<IssuedAgentCredential, DomainError> {
@@ -83,8 +116,8 @@ impl Store {
         let expires_at = now + Duration::seconds(ttl_seconds);
         sqlx::query(
             "INSERT INTO agent_credentials(
-                id,agent_instance_id,token_hash,kind,label,run_id,expires_at,created_at
-             ) VALUES(?,?,?,?,?,?,?,?)",
+                id,agent_instance_id,token_hash,kind,label,run_id,session_id,expires_at,created_at
+             ) VALUES(?,?,?,?,?,?,?,?,?)",
         )
         .bind(id.to_string())
         .bind(agent_id.to_string())
@@ -92,6 +125,7 @@ impl Store {
         .bind(kind)
         .bind(label)
         .bind(run_id.map(|value| value.to_string()))
+        .bind(session_id.map(|value| value.to_string()))
         .bind(expires_at.to_rfc3339())
         .bind(now.to_rfc3339())
         .execute(&self.pool)
@@ -105,6 +139,7 @@ impl Store {
                 kind: kind.into(),
                 label: label.into(),
                 run_id,
+                session_id,
                 expires_at,
                 revoked_at: None,
                 created_at: now,
@@ -182,6 +217,23 @@ impl Store {
         Ok(result.rows_affected())
     }
 
+    pub async fn revoke_session_agent_credentials(
+        &self,
+        session_id: Id,
+    ) -> Result<u64, DomainError> {
+        let now = Utc::now();
+        let result = sqlx::query(
+            "UPDATE agent_credentials SET revoked_at=COALESCE(revoked_at,?)
+             WHERE kind='session_runtime' AND session_id=? AND revoked_at IS NULL",
+        )
+        .bind(now.to_rfc3339())
+        .bind(session_id.to_string())
+        .execute(&self.pool)
+        .await
+        .map_err(storage)?;
+        Ok(result.rows_affected())
+    }
+
     pub async fn get_agent_credential(
         &self,
         credential_id: Id,
@@ -221,6 +273,7 @@ fn row_to_agent_credential(row: sqlx::sqlite::SqliteRow) -> Result<AgentCredenti
         kind: row.try_get("kind").map_err(storage)?,
         label: row.try_get("label").map_err(storage)?,
         run_id: parse_opt_id(row.try_get("run_id").map_err(storage)?)?,
+        session_id: parse_opt_id(row.try_get("session_id").map_err(storage)?)?,
         expires_at: parse_dt(row.try_get("expires_at").map_err(storage)?)?,
         revoked_at: parse_opt_dt(row.try_get("revoked_at").map_err(storage)?)?,
         created_at: parse_dt(row.try_get("created_at").map_err(storage)?)?,

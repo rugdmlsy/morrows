@@ -1,25 +1,26 @@
 mod auth;
 mod collaboration;
-mod conversation;
 mod delivery;
 mod dispatch;
 mod fleet;
 mod launch;
 mod lsm;
 mod mcp;
+mod memory;
 mod operator_auth;
+mod session;
 
 use anyhow::Context;
 use axum::{
     Json, Router,
     extract::{Path, State},
-    middleware,
     http::StatusCode,
+    middleware,
     response::{IntoResponse, Response},
     routing::{get, post},
 };
 use mcp::MorrowsMcp;
-use morrows_core::{CreateContextRevision, CreateTask, DomainError, Id};
+use morrows_core::{CreateContextRevision, CreateProject, CreateTask, DomainError, Id};
 use morrows_store::Store;
 use rmcp::transport::{
     StreamableHttpServerConfig,
@@ -63,6 +64,11 @@ struct RegisterAgentBody {
     name: String,
     #[serde(default)]
     capabilities: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct SetTaskProjectBody {
+    project_id: Option<Id>,
 }
 
 #[derive(Deserialize)]
@@ -119,8 +125,7 @@ async fn main() -> anyhow::Result<()> {
     let addr: SocketAddr = bind.parse().context("parse MORROWS_BIND")?;
     let require_agent_auth = env_bool("MORROWS_REQUIRE_AGENT_AUTH", false)?;
     let require_operator_auth = env_bool("MORROWS_REQUIRE_OPERATOR_AUTH", false)?;
-    let allow_insecure_remote_http =
-        env_bool("MORROWS_ALLOW_INSECURE_REMOTE_HTTP", false)?;
+    let allow_insecure_remote_http = env_bool("MORROWS_ALLOW_INSECURE_REMOTE_HTTP", false)?;
     let bootstrap_operator_token = env::var("MORROWS_BOOTSTRAP_OPERATOR_TOKEN")
         .ok()
         .map(|value| value.trim().to_owned())
@@ -149,6 +154,15 @@ async fn main() -> anyhow::Result<()> {
     if recovered > 0 {
         tracing::warn!(recovered, "reconciled interrupted launch jobs");
     }
+    let recovered_session_runtimes = store
+        .recover_session_runtime_attempts_after_restart()
+        .await?;
+    if recovered_session_runtimes > 0 {
+        tracing::warn!(
+            recovered_session_runtimes,
+            "marked interrupted Session runtimes failed after restart"
+        );
+    }
     let recovered_deliveries = store.recover_agent_delivery_claims().await?;
     if recovered_deliveries > 0 {
         tracing::warn!(
@@ -162,8 +176,11 @@ async fn main() -> anyhow::Result<()> {
 
     let api = Router::new()
         .route("/health", get(health))
+        .route("/projects", get(list_projects).post(create_project))
+        .route("/projects/{id}", get(get_project))
         .route("/tasks", get(list_tasks).post(create_task))
         .route("/tasks/{id}", get(get_task))
+        .route("/tasks/{id}/project", post(set_task_project))
         .route("/tasks/{id}/claim", post(claim_task))
         .route("/assignments/{id}/renew", post(renew_assignment))
         .route("/tasks/{id}/context", get(get_context).post(create_context))
@@ -175,9 +192,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/runs/{id}/checkpoint", post(checkpoint_run))
         .route("/runs/{id}/complete", post(complete_run))
         .merge(auth::routes())
+        .merge(memory::routes())
         .merge(operator_auth::routes())
         .merge(collaboration::routes())
-        .merge(conversation::routes())
+        .merge(session::routes())
         .merge(dispatch::routes())
         .merge(delivery::routes())
         .merge(fleet::routes())
@@ -275,9 +293,7 @@ fn validate_bind_security(
             );
         }
         if !require_agent_auth {
-            anyhow::bail!(
-                "non-loopback MORROWS_BIND={addr} requires MORROWS_REQUIRE_AGENT_AUTH=1"
-            );
+            anyhow::bail!("non-loopback MORROWS_BIND={addr} requires MORROWS_REQUIRE_AGENT_AUTH=1");
         }
         if !allow_insecure_remote_http {
             anyhow::bail!(
@@ -307,6 +323,30 @@ async fn health() -> Json<Value> {
     }))
 }
 
+async fn list_projects(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        serde_json::to_value(state.store.list_projects().await?).unwrap(),
+    ))
+}
+
+async fn create_project(
+    State(state): State<AppState>,
+    Json(body): Json<CreateProject>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        serde_json::to_value(state.store.create_project(body).await?).unwrap(),
+    ))
+}
+
+async fn get_project(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        serde_json::to_value(state.store.get_project(id).await?).unwrap(),
+    ))
+}
+
 async fn list_tasks(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     Ok(Json(
         serde_json::to_value(state.store.list_tasks().await?).unwrap(),
@@ -328,6 +368,16 @@ async fn get_task(
 ) -> Result<Json<Value>, ApiError> {
     Ok(Json(
         serde_json::to_value(state.store.get_task(id).await?).unwrap(),
+    ))
+}
+
+async fn set_task_project(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<SetTaskProjectBody>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        serde_json::to_value(state.store.set_task_project(id, body.project_id).await?).unwrap(),
     ))
 }
 
@@ -491,42 +541,16 @@ mod startup_security_tests {
 
     #[test]
     fn loopback_compatibility_remains_available() {
-        validate_bind_security(
-            addr("127.0.0.1:8787"),
-            false,
-            false,
-            false,
-            false,
-            false,
-        )
-        .unwrap();
+        validate_bind_security(addr("127.0.0.1:8787"), false, false, false, false, false).unwrap();
     }
 
     #[test]
     fn strict_operator_auth_cannot_start_without_bootstrap_or_admin() {
-        let err = validate_bind_security(
-            addr("127.0.0.1:8787"),
-            true,
-            true,
-            false,
-            false,
-            false,
-        )
-        .unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("MORROWS_BOOTSTRAP_OPERATOR_TOKEN")
-        );
+        let err = validate_bind_security(addr("127.0.0.1:8787"), true, true, false, false, false)
+            .unwrap_err();
+        assert!(err.to_string().contains("MORROWS_BOOTSTRAP_OPERATOR_TOKEN"));
 
-        validate_bind_security(
-            addr("127.0.0.1:8787"),
-            true,
-            true,
-            false,
-            true,
-            false,
-        )
-        .unwrap();
+        validate_bind_security(addr("127.0.0.1:8787"), true, true, false, true, false).unwrap();
     }
 
     #[test]

@@ -9,6 +9,7 @@ pub struct AgentCredential {
     pub kind: String,
     pub label: String,
     pub run_id: Option<Id>,
+    pub session_id: Option<Id>,
     pub expires_at: DateTime<Utc>,
     pub revoked_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,

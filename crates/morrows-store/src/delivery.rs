@@ -225,31 +225,145 @@ impl Store {
         Ok(result.rows_affected())
     }
 
-    pub async fn acknowledge_conversation_deliveries(
+    pub async fn claim_session_deliveries_for_runtime(
         &self,
-        conversation_id: Id,
+        runtime_id: Id,
+        limit: i64,
+    ) -> Result<Vec<AgentDelivery>, DomainError> {
+        let limit = limit.clamp(1, 100);
+        let now = Utc::now();
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(storage)?;
+        let runtime = sqlx::query(
+            "SELECT status,session_id,agent_instance_id
+             FROM session_runtime_attempts WHERE id=?",
+        )
+        .bind(runtime_id.to_string())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(storage)?
+        .ok_or_else(|| DomainError::NotFound(format!("session runtime attempt {runtime_id}")))?;
+        let status: String = runtime.try_get("status").map_err(storage)?;
+        if status != "running" {
+            return Err(DomainError::Conflict(format!(
+                "session runtime attempt is {status}"
+            )));
+        }
+        let session_id = parse_id(runtime.try_get("session_id").map_err(storage)?)?;
+        let agent_id = parse_id(runtime.try_get("agent_instance_id").map_err(storage)?)?;
+
+        let ids: Vec<String> = sqlx::query_scalar(
+            "SELECT d.id
+             FROM agent_deliveries d
+             JOIN session_messages m ON m.id=d.source_id
+             WHERE d.agent_instance_id=?
+               AND d.kind='session_message'
+               AND d.status='queued'
+               AND m.session_id=?
+               AND m.recalled_at IS NULL
+             ORDER BY d.created_at,d.id LIMIT ?",
+        )
+        .bind(agent_id.to_string())
+        .bind(session_id.to_string())
+        .bind(limit)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(storage)?;
+
+        for id in &ids {
+            sqlx::query(
+                "UPDATE agent_deliveries
+                 SET status='claimed',claimed_by_session_runtime_id=?,claimed_at=?
+                 WHERE id=? AND status='queued'",
+            )
+            .bind(runtime_id.to_string())
+            .bind(now.to_rfc3339())
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?;
+        }
+        tx.commit().await.map_err(storage)?;
+
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = sqlx::query(
+            "SELECT * FROM agent_deliveries
+             WHERE claimed_by_session_runtime_id=? AND status='claimed'
+             ORDER BY created_at,id",
+        )
+        .bind(runtime_id.to_string())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage)?;
+        rows.into_iter().map(row_to_agent_delivery).collect()
+    }
+
+    pub async fn complete_session_runtime_deliveries(
+        &self,
+        runtime_id: Id,
+        delivered_by: &str,
+    ) -> Result<u64, DomainError> {
+        let now = Utc::now();
+        let result = sqlx::query(
+            "UPDATE agent_deliveries
+             SET status='delivered',delivered_by=?,delivered_at=?
+             WHERE claimed_by_session_runtime_id=? AND status='claimed'",
+        )
+        .bind(delivered_by)
+        .bind(now.to_rfc3339())
+        .bind(runtime_id.to_string())
+        .execute(&self.pool)
+        .await
+        .map_err(storage)?;
+        Ok(result.rows_affected())
+    }
+
+    pub async fn release_session_runtime_deliveries(
+        &self,
+        runtime_id: Id,
+    ) -> Result<u64, DomainError> {
+        let result = sqlx::query(
+            "UPDATE agent_deliveries
+             SET status='queued',claimed_by_session_runtime_id=NULL,claimed_at=NULL
+             WHERE claimed_by_session_runtime_id=? AND status='claimed'",
+        )
+        .bind(runtime_id.to_string())
+        .execute(&self.pool)
+        .await
+        .map_err(storage)?;
+        Ok(result.rows_affected())
+    }
+
+    pub async fn acknowledge_session_deliveries(
+        &self,
+        session_id: Id,
         agent_id: Id,
         delivered_by: &str,
     ) -> Result<u64, DomainError> {
-        let conversation = self.get_conversation(conversation_id).await?;
-        if conversation.agent_instance_id != agent_id {
+        let session = self.get_session(session_id).await?;
+        if session.agent_instance_id != agent_id {
             return Err(DomainError::Conflict(
-                "conversation belongs to another agent instance".into(),
+                "session belongs to another agent instance".into(),
             ));
         }
         let now = Utc::now();
         let result = sqlx::query(
             "UPDATE agent_deliveries
              SET status='delivered',delivered_by=?,delivered_at=?
-             WHERE agent_instance_id=? AND kind='conversation_message' AND status='queued'
+             WHERE agent_instance_id=? AND kind='session_message' AND status='queued'
                AND source_id IN (
-                 SELECT id FROM conversation_messages WHERE conversation_id=?
+                 SELECT id FROM session_messages WHERE session_id=? AND recalled_at IS NULL
                )",
         )
         .bind(delivered_by)
         .bind(now.to_rfc3339())
         .bind(agent_id.to_string())
-        .bind(conversation_id.to_string())
+        .bind(session_id.to_string())
         .execute(&self.pool)
         .await
         .map_err(storage)?;
@@ -290,14 +404,31 @@ impl Store {
     pub async fn recover_agent_delivery_claims(&self) -> Result<u64, DomainError> {
         let result = sqlx::query(
             "UPDATE agent_deliveries
-             SET status='queued',claimed_by_launch_attempt_id=NULL,claimed_at=NULL
+             SET status='queued',
+                 claimed_by_launch_attempt_id=NULL,
+                 claimed_by_session_runtime_id=NULL,
+                 claimed_at=NULL
              WHERE status='claimed'
                AND (
-                 claimed_by_launch_attempt_id IS NULL
-                 OR NOT EXISTS (
-                   SELECT 1 FROM launch_attempts a
-                   WHERE a.id=agent_deliveries.claimed_by_launch_attempt_id
-                     AND a.status IN ('starting','running')
+                 (
+                   claimed_by_launch_attempt_id IS NULL
+                   AND claimed_by_session_runtime_id IS NULL
+                 )
+                 OR (
+                   claimed_by_launch_attempt_id IS NOT NULL
+                   AND NOT EXISTS (
+                     SELECT 1 FROM launch_attempts a
+                     WHERE a.id=agent_deliveries.claimed_by_launch_attempt_id
+                       AND a.status IN ('starting','running')
+                   )
+                 )
+                 OR (
+                   claimed_by_session_runtime_id IS NOT NULL
+                   AND NOT EXISTS (
+                     SELECT 1 FROM session_runtime_attempts sra
+                     WHERE sra.id=agent_deliveries.claimed_by_session_runtime_id
+                       AND sra.status='running'
+                   )
                  )
                )",
         )

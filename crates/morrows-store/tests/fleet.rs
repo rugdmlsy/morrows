@@ -147,6 +147,99 @@ async fn normalized_and_legacy_registration_preserve_identity() {
 }
 
 #[tokio::test]
+async fn managed_codex_provisioning_binds_one_isolated_account_per_agent() {
+    let store = Store::connect("sqlite::memory:").await.unwrap();
+    let profile = store
+        .register_profile(input(json!({
+            "name":"Codex CLI",
+            "provider":"openai",
+            "kind":"coding_agent",
+            "default_capabilities":["code","mcp"]
+        })))
+        .await
+        .unwrap();
+    let machine = store
+        .register_machine(input(json!({
+            "name":"mac",
+            "hostname":"mac.local",
+            "os":"macos",
+            "arch":"arm64"
+        })))
+        .await
+        .unwrap();
+
+    let (account, agent, launch) = store
+        .provision_managed_codex_agent(
+            profile.id,
+            Some(machine.id),
+            " User@Example.com ",
+            None,
+            "/usr/local/bin/codex",
+            "/tmp/morrows-codex-account-a",
+            "/tmp",
+            Some("gpt-5.6"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(account.provider, "openai");
+    assert_eq!(account.label, "user@example.com");
+    assert_eq!(account.email.as_deref(), Some("user@example.com"));
+    assert_eq!(agent.display_name, "codex-0");
+    assert_eq!(agent.account_id, Some(account.id));
+    assert_eq!(agent.profile_id, profile.id);
+    assert_eq!(agent.machine_id, Some(machine.id));
+    assert_eq!(agent.capabilities, vec!["code", "mcp"]);
+    assert_eq!(launch.agent_instance_id, agent.id);
+    assert_eq!(launch.adapter, "codex_cli");
+    assert_eq!(launch.program, "/usr/local/bin/codex");
+    assert_eq!(
+        launch.codex_home.as_deref(),
+        Some("/tmp/morrows-codex-account-a")
+    );
+    assert_eq!(launch.default_cwd.as_deref(), Some("/tmp"));
+    assert_eq!(launch.model.as_deref(), Some("gpt-5.6"));
+    assert_eq!(launch.metadata["auth_isolation"], "codex_home_file");
+    assert_eq!(
+        account.metadata["auth_isolation"]["credential_store"],
+        "file"
+    );
+
+    assert!(matches!(
+        store
+            .provision_managed_codex_agent(
+                profile.id,
+                Some(machine.id),
+                "user@example.com",
+                None,
+                "/usr/local/bin/codex",
+                "/tmp/morrows-codex-account-b",
+                "/tmp",
+                None,
+            )
+            .await,
+        Err(DomainError::Conflict(_))
+    ));
+    assert_eq!(store.list_agents().await.unwrap().len(), 1);
+    assert_eq!(store.list_launch_profiles().await.unwrap().len(), 1);
+
+    let (_, second, _) = store
+        .provision_managed_codex_agent(
+            profile.id,
+            Some(machine.id),
+            "second@example.com",
+            Some("research-codex"),
+            "/usr/local/bin/codex",
+            "/tmp/morrows-codex-account-c",
+            "/tmp",
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(second.display_name, "research-codex");
+}
+
+#[tokio::test]
 async fn heartbeat_capacity_ownership_validation_and_atomicity() {
     let store = Store::connect("sqlite::memory:").await.unwrap();
     let a = store.register_agent("a", &[]).await.unwrap();

@@ -543,7 +543,7 @@ async fn write_codebuddy_mcp_config(
     Ok(SecretFileGuard(path.to_path_buf()))
 }
 
-fn codebuddy_args(
+pub(crate) fn codebuddy_args(
     profile: &LaunchProfile,
     mcp_config_path: &str,
     session_ref: &str,
@@ -818,12 +818,7 @@ async fn execute_codebuddy_with_root(
         control.revoke_for_run(&store, execution.run.id).await?;
     }
     store
-        .finish_launch_attempt(
-            execution.attempt.id,
-            exit_code,
-            Some(session_ref),
-            error,
-        )
+        .finish_launch_attempt(execution.attempt.id, exit_code, Some(session_ref), error)
         .await?;
     Ok(())
 }
@@ -957,7 +952,7 @@ async fn execute_codex_with_root(
     }
     if let Some(binding) = &agent_binding {
         prompt.push_str(&format!(
-            "\nLSM execution context: {}. Use only this Logical Session for LSM calls. Morrows owns Session lifecycle; do not start, finish, cancel, or delete it. LSM will reject old Session IDs from resumed conversation history.\n",
+            "\nLSM execution context: {}. Use only this Logical Session for LSM calls. Morrows owns Session lifecycle; do not start, finish, cancel, or delete it. LSM will reject old Session IDs from resumed Session history.\n",
             binding.logical_session_id,
         ));
     }
@@ -1053,7 +1048,7 @@ async fn execute_codex_with_root(
     Ok(())
 }
 
-fn inject_morrows_config(args: &mut Vec<String>) {
+pub(crate) fn inject_morrows_config(args: &mut Vec<String>) {
     let morrows_url = std::env::var("MORROWS_MCP_URL")
         .or_else(|_| std::env::var("AC_MCP_URL"))
         .unwrap_or_else(|_| "http://127.0.0.1:8787/mcp".into());
@@ -1094,7 +1089,7 @@ fn launch_root() -> anyhow::Result<PathBuf> {
     }
 }
 
-fn codex_args(
+pub(crate) fn codex_args(
     profile: &LaunchProfile,
     cwd: &str,
     last_message_path: &str,
@@ -1150,7 +1145,7 @@ AgentInstance: {agent}\n\
 Task ID: {task_id}\n\
 Assignment ID: {assignment_id}\n\
 Run ID: {run_id}\n\
-\nUse the configured Morrows MCP server as the durable source of truth. The Assignment and Run already exist; do not claim the task or start another Run. Before substantial work, read task_get and memory_get for Task ID {task_id}. Read instructions_get for management updates. Also check conversation_inbox for direct company messages addressed to this AgentInstance; load a selected conversation with conversation_get and reply with conversation_reply when appropriate. After materially advancing a long direct conversation, update its structured recovery summary with conversation_summary_revise. Checkpoint meaningful progress to Run ID {run_id}. If the task is fully complete, call run_complete for Run ID {run_id}. If blocked or incomplete, checkpoint the blocker/progress and exit without calling run_complete.\n\
+\nUse the configured Morrows MCP server as the durable source of truth. The Assignment and Run already exist; do not claim the task or start another Run. Before substantial work, read task_get and memory_get for Task ID {task_id}. Read instructions_get for management updates. Also check session_inbox for direct company messages addressed to this AgentInstance; load a selected Session with session_get and reply with session_reply when appropriate. After materially advancing a long direct Session, update its structured recovery summary with session_summary_revise. Checkpoint meaningful progress to Run ID {run_id}. If the task is fully complete, call run_complete for Run ID {run_id}. If blocked or incomplete, checkpoint the blocker/progress and exit without calling run_complete.\n\
 \nTask title:\n{title}\n\
 \nTask description:\n{description}\n\
 \nContext goal:\n{goal}\n\
@@ -1186,10 +1181,10 @@ fn build_delivery_prompt(execution: &LaunchExecution, deliveries: &[AgentDeliver
             continue;
         }
         match delivery.kind.as_str() {
-            "conversation_message" => {
-                let conversation_id = delivery
+            "session_message" => {
+                let session_id = delivery
                     .payload
-                    .get("conversation_id")
+                    .get("session_id")
                     .and_then(Value::as_str)
                     .unwrap_or("unknown");
                 let body = delivery
@@ -1198,7 +1193,7 @@ fn build_delivery_prompt(execution: &LaunchExecution, deliveries: &[AgentDeliver
                     .and_then(Value::as_str)
                     .unwrap_or("");
                 items.push(format!(
-                    "Direct company message in conversation {conversation_id}:\n{}\nUse conversation_get for context and conversation_reply when appropriate.",
+                    "Direct company message in Session {session_id}:\n{}\nUse session_get for context and session_reply when appropriate.",
                     clip(body, 3000)
                 ));
             }
@@ -1229,7 +1224,7 @@ fn clip(value: &str, max_chars: usize) -> String {
     value.chars().take(max_chars).collect()
 }
 
-fn extract_external_session_ref(stdout: &str) -> Option<String> {
+pub(crate) fn extract_external_session_ref(stdout: &str) -> Option<String> {
     for line in stdout.lines() {
         let Ok(value) = serde_json::from_str::<Value>(line) else {
             continue;
@@ -1258,7 +1253,7 @@ fn find_session_ref(value: &Value) -> Option<String> {
     }
 }
 
-fn extract_codex_error(stdout: &str) -> Option<String> {
+pub(crate) fn extract_codex_error(stdout: &str) -> Option<String> {
     for line in stdout.lines().rev() {
         let Ok(value) = serde_json::from_str::<Value>(line) else {
             continue;
@@ -1595,9 +1590,18 @@ mod tests {
             "morrows-session-1",
             false,
         );
-        assert!(args.windows(2).any(|pair| pair == ["--session-id", "morrows-session-1"]));
-        assert!(args.windows(2).any(|pair| pair == ["--mcp-config", "/tmp/private-mcp-config.json"]));
-        assert!(args.iter().any(|arg| arg == "--dangerously-skip-permissions"));
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--session-id", "morrows-session-1"])
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--mcp-config", "/tmp/private-mcp-config.json"])
+        );
+        assert!(
+            args.iter()
+                .any(|arg| arg == "--dangerously-skip-permissions")
+        );
         assert!(
             args.windows(2)
                 .any(|pair| pair == ["--tools", "ToolSearch,DeferExecuteTool"])
@@ -1612,7 +1616,11 @@ mod tests {
             "morrows-session-1",
             true,
         );
-        assert!(resumed.windows(2).any(|pair| pair == ["--resume", "morrows-session-1"]));
+        assert!(
+            resumed
+                .windows(2)
+                .any(|pair| pair == ["--resume", "morrows-session-1"])
+        );
         assert!(!resumed.iter().any(|arg| arg == "--session-id"));
     }
 
@@ -1645,15 +1653,15 @@ mod tests {
             })))
             .await
             .unwrap();
-        let conversation = store
-            .create_conversation(CreateConversation {
+        let session = store
+            .create_session(CreateSession {
                 agent_instance_id: agent.id,
                 title: "CodeBuddy delivery".into(),
             })
             .await
             .unwrap();
         store
-            .create_human_conversation_message(conversation.id, "delivery to codebuddy")
+            .create_human_session_message(session.id, "delivery to codebuddy")
             .await
             .unwrap();
         let delivery_id = store.agent_delivery_inbox(agent.id, 80).await.unwrap()[0].id;
@@ -1710,15 +1718,15 @@ mod tests {
             )
             .await
             .unwrap();
-        let conversation = store
-            .create_conversation(CreateConversation {
+        let session = store
+            .create_session(CreateSession {
                 agent_instance_id: agent.id,
                 title: "Prompt delivery".into(),
             })
             .await
             .unwrap();
         store
-            .create_human_conversation_message(conversation.id, "answer this direct message")
+            .create_human_session_message(session.id, "answer this direct message")
             .await
             .unwrap();
 
@@ -1727,11 +1735,10 @@ mod tests {
         let deliveries = store.agent_delivery_inbox(agent.id, 80).await.unwrap();
         let delivery_prompt = build_delivery_prompt(&execution, &deliveries);
         assert!(delivery_prompt.contains("answer this direct message"));
-        assert!(delivery_prompt.contains(&conversation.id.to_string()));
+        assert!(delivery_prompt.contains(&session.id.to_string()));
         assert!(!delivery_prompt.contains("instruction already loaded by launch execution"));
         assert!(
-            build_prompt(&execution)
-                .contains("instruction already loaded by launch execution")
+            build_prompt(&execution).contains("instruction already loaded by launch execution")
         );
     }
 

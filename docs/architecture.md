@@ -49,7 +49,7 @@ To prevent severe ambiguity caused by bare usages of common words like `session`
 | **持久终端 / 终端** | `PersistentShell` | `shell session` | 运行空间内维持环境与状态的常驻命令行交互终端 |
 | **浏览器实例** | `BrowserInstance` | `browser session` | 运行空间内受控的有状态浏览器实例 |
 | **模型会话** | `ProviderThread` | `Provider Session` | Codex / Claude / Gemini 模型自身的连续私有对话流 |
-| **工作对话** | `DirectConversation` | `Conversation` | 人类与特定 Agent 实例直接进行的一对一持久化双向沟通 |
+| **会话** | `Session` | `Conversation` | 人类与特定 Agent 实例之间的一对一持久化工作会话；属于一个 AgentInstance，可跨多次运行时 turn 持续存在 |
 | **上下文快照** | `ContextSnapshot` | `ContextRevision` | 某次工作执行初始化时冻结的完整工作背景、目标与记忆视图 |
 | **记忆** | `Memory` | `Memory` / `Context` | 长期持久化知识（跨越任务与会话），分组织/项目/员工/工作等作用域 |
 | **成果物** | `Artifact` | `Artifact` | 被正式归档、持久托管并可全局引用的工作交付物证据（Managed Store） |
@@ -58,6 +58,43 @@ To prevent severe ambiguity caused by bare usages of common words like `session`
 | **执行证据** | `WorkExecutionEvidence` | `RunExecutionEvidence`| 将工作语义状态与底层 LSM Audit、Job Logs 关联的追溯证据 |
 
 > 规范详见：[docs/agent-work-and-context-spec.md](file:///Users/huayuxue/workspaces/morrows/docs/agent-work-and-context-spec.md)
+
+### Agent UI naming rules
+
+The UI must distinguish **human display names** from **canonical internal identifiers**:
+
+- `AgentInstance.name` is a stable runtime/registration identity and MUST NOT be renamed by
+  ordinary UI actions. `AgentInstance.display_name` is the human-facing Agent name.
+- New normalized instances receive an automatic display name derived from their product/profile
+  family plus a numeric suffix: `codex-0`, `codex-1`, `codebuddy-0`, `chatgpt-0`, etc.
+  The suffix only disambiguates Agents of the same family; machine/account/session names do not
+  belong in the display name.
+- Users may rename `display_name`. Renaming MUST NOT change the runtime registration key,
+  provider thread identity, account binding, machine binding, or historical references.
+- `AgentProfile` is rendered as **类型 / Type**; `AgentAccount` as **身份 / Identity**;
+  `Machine` as **运行位置 / Runtime location**; capacity state as **工作状态 / Work state**.
+- An account is identified to users by its verified **email** when available. Internal labels
+  such as `codex-personal` or `codebuddy-personal` are technical identifiers and stay in
+  Technical info. If the provider does not expose an email, the UI shows **未记录邮箱 /
+  Email not recorded** rather than inventing an identity.
+- Manually provisioned Codex Agents are created by selecting an existing Codex `auth.json`
+  through the Web UI's native file picker. Morrows derives the Account email from the
+  `tokens.id_token` JWT claim, rejects missing/unverified email identities, and copies the
+  selected auth file into one private `CODEX_HOME` per Account with
+  `cli_auth_credentials_store="file"`. The Account record stores only the isolation
+  backend/path metadata; provider secrets remain outside the Morrows database. This is an
+  implementation boundary, not the long-term credential model.
+- A future provider-credential layer should replace the per-home backend behind Account with a
+  centralized encrypted Credential Store / broker. AgentInstance, Account, Session and
+  LaunchProfile identities must remain stable during that migration so historical work does not
+  depend on where authentication material is physically stored.
+- Provider names are normalized for display (`openai → OpenAI`, `tencent → Tencent`,
+  `local → 本地/Local`). UUIDs, raw instance names, external refs, account labels and
+  profile/account/machine IDs remain available under the collapsed **技术信息 / Technical info**
+  section for debugging and control-plane operations.
+- Archived Agents remain durable identities for historical Tasks/Runs/messages but are omitted
+  from the default Agent Fleet. Archiving also closes their open Sessions; it never
+  deletes historical Session/messages.
 
 ## Knowledge, Memory & Summary Hierarchy (知识与记忆层级)
 
@@ -110,7 +147,7 @@ Control-plane REST uses a separate `mrw_operator_*` credential class. Durable cr
 carry one of three roles:
 
 - `viewer`: read-only control-plane access;
-- `operator`: ordinary work, dispatch, launch, cancellation, context and conversation
+- `operator`: ordinary work, dispatch, launch, cancellation, context and Session
   mutations;
 - `admin`: operator privileges plus identity registration and Agent/Operator credential
   management.
@@ -134,7 +171,11 @@ should keep Morrows bound to loopback and place a TLS reverse proxy in front of 
 ## Implemented entities
 
 ```
+Project
+ └── MemoryEntry*
+
 Task
+ ├── MemoryEntry*
  ├── ContextRevision*
  ├── Assignment*
  │     └── Run*
@@ -146,9 +187,20 @@ Task
  ├── TaskDependency*
  └── Event*
 
-Conversation
- └── ConversationMessage*
+Session
+ └── SessionMessage*
+
+Organization / AgentInstance
+ └── MemoryEntry*
 ```
+
+`MemoryEntry` is append-only long-term knowledge with an explicit scope
+(`organization`, `project`, `agent`, or `task`), structured JSON content,
+provenance (`source_kind` / `source_ref`), visibility, and an optional
+`supersedes_memory_id` chain. It is distinct from mutable task progress and immutable
+ContextRevision snapshots. Employee `memory_get` materializes the shared organization,
+project, task, and caller-Agent memories relevant to the requested Task before returning
+the current task context/collaboration state.
 
 AgentInstance remains the worker identity referenced by M1/M2 work. M3 links each instance to an AgentProfile and optional independent Account and Machine identities, with append-only CapacitySnapshots.
 
@@ -163,43 +215,69 @@ AgentInstance remains the worker identity referenced by M1/M2 work. M3 links eac
 7. Important actions append Events in the same transaction as state changes.
 8. A successful `executor` Run may mark its Task done; non-executor roles do not.
 9. Daemon restart does not erase Tasks, Runs, checkpoints, or pending durable jobs.
-10. Conversation list reads return summary metadata only; message history is a separate paged read.
-11. Direct conversation MCP access is scoped to the addressed AgentInstance.
+10. Session list reads return summary metadata only; message history is a separate paged read.
+11. Session MCP access is scoped to the addressed AgentInstance.
 12. **Ultimate Recovery Invariant (终极恢复原则)**: Even if the original Agent process, Provider Session, execution machine, and temporary workspace directories disappear completely, a new Agent can reconstruct full state and proceed solely from Morrows canonical records (WorkItem, ContextSnapshot, Memory, Decision, Artifact, Summary, Handoff, Evidence).
 
-## Direct Agent conversations
+## Agent Sessions
 
 Direct human↔Agent chat is intentionally separate from Task collaboration. A
-`Conversation` belongs to one AgentInstance and stores only conversation metadata; its
-`ConversationMessage` rows are paged independently. This keeps the WebUI startup path
+`Session` belongs to one AgentInstance and stores only Session metadata; its
+`SessionMessage` rows are paged independently. This keeps the WebUI startup path
 lightweight and prevents opening the application from materializing every chat history.
 
 Control-plane REST:
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| GET | `/conversations` | Summary list only: title, Agent, counts, last-message preview/time |
-| POST | `/conversations` | Create a direct conversation for an AgentInstance |
-| GET | `/conversations/{id}` | Conversation metadata |
-| GET | `/conversations/{id}/messages?limit=&before=&after=` | Lazy/paged history; before loads older, after loads newer |
-| POST | `/conversations/{id}/messages` | Queue a human message |
+| GET | `/sessions` | Summary list only: title, Agent, counts, last-message preview/time |
+| POST | `/sessions` | Create a Session for an AgentInstance |
+| GET | `/sessions/{id}` | Session metadata |
+| GET | `/sessions/{id}/messages?limit=&before=&after=` | Lazy/paged history; before loads older, after loads newer |
+| POST | `/sessions/{id}/messages` | Queue a human message |
+| POST | `/sessions/{id}/messages/{message_id}/recall` | Recall a human message while its delivery is still queued |
+| GET | `/sessions/{id}/runtime` | Read the latest explicit Session runtime attempt |
+| POST | `/sessions/{id}/runtime/start` | Explicitly start/resume the Session's local Agent CLI |
 
-The WebUI keeps an in-memory cache keyed by Conversation ID. Initial navigation fetches
-only summaries. Selecting a conversation fetches the latest page (currently 80 messages);
-switching away and back reuses the cache, the selected conversation alone polls with an
+The WebUI keeps an in-memory cache keyed by Session ID. Initial navigation fetches
+only summaries. Selecting a Session fetches the latest page (currently 80 messages);
+switching away and back reuses the cache, the selected Session alone polls with an
 `after` anchor, and earlier history is loaded only when requested with `before`.
 
-Employee MCP exposes `conversation_inbox`, `conversation_get`, and
-`conversation_reply`. Inbox returns only conversations that still have queued human
-messages for the authenticated AgentInstance. `conversation_get` enforces the target
+Employee MCP exposes `session_inbox`, `session_get`, and
+`session_reply`. Inbox returns only Sessions that still have queued human
+messages for the authenticated AgentInstance. `session_get` enforces the target
 Agent identity and supports the same paging anchors. A reply atomically marks queued
-human messages in that conversation delivered and appends the Agent reply.
+human messages in that Session delivered and appends the Agent reply.
 
-Conversation messaging is durable but does not require an always-running Agent. If the
-target Agent already has a `starting` or `running` launch, Morrows writes a small
-launch instruction telling it to inspect that conversation. Otherwise the message remains
-queued and is picked up through `conversation_inbox` when the Agent next runs. This
-preserves the non-daemon Agent model while still enabling direct chat from the WebUI.
+Session messaging is durable but does not require an always-running Agent. A human
+message first enters the durable delivery outbox. The user-facing delivery states are
+only **等待投递 / awaiting delivery** and **已投递 / delivered**. Internal claim
+state is deliberately not a third user-facing state. A message becomes delivered only
+after Morrows has successfully written the Session prompt containing that message to
+the target Agent CLI/runtime. While the delivery is still truly queued, the human may
+recall it; once an Agent runtime has claimed it, recall is fenced even though the UI
+continues to show awaiting delivery until the prompt write succeeds.
+
+The WebUI can explicitly start the Agent for a Session without creating a fake Task,
+Assignment, or Run. A `SessionRuntimeAttempt` binds the Morrows Session, AgentInstance,
+the Agent's configured Account, and one enabled local CLI LaunchProfile. Each attempt can
+also override `model` and `reasoning_effort` without mutating the LaunchProfile. The WebUI
+loads these choices from the installed CLI: Codex uses its bundled machine-readable model
+catalog, while CodeBuddy uses the model/effort values declared by its current CLI help. If a
+later runtime omits either override, Morrows inherits the previous Session runtime setting. Morrows exports
+the Agent, Account, and Session identifiers to the child environment, issues a short-lived
+Session-scoped Agent credential, and claims only queued messages belonging to that
+Session. For Codex/CodeBuddy local CLI adapters, the first successful start creates a
+provider thread/session; later starts for the same Morrows Session and LaunchProfile
+resume the latest persisted provider session reference. The runtime attempt records PID,
+logs, exit status, and provider session reference.
+
+If no explicit Session runtime is started, queued messages can still be consumed when
+the addressed Agent later runs and reads its Session inbox; existing interrupted
+task-bound local Runs may also be resumed by the delivery worker. Daemon restart marks
+orphaned Session runtimes failed, revokes their Session credentials, and releases
+unfinished delivery claims back to the queue.
 
 ## Collaboration continuation
 
@@ -289,7 +367,7 @@ The additive 0003 migration preserves existing M2 records with the defaults abov
 M2.1 was validated against the persistent local daemon with two independent `codex-personal`
 CLI sessions bound to two different AgentInstance identities. Agent A created collaboration
 records and a pending handoff, ending its Run and releasing its Assignment. Agent B had no
-access to A's Codex conversation; after the control plane assigned it a distinct Run, it
+access to A's provider thread; after the control plane assigned it a distinct Run, it
 recovered the task via `task_get`, `memory_get`, `task_collaboration`, and `handoff_get`,
 accepted the handoff, replied to A's directed message with the same correlation ID, checkpointed
 the reconstructed state, and completed the task. The persisted handoff's

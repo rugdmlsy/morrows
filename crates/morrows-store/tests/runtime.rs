@@ -538,23 +538,17 @@ async fn queued_delivery_makes_interrupted_codex_run_eligible_for_automatic_resu
         .await
         .unwrap();
     assert_eq!(store.get_run(run_id).await.unwrap().status, "interrupted");
-    assert!(
-        store
-            .delivery_resume_candidates()
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert!(store.delivery_resume_candidates().await.unwrap().is_empty());
 
-    let conversation = store
-        .create_conversation(CreateConversation {
+    let session = store
+        .create_session(CreateSession {
             agent_instance_id: assignment.agent_instance_id,
             title: "Delivery wake".into(),
         })
         .await
         .unwrap();
     store
-        .create_human_conversation_message(conversation.id, "continue this turn")
+        .create_human_session_message(session.id, "continue this turn")
         .await
         .unwrap();
 
@@ -565,11 +559,5 @@ async fn queued_delivery_makes_interrupted_codex_run_eligible_for_automatic_resu
     let resumed = store.enqueue_run_delivery_resume(run_id).await.unwrap();
     assert_eq!(resumed.restart_run_id, Some(run_id));
     assert_eq!(resumed.resume_from_attempt_id, Some(first.id));
-    assert!(
-        store
-            .delivery_resume_candidates()
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert!(store.delivery_resume_candidates().await.unwrap().is_empty());
 }

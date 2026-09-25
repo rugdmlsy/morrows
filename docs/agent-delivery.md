@@ -6,10 +6,10 @@ Agent Delivery 是 Morrows 控制平面中的可靠投递 outbox。它解决的�
 
 原始事实仍由各自对象持有：
 
-- 人类与 Agent 的正文：`ConversationMessage`
+- 人类与 Agent 的正文：`SessionMessage`
 - 管理指令正文：`LaunchInstruction`
 - 工作状态：Task / Assignment / Run
-- 长期恢复上下文：Context revision / ContextPackage / ConversationSummaryRevision
+- 长期恢复上下文：Context revision / ContextPackage / SessionSummaryRevision
 
 `AgentDelivery` 只保存 source reference、目标 Agent、可选 Task 范围、transport payload 和投递状态。
 
@@ -28,16 +28,16 @@ queued -> claimed -> delivered
 
 `delivered` **不表示 Agent 已完成处理**。
 
-例如 direct conversation 的完整链路是：
+例如 Session 的完整链路是：
 
 ```text
-ConversationMessage(status=queued)
+SessionMessage(status=queued)
         |
         +-- AgentDelivery(status=queued)
                  |
                  +-- transport received -> AgentDelivery(delivered)
         |
-        +-- Agent replies -> ConversationMessage(delivered)
+        +-- Agent replies -> SessionMessage(delivered)
 ```
 
 因此 transport ack、消息已回复、Task 完成是三个不同状态。
@@ -46,9 +46,9 @@ ConversationMessage(status=queued)
 
 以下写操作与 delivery 在同一个 SQLite transaction 中提交：
 
-1. `create_human_conversation_message`
-   - source: `conversation_message`
-   - target: conversation 的 `agent_instance_id`
+1. `create_human_session_message`
+   - source: `session_message`
+   - target: Session 的 `agent_instance_id`
    - task scope: none
 
 2. `send_launch_instruction`
@@ -62,15 +62,15 @@ ConversationMessage(status=queued)
 
 `0012_agent_delivery.sql` 会在升级时回填两类尚未完成的旧记录：
 
-- `ConversationMessage(status=queued)` → `conversation_message` delivery；
+- `SessionMessage(status=queued)` → `session_message` delivery；
 - active launch attempt 上已有的 `LaunchInstruction` → `launch_instruction` delivery。
 
 已结束 launch attempt 的历史 instruction 不会被重新唤醒。
 
 旧 employee MCP 路径继续可用，并与 outbox 保持一致：
 
-- `conversation_get` 成功读取对话后，会消费该对话仍 queued 的 delivery；
-- `conversation_reply` 在同一事务中消费相关 delivery 并把 human message 标记为已回复；
+- `session_get` 成功读取对话后，会消费该对话仍 queued 的 delivery；
+- `session_reply` 在同一事务中消费相关 delivery 并把 human message 标记为已回复；
 - `instructions_get` 成功读取 Task 指令后，会消费该 Task 对应的 queued instruction delivery。
 
 因此旧 Agent 不需要先升级为显式 `delivery_inbox` loop，也不会因为新 outbox 被重复唤醒。显式 `delivery_ack` 对已经 delivered 的记录仍是幂等的。
@@ -92,7 +92,7 @@ WebUI 同时展示两个维度：消息是否已经到达 Agent runtime，以及
 5. 写入失败则 claim 回到 `queued`。
 6. daemon 重启时，所有不再属于 starting/running attempt 的遗留 claim 自动回到 `queued`。
 7. 如果当前 turn 退出、LSM-bound Run 进入 `interrupted` restart window，并且仍有 queued delivery，delivery worker 自动创建同一个 Run 的 restart attempt。
-8. restart attempt 复用最近一个可用的 provider `external_session_ref`，因此下一条 delivery 是同一 provider conversation 的新 turn，而不是新会话。
+8. restart attempt 复用最近一个可用的 provider `external_session_ref`，因此下一条 delivery 是同一 provider thread 的新 turn，而不是新会话。
 
 CodeBuddy 的额外边界：
 
@@ -130,8 +130,8 @@ Bridge 必须使用目标 AgentInstance 的 credential。其他 Agent 无法读�
 ```text
 poll delivery_inbox
     |
-    +-- conversation_message
-    |      -> load conversation_get
+    +-- session_message
+    |      -> load session_get
     |      -> feed provider
     |
     +-- launch_instruction
@@ -155,7 +155,7 @@ provider accepted input
 Agent Delivery 不负责：
 
 - 判断 Agent 是否理解或完成了消息；
-- 取代 ConversationSummary / ContextPackage；
+- 取代 SessionSummary / ContextPackage；
 - 取代 Run checkpoint / complete；
 - 推断 provider quota；
 - 启动没有 active bridge 的第三方桌面应用；

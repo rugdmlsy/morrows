@@ -8,6 +8,7 @@ license.workspace = true
 morrows-core = { path = "../morrows-core" }
 morrows-store = { path = "../morrows-store" }
 anyhow.workspace = true
+base64 = "0.22"
 axum.workspace = true
 rmcp.workspace = true
 schemars.workspace = true
