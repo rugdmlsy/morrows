@@ -606,6 +606,20 @@ export default function App() {
     }
   }, []);
 
+  const refreshSessionScopes = useCallback(async () => {
+    try {
+      const [nextTasks, nextProjects] = await Promise.all([
+        api<Task[]>("/api/tasks"),
+        api<Project[]>("/api/projects"),
+      ]);
+      setTasks(nextTasks);
+      setProjects(nextProjects);
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }, []);
+
   const refreshQueueBase = useCallback(async () => {
     try {
       const [nextTasks, nextProjects, nextPolicies, nextLaunchProfiles] = await Promise.all([
@@ -675,6 +689,13 @@ export default function App() {
     const timer = window.setInterval(() => void refreshFleet(), 5000);
     return () => window.clearInterval(timer);
   }, [refreshFleet]);
+
+  useEffect(() => {
+    if (view !== "sessions") return;
+    void refreshSessionScopes();
+    const timer = window.setInterval(() => void refreshSessionScopes(), 5000);
+    return () => window.clearInterval(timer);
+  }, [view, refreshSessionScopes]);
 
   useEffect(() => {
     if (view !== "queue") return;

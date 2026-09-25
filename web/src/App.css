@@ -1161,9 +1161,28 @@ h3 { margin: 20px 0 8px; color: var(--ink-3); font: 700 calc(8px * var(--font-sc
 .new-session { display: grid; grid-template-columns: 1fr; gap: 7px; padding: 9px; border-bottom: 1px solid var(--line-soft); }
 .new-session select { min-width: 0; width: 100%; border-radius: 6px; padding: 7px 8px; font-size: calc(9px * var(--font-scale)); }
 .new-session button { justify-self: end; }
-.session-scope-control { display: flex; align-items: center; gap: 6px; margin-top: 4px; }
-.session-scope-control > span { color: var(--muted); font-size: calc(7px * var(--font-scale)); }
-.session-scope-control select { min-width: 150px; max-width: 360px; padding: 4px 6px; border-radius: 6px; font-size: calc(8px * var(--font-scale)); }
+.session-scope-editor {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 5px;
+}
+.session-scope-editor > span { color: var(--muted); font-size: calc(7px * var(--font-scale)); }
+.session-scope-editor select {
+  min-width: 110px;
+  max-width: 260px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  font-size: calc(8px * var(--font-scale));
+}
+.session-scope-editor select:nth-of-type(2),
+.session-scope-editor select:nth-of-type(3) { min-width: 150px; }
+.session-scope-save {
+  padding: 4px 7px;
+  border-radius: 6px;
+  font-size: calc(8px * var(--font-scale));
+}
 .task-session-section { display: grid; gap: 8px; }
 .task-session-section > .mini-card-row h3 { margin: 0; }
 .task-session-link { width: 100%; text-align: left; cursor: pointer; color: inherit; }

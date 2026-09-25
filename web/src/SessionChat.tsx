@@ -184,6 +184,9 @@ export default function SessionChat({
   const [newScope, setNewScope] = useState<"general" | "project" | "task">("general");
   const [newProjectId, setNewProjectId] = useState("");
   const [newTaskId, setNewTaskId] = useState("");
+  const [scopeDraft, setScopeDraft] = useState<"general" | "project" | "task">("general");
+  const [scopeProjectId, setScopeProjectId] = useState("");
+  const [scopeTaskId, setScopeTaskId] = useState("");
   const [showNew, setShowNew] = useState(false);
   const [busy, setBusy] = useState(false);
   const [recallBusyId, setRecallBusyId] = useState<string | null>(null);
@@ -231,11 +234,43 @@ export default function SessionChat({
     return zh ? "通用会话" : "General";
   }, [zh]);
 
-  function scopeValue(session: SessionSummary) {
-    if (session.task_id) return `task:${session.task_id}`;
-    if (session.project_id) return `project:${session.project_id}`;
-    return "general";
-  }
+  const unclassifiedProjectKey = "__unclassified__";
+  const hasUnclassifiedTasks = tasks.some((task) => !task.project_id);
+  const newTaskOptions = useMemo(
+    () => tasks.filter((task) =>
+      newProjectId === unclassifiedProjectKey
+        ? !task.project_id
+        : !!newProjectId && task.project_id === newProjectId,
+    ),
+    [tasks, newProjectId],
+  );
+  const scopeTaskOptions = useMemo(
+    () => tasks.filter((task) =>
+      scopeProjectId === unclassifiedProjectKey
+        ? !task.project_id
+        : !!scopeProjectId && task.project_id === scopeProjectId,
+    ),
+    [tasks, scopeProjectId],
+  );
+
+  useEffect(() => {
+    if (!selected) return;
+    if (selected.task_id) {
+      setScopeDraft("task");
+      setScopeProjectId(selected.project_id || unclassifiedProjectKey);
+      setScopeTaskId(selected.task_id);
+      return;
+    }
+    if (selected.project_id) {
+      setScopeDraft("project");
+      setScopeProjectId(selected.project_id);
+      setScopeTaskId("");
+      return;
+    }
+    setScopeDraft("general");
+    setScopeProjectId("");
+    setScopeTaskId("");
+  }, [selected?.id, selected?.project_id, selected?.task_id]);
 
   useEffect(() => {
     historyCacheRef.current = historyCache;
@@ -266,11 +301,14 @@ export default function SessionChat({
 
   useEffect(() => {
     if (!initialTaskId) return;
+    const task = tasks.find((item) => item.id === initialTaskId);
+    if (!task) return;
     setNewScope("task");
+    setNewProjectId(task.project_id || unclassifiedProjectKey);
     setNewTaskId(initialTaskId);
     setShowNew(true);
     onInitialTaskHandled?.();
-  }, [initialTaskId, onInitialTaskHandled]);
+  }, [initialTaskId, onInitialTaskHandled, tasks]);
 
   const loadSession = useCallback(async (id: string, force = false) => {
     if (!force && historyCacheRef.current[id]) return;
@@ -387,16 +425,17 @@ export default function SessionChat({
     }
   }
 
-  async function updateScope(value: string) {
+  async function saveScope() {
     if (!selectedId) return;
-    const [kind, id] = value.split(":", 2);
+    if (scopeDraft === "project" && (!scopeProjectId || scopeProjectId === unclassifiedProjectKey)) return;
+    if (scopeDraft === "task" && !scopeTaskId) return;
     setBusy(true);
     try {
       const updated = await api<Session>(`/api/sessions/${selectedId}/scope`, {
         method: "POST",
         body: JSON.stringify({
-          project_id: kind === "project" ? id : null,
-          task_id: kind === "task" ? id : null,
+          project_id: scopeDraft === "project" ? scopeProjectId : null,
+          task_id: scopeDraft === "task" ? scopeTaskId : null,
         }),
       });
       setHistoryCache((current) => {
@@ -549,27 +588,39 @@ export default function SessionChat({
               onChange={(event) => {
                 const value = event.target.value as "general" | "project" | "task";
                 setNewScope(value);
-                if (value !== "project") setNewProjectId("");
-                if (value !== "task") setNewTaskId("");
+                setNewProjectId("");
+                setNewTaskId("");
               }}
             >
               <option value="general">{zh ? "通用会话" : "General session"}</option>
               <option value="project">{zh ? "归属项目" : "Project-scoped"}</option>
               <option value="task">{zh ? "归属任务" : "Task-scoped"}</option>
             </select>
-            {newScope === "project" && (
-              <select value={newProjectId} onChange={(event) => setNewProjectId(event.target.value)}>
+            {(newScope === "project" || newScope === "task") && (
+              <select
+                value={newProjectId}
+                onChange={(event) => {
+                  setNewProjectId(event.target.value);
+                  setNewTaskId("");
+                }}
+              >
                 <option value="">{zh ? "选择项目…" : "Select project…"}</option>
                 {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
+                {newScope === "task" && hasUnclassifiedTasks && (
+                  <option value={unclassifiedProjectKey}>{zh ? "未归项目" : "No project"}</option>
+                )}
               </select>
             )}
             {newScope === "task" && (
-              <select value={newTaskId} onChange={(event) => setNewTaskId(event.target.value)}>
+              <select
+                value={newTaskId}
+                disabled={!newProjectId}
+                onChange={(event) => setNewTaskId(event.target.value)}
+              >
                 <option value="">{zh ? "选择任务…" : "Select task…"}</option>
-                {tasks.map((task) => {
-                  const project = projects.find((item) => item.id === task.project_id);
-                  return <option key={task.id} value={task.id}>{project ? `${project.name} / ` : ""}{task.title}</option>;
-                })}
+                {newTaskOptions.map((task) => (
+                  <option key={task.id} value={task.id}>{task.title}</option>
+                ))}
               </select>
             )}
             <button
@@ -638,29 +689,76 @@ export default function SessionChat({
                   {" · "}
                   {selectedAgent?.account_email || (zh ? "未记录邮箱" : "Email not recorded")}
                 </span>
-                <label className="session-scope-control">
+                <div className="session-scope-editor">
                   <span>{zh ? "归属" : "Scope"}</span>
                   <select
-                    value={scopeValue(selected)}
+                    value={scopeDraft}
                     disabled={busy}
-                    onChange={(event) => void updateScope(event.target.value)}
+                    onChange={(event) => {
+                      const value = event.target.value as "general" | "project" | "task";
+                      setScopeDraft(value);
+                      if (value === "general") {
+                        setScopeProjectId("");
+                        setScopeTaskId("");
+                      } else if (value === "project") {
+                        if (scopeProjectId === unclassifiedProjectKey) setScopeProjectId("");
+                        setScopeTaskId("");
+                      } else {
+                        if (!scopeProjectId && selected.project_id) {
+                          setScopeProjectId(selected.project_id);
+                        } else if (!scopeProjectId && selected.task_id && !selected.project_id) {
+                          setScopeProjectId(unclassifiedProjectKey);
+                        }
+                      }
+                    }}
                   >
                     <option value="general">{zh ? "通用会话" : "General"}</option>
-                    {projects.map((project) => (
-                      <option key={`project:${project.id}`} value={`project:${project.id}`}>
-                        {zh ? "项目" : "Project"} · {project.name}
-                      </option>
-                    ))}
-                    {tasks.map((task) => {
-                      const project = projects.find((item) => item.id === task.project_id);
-                      return (
-                        <option key={`task:${task.id}`} value={`task:${task.id}`}>
-                          {zh ? "任务" : "Task"} · {project ? `${project.name} / ` : ""}{task.title}
-                        </option>
-                      );
-                    })}
+                    <option value="project">{zh ? "项目" : "Project"}</option>
+                    <option value="task">{zh ? "任务" : "Task"}</option>
                   </select>
-                </label>
+                  {(scopeDraft === "project" || scopeDraft === "task") && (
+                    <select
+                      value={scopeProjectId}
+                      disabled={busy}
+                      onChange={(event) => {
+                        setScopeProjectId(event.target.value);
+                        setScopeTaskId("");
+                      }}
+                    >
+                      <option value="">{zh ? "选择项目…" : "Select project…"}</option>
+                      {projects.map((project) => (
+                        <option key={project.id} value={project.id}>{project.name}</option>
+                      ))}
+                      {scopeDraft === "task" && hasUnclassifiedTasks && (
+                        <option value={unclassifiedProjectKey}>{zh ? "未归项目" : "No project"}</option>
+                      )}
+                    </select>
+                  )}
+                  {scopeDraft === "task" && (
+                    <select
+                      value={scopeTaskId}
+                      disabled={busy || !scopeProjectId}
+                      onChange={(event) => setScopeTaskId(event.target.value)}
+                    >
+                      <option value="">{zh ? "选择任务…" : "Select task…"}</option>
+                      {scopeTaskOptions.map((task) => (
+                        <option key={task.id} value={task.id}>{task.title}</option>
+                      ))}
+                    </select>
+                  )}
+                  <button
+                    type="button"
+                    className="session-scope-save"
+                    disabled={
+                      busy ||
+                      (scopeDraft === "project" && (!scopeProjectId || scopeProjectId === unclassifiedProjectKey)) ||
+                      (scopeDraft === "task" && !scopeTaskId)
+                    }
+                    onClick={() => void saveScope()}
+                  >
+                    {busy ? (zh ? "保存中…" : "Saving…") : (zh ? "保存归属" : "Save scope")}
+                  </button>
+                </div>
               </div>
               <div className="session-runtime-controls">
                 <label className="session-runtime-select">
