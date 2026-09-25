@@ -97,7 +97,9 @@ https://mcp.xycdev.com/morrows/ui/
 
 VPS 上的 Local Shell MCP 已移到 `127.0.0.1:8766`。本地路由层占用
 `127.0.0.1:8765`：仅 `/morrows` 转发到 Morrows，其余路径继续转发给
-Local Shell MCP，因此原有 `https://mcp.xycdev.com/mcp` 保持不变。
+Local Shell MCP，因此原有 `https://mcp.xycdev.com/mcp` 保持不变。这个共享
+Caddy 入口由 `local-shell-mcp` 仓库的 `deploy/morrow/deploy-vps.sh` 统一管理；
+Morrows 不再维护第二份路由配置。
 
 本地开发仍可使用旧的 tmux 部署：
 
@@ -115,6 +117,10 @@ MORROWS_DATABASE_URL=sqlite://data/morrows.db
 MORROWS_BIND=127.0.0.1:8787
 MORROWS_WEB_DIR=web/dist
 MORROWS_LAUNCH_DIR=data/launches
+MORROWS_MCP_URL=https://mcp.xycdev.com/morrows
+# rmcp Host 校验会自动允许 MORROWS_MCP_URL 中的 hostname。
+# 如需额外 Host，可用逗号分隔：
+# MORROWS_MCP_ALLOWED_HOSTS=internal.example:9443
 
 # 可选：loopback LSM 集成
 MORROWS_LSM_CONTROL_URL=http://127.0.0.1:8766

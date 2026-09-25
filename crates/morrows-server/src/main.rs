@@ -202,12 +202,20 @@ async fn main() -> anyhow::Result<()> {
         .merge(launch::routes())
         .with_state(state);
 
+    let mcp_public_url = env::var("MORROWS_MCP_URL").ok();
+    let mcp_extra_hosts = env::var("MORROWS_MCP_ALLOWED_HOSTS").ok();
+    let mcp_allowed_hosts =
+        build_mcp_allowed_hosts(mcp_public_url.as_deref(), mcp_extra_hosts.as_deref());
+    tracing::info!(?mcp_allowed_hosts, "configured Morrows MCP Host allowlist");
+
     let mcp_store = store.clone();
     let mcp_service: StreamableHttpService<MorrowsMcp, LocalSessionManager> =
         StreamableHttpService::new(
             move || Ok(MorrowsMcp::new(mcp_store.clone())),
             Default::default(),
-            StreamableHttpServerConfig::default().with_json_response(true),
+            StreamableHttpServerConfig::default()
+                .with_json_response(true)
+                .with_allowed_hosts(mcp_allowed_hosts),
         );
 
     let lease_store = store.clone();
@@ -302,6 +310,33 @@ fn validate_bind_security(
         }
     }
     Ok(())
+}
+
+fn build_mcp_allowed_hosts(public_url: Option<&str>, configured: Option<&str>) -> Vec<String> {
+    let mut hosts = vec![
+        "localhost".to_owned(),
+        "127.0.0.1".to_owned(),
+        "::1".to_owned(),
+    ];
+    let mut push = |value: &str| {
+        let value = value.trim();
+        if !value.is_empty() && !hosts.iter().any(|host| host == value) {
+            hosts.push(value.to_owned());
+        }
+    };
+
+    if let Some(public_url) = public_url
+        && let Some((_, rest)) = public_url.trim().split_once("://")
+        && let Some(authority) = rest.split('/').next()
+    {
+        push(authority);
+    }
+    if let Some(configured) = configured {
+        for host in configured.split(',') {
+            push(host);
+        }
+    }
+    hosts
 }
 
 fn env_bool(name: &str, default: bool) -> anyhow::Result<bool> {
@@ -537,6 +572,27 @@ mod startup_security_tests {
 
     fn addr(value: &str) -> SocketAddr {
         value.parse().unwrap()
+    }
+
+    #[test]
+    fn mcp_host_allowlist_keeps_loopback_and_adds_public_and_explicit_hosts() {
+        assert_eq!(
+            build_mcp_allowed_hosts(
+                Some("https://mcp.xycdev.com/morrows"),
+                Some("internal.example:9443, mcp.xycdev.com"),
+            ),
+            vec![
+                "localhost",
+                "127.0.0.1",
+                "::1",
+                "mcp.xycdev.com",
+                "internal.example:9443",
+            ]
+        );
+        assert_eq!(
+            build_mcp_allowed_hosts(Some("not-a-url"), Some("")),
+            vec!["localhost", "127.0.0.1", "::1"]
+        );
     }
 
     #[test]

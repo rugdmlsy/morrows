@@ -99,6 +99,8 @@ Public control-plane API calls require an Operator Bearer credential; the WebUI 
 Local Shell MCP on the VPS moves to `127.0.0.1:8766`. A loopback router owns
 `127.0.0.1:8765`: only `/morrows` is sent to Morrows and every other path continues
 to Local Shell MCP, so the existing `https://mcp.xycdev.com/mcp` endpoint is unchanged.
+This shared Caddy edge is owned by `deploy/morrow/deploy-vps.sh` in the
+`local-shell-mcp` repository; Morrows does not maintain a second router copy.
 
 For local development, the previous tmux deployment remains available:
 
@@ -116,6 +118,10 @@ MORROWS_DATABASE_URL=sqlite://data/morrows.db
 MORROWS_BIND=127.0.0.1:8787
 MORROWS_WEB_DIR=web/dist
 MORROWS_LAUNCH_DIR=data/launches
+MORROWS_MCP_URL=https://mcp.xycdev.com/morrows
+# rmcp Host validation automatically allows the hostname from MORROWS_MCP_URL.
+# Add any extra Hosts as a comma-separated list when needed:
+# MORROWS_MCP_ALLOWED_HOSTS=internal.example:9443
 
 # Optional loopback LSM integration
 MORROWS_LSM_CONTROL_URL=http://127.0.0.1:8766
