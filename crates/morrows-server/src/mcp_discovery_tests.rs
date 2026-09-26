@@ -256,20 +256,53 @@ async fn unrelated_agent_can_read_every_task_view_but_cannot_mutate_it() {
     let a = store.register_agent("owner", &[]).await.unwrap();
     let b = store.register_agent("reader", &[]).await.unwrap();
     let t = task(&store, "Shared knowledge", None, TaskState::Ready).await;
-    store.claim_task(t.id, a.id, "executor", 300).await.unwrap();
+    let assignment = store.claim_task(t.id, a.id, "executor", 300).await.unwrap();
+    let run = store.start_run(assignment.id, a.id, None).await.unwrap();
+    let milestone = store
+        .create_run_milestone(
+            run.id,
+            a.id,
+            serde_json::from_value(json!({
+                "kind":"milestone",
+                "summary":"owner reached a durable task boundary",
+                "completed":["phase one"],
+                "verified":["task state is durable"],
+                "remaining":["phase two"],
+                "blockers":[],
+                "next_step":"start phase two",
+                "next_plan":["start phase two","verify phase two"],
+                "execution_locations":["/workspace/shared"],
+                "artifact_ids":[],
+                "decision_ids":[]
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
     let mcp = MorrowsMcp::new(store.clone());
     let args = json!({"task_id":t.id});
+    let reader_task = value(
+        mcp.task_get(request(args.clone()), caller(Some(b.id)))
+            .await,
+    );
+    assert_eq!(reader_task["id"], json!(t.id));
     assert_eq!(
-        value(
-            mcp.task_get(request(args.clone()), caller(Some(b.id)))
-                .await
-        )["id"],
-        json!(t.id)
+        reader_task["execution"]["milestones"]["items"][0]["id"],
+        json!(milestone.id)
     );
     assert!(
+        reader_task["execution"]["my_runs"]["items"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let reader_context = value(
         mcp.task_context(request(args.clone()), caller(Some(b.id)))
-            .await
-            .is_ok()
+            .await,
+    );
+    assert_eq!(
+        reader_context["execution"]["milestones"]["items"][0]["id"],
+        json!(milestone.id)
     );
     assert!(
         mcp.memory_get(request(args.clone()), caller(Some(b.id)))

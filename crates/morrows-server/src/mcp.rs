@@ -1,3 +1,4 @@
+use crate::memory_search::MemorySearch;
 use axum::http::request::Parts;
 use morrows_core::{
     CreateArtifact, CreateDecision, CreateHandoff, CreateMessage, CreateSessionSummaryRevision,
@@ -19,13 +20,20 @@ use uuid::Uuid;
 #[derive(Clone)]
 pub struct MorrowsMcp {
     pub store: Store,
+    memory_search: Option<MemorySearch>,
     tool_router: ToolRouter<Self>,
 }
 
 impl MorrowsMcp {
+    #[cfg(test)]
     pub fn new(store: Store) -> Self {
+        Self::new_with_memory_search(store, None)
+    }
+
+    pub fn new_with_memory_search(store: Store, memory_search: Option<MemorySearch>) -> Self {
         Self {
             store,
+            memory_search,
             tool_router: Self::tool_router(),
         }
     }
@@ -137,6 +145,37 @@ impl MorrowsMcp {
             .task_execution_page(task_id, agent_id, 5, 0)
             .await
             .map_err(|e| e.to_string())?;
+        let retrieval_query = format!(
+            "Task: {}
+Description: {}
+Goal: {}
+Current summary: {}",
+            task.title,
+            task.description,
+            context.as_ref().map(|c| c.goal.as_str()).unwrap_or(""),
+            context
+                .as_ref()
+                .map(|c| c.current_summary.as_str())
+                .unwrap_or("")
+        );
+        let memory_retrieval = match (&self.memory_search, task.project_id) {
+            (Some(search), Some(project_id)) => {
+                search
+                    .default_project_retrieval(&self.store, project_id, &retrieval_query)
+                    .await
+            }
+            (None, Some(_)) => json!({
+                "available": false,
+                "engine": "memsearch",
+                "reason": "memsearch_not_configured",
+                "fallback": "task_context.memory",
+            }),
+            (_, None) => json!({
+                "available": false,
+                "reason": "task_has_no_project",
+                "fallback": "task_context.memory",
+            }),
+        };
         let package_ref = latest_package.map(|p| json!({
             "id": p.id, "created_at": p.created_at,
             "context_snapshot_id": p.context_snapshot_id,
@@ -149,12 +188,13 @@ impl MorrowsMcp {
             .map_err(|e| e.to_string())?;
         Ok(json!({
             "task": task, "project": project, "context": context,
-            "memory": memory, "instructions": instructions, "collaboration": collaboration,
+            "memory": memory, "memory_retrieval": memory_retrieval,
+            "instructions": instructions, "collaboration": collaboration,
             "missing_context": missing, "persisted_package": package_ref, "execution": execution,
             "acceptance_criteria_paths": acceptance_paths,
             "assignment_requests": requests,
             "workflow": {"request_assignment":"task_request_assignment", "request_status":"assignment_request_list", "persist_milestone":"run_milestone", "handoff_requires_latest_milestone":true, "publish_project_knowledge":"project_memory_publish", "completion_preflight":"run_completion_check", "structured_completion_required_for_executor":context.as_ref().is_some_and(|c| !morrows_core::completion_criteria(&c.constraints).is_empty()), "project_memory_disposition_required_for_executor":task.project_id.is_some()},
-            "read_more": {"memory": "memory_get", "instructions": "instructions_get", "collaboration": "task_collaboration", "events": "task_events", "execution": "task_get"},
+            "read_more": {"memory": "memory_get", "memory_search": "memory_search", "instructions": "instructions_get", "collaboration": "task_collaboration", "events": "task_events", "execution": "task_get"},
         }).to_string())
     }
 
@@ -169,6 +209,17 @@ impl MorrowsMcp {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct TaskIdRequest {
     pub task_id: String,
+}
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct MemorySearchRequest {
+    pub task_id: String,
+    pub query: String,
+    #[serde(default = "default_memory_search_top_k")]
+    pub top_k: usize,
+}
+
+fn default_memory_search_top_k() -> usize {
+    8
 }
 
 fn default_limit() -> i64 {
@@ -975,7 +1026,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Read any task by ID with paged assignment metadata plus the caller's Runs, immutable milestones and checkpoints. Successor recovery includes the predecessor's latest milestone when available. Use task_context for project background and working context."
+        description = "Read any task by ID with paged assignment metadata, task-wide immutable milestones, and the caller's private Run/checkpoint details. Milestones are visible immediately as task execution history and do not require project-memory publication. Successor recovery includes the predecessor's latest milestone when available. Use task_context for project background and working context."
     )]
     async fn task_get(
         &self,
@@ -1121,6 +1172,35 @@ impl MorrowsMcp {
                 .map_err(|e| e.to_string())?,
         )
         .map_err(|e| e.to_string())
+    }
+
+    #[tool(
+        description = "Hybrid-search current shared project memory for any readable task. Uses Zilliz MemSearch (local ONNX dense embeddings + Milvus BM25 + RRF) as a rebuildable shadow index, then returns authoritative current Morrows MemoryEntry records. Milestones are task execution history and are read through task_get/task_context, not this memory index."
+    )]
+    async fn memory_search(
+        &self,
+        Parameters(req): Parameters<MemorySearchRequest>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<String, String> {
+        let task_id = parse_id(&req.task_id)?;
+        let agent_id = authenticated_agent(&parts)?;
+        self.ensure_task_read_access(task_id, agent_id).await?;
+        let task = self
+            .store
+            .get_task(task_id)
+            .await
+            .map_err(|e| e.to_string())?;
+        let project_id = task
+            .project_id
+            .ok_or_else(|| "task has no project to search".to_string())?;
+        let search = self
+            .memory_search
+            .as_ref()
+            .ok_or_else(|| "MemSearch is not configured on this Morrows server".to_string())?;
+        let value = search
+            .search_project(&self.store, project_id, &req.query, req.top_k)
+            .await?;
+        serde_json::to_string(&value).map_err(|e| e.to_string())
     }
 
     #[tool(
@@ -1514,6 +1594,7 @@ mod tests {
             "project_get",
             "task_context",
             "memory_get",
+            "memory_search",
             "memory_revise",
             "instructions_get",
             "artifact_create",
@@ -1982,6 +2063,162 @@ mod tests {
             value["long_term_memory"][0]["content"]["constraint"],
             "preserve project context"
         );
+    }
+
+    #[tokio::test]
+    async fn memory_search_is_task_readable_and_returns_authoritative_entries() {
+        use morrows_core::{CreateMemoryEntry, CreateProject};
+        use std::{fs as stdfs, path::PathBuf};
+
+        let base = std::env::temp_dir().join(format!("morrows-mcp-search-{}", Id::new_v4()));
+        stdfs::create_dir_all(&base).unwrap();
+        let bridge = base.join("fake_bridge.py");
+        stdfs::write(
+            &bridge,
+            r#"import argparse,json,sys
+from pathlib import Path
+p=argparse.ArgumentParser(); p.add_argument('command'); p.add_argument('--root'); p.add_argument('--milvus-uri'); p.add_argument('--collection'); a=p.parse_args()
+for line in sys.stdin:
+    req=json.loads(line)
+    files=sorted((Path(a.root)/str(req['project_id'])).glob('*.md'))
+    print(json.dumps({'ok':True,'engine':'fake-memsearch','version':'test','provider':'onnx','model':'fake','indexed_chunks':len(files),'results':[{'source':str(files[0]),'heading':'current','score':0.95}]}), flush=True)
+"#,
+        )
+        .unwrap();
+        let store = Store::connect("sqlite::memory:").await.unwrap();
+        let project = store
+            .create_project(CreateProject {
+                name: "Search".into(),
+                description: "Hybrid".into(),
+            })
+            .await
+            .unwrap();
+        let task = store
+            .create_task(serde_json::from_value(json!({
+                "project_id":project.id,"title":"Reader","description":"find protocol","state":"ready"
+            })).unwrap())
+            .await
+            .unwrap();
+        let owner = store.register_agent("owner", &[]).await.unwrap();
+        let reader = store.register_agent("reader", &[]).await.unwrap();
+        store
+            .claim_task(task.id, owner.id, "executor", 300)
+            .await
+            .unwrap();
+        let memory = store
+            .create_memory_entry(CreateMemoryEntry {
+                scope_type: "project".into(),
+                project_id: Some(project.id),
+                agent_instance_id: None,
+                task_id: None,
+                title: "Protocol ALPHA".into(),
+                content: json!({"sentinel":"SEARCH-ALPHA-17"}),
+                source_kind: "test".into(),
+                source_ref: None,
+                visibility: "shared".into(),
+                supersedes_memory_id: None,
+            })
+            .await
+            .unwrap();
+        let search = MemorySearch::for_test(
+            PathBuf::from("python3"),
+            bridge,
+            base.join("projection"),
+            base.join("milvus.db"),
+        );
+        let mcp = MorrowsMcp::new_with_memory_search(store.clone(), Some(search));
+        let result: Value = serde_json::from_str(
+            &mcp.memory_search(
+                Parameters(MemorySearchRequest {
+                    task_id: task.id.to_string(),
+                    query: "alpha protocol".into(),
+                    top_k: 5,
+                }),
+                Extension(parts(Some(reader.id))),
+            )
+            .await
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(result["results"][0]["memory"]["id"], json!(memory.id));
+        assert_eq!(
+            result["results"][0]["memory"]["content"]["sentinel"],
+            "SEARCH-ALPHA-17"
+        );
+        let _ = stdfs::remove_dir_all(base);
+    }
+
+    #[tokio::test]
+    async fn task_context_falls_back_when_memsearch_shadow_fails() {
+        use morrows_core::{CreateMemoryEntry, CreateProject};
+        use std::{fs as stdfs, path::PathBuf};
+
+        let base = std::env::temp_dir().join(format!("morrows-mcp-search-fail-{}", Id::new_v4()));
+        stdfs::create_dir_all(&base).unwrap();
+        let bridge = base.join("fail_bridge.py");
+        stdfs::write(
+            &bridge,
+            "import sys\nsys.stderr.write('shadow unavailable')\nsys.exit(2)\n",
+        )
+        .unwrap();
+        let store = Store::connect("sqlite::memory:").await.unwrap();
+        let project = store
+            .create_project(CreateProject {
+                name: "Fallback".into(),
+                description: "Fallback".into(),
+            })
+            .await
+            .unwrap();
+        let task = store.create_task(serde_json::from_value(json!({
+            "project_id":project.id,"title":"Fallback","description":"keep canonical","state":"ready"
+        })).unwrap()).await.unwrap();
+        store.create_context_revision(task.id, serde_json::from_value(json!({
+            "goal":"read memory","background":"fallback","current_summary":"need memory","constraints":{}
+        })).unwrap()).await.unwrap();
+        let reader = store.register_agent("reader", &[]).await.unwrap();
+        store
+            .create_memory_entry(CreateMemoryEntry {
+                scope_type: "project".into(),
+                project_id: Some(project.id),
+                agent_instance_id: None,
+                task_id: None,
+                title: "Canonical".into(),
+                content: json!({"sentinel":"CANONICAL-SURVIVES"}),
+                source_kind: "test".into(),
+                source_ref: None,
+                visibility: "shared".into(),
+                supersedes_memory_id: None,
+            })
+            .await
+            .unwrap();
+        let search = MemorySearch::for_test(
+            PathBuf::from("python3"),
+            bridge,
+            base.join("projection"),
+            base.join("milvus.db"),
+        );
+        let mcp = MorrowsMcp::new_with_memory_search(store.clone(), Some(search));
+        let context: Value = serde_json::from_str(
+            &mcp.task_context(
+                Parameters(TaskIdRequest {
+                    task_id: task.id.to_string(),
+                }),
+                Extension(parts(Some(reader.id))),
+            )
+            .await
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            context["memory"]["items"][0]["content"]["sentinel"],
+            "CANONICAL-SURVIVES"
+        );
+        assert_eq!(context["memory_retrieval"]["available"], false);
+        assert_eq!(
+            context["memory_retrieval"]["fallback"],
+            "task_context.memory"
+        );
+        let _ = stdfs::remove_dir_all(base);
     }
 
     #[tokio::test]

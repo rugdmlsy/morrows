@@ -157,3 +157,12 @@ fresh milestone。这样正常接力不能把“旧 checkpoint + 新 evidence”
 handoff。异常退出仍只能恢复到最后一次持久化边界；Morrows 不会也不能从 provider 私有
 token/context buffer 自动还原未记录的推理，因此 Agent 应在实质子目标完成、长耗时/高风险
 操作前、预算压力出现以及 handoff 前主动创建 milestone。
+
+
+## Task milestone 与 Project Memory 的边界
+
+RunMilestone 是 Task 级执行历史，不是长期项目知识。任一已认证 Agent 读取 Task 时都能立即看到该 Task 的 milestones；不需要也不应该先调用 project_memory_publish。底层 Run/provider checkpoint 仍只向对应 Agent 暴露，避免把执行私有细节当成任务公共信息。
+
+Project Memory 才承担跨 Task 的可复用知识。Morrows 使用 Git MemoryEntry 作为唯一 authoritative source，并复用 Zilliz MemSearch 0.4.21 作为可删除、可重建的检索 shadow index：本地 ONNX BGE-M3 生成 dense embedding，Milvus Lite 同时维护 BM25 sparse index，检索由 MemSearch 使用 RRF 融合。索引只决定“候选 MemoryEntry 是谁”；最终返回内容会按 MemoryEntry ID 回读当前 Morrows authoritative projection，并过滤 stale/superseded 命中。
+
+task_context 保留确定性的 canonical memory page，并在 MemSearch 可用时附带 memory_retrieval；索引故障时只标记 unavailable 并回退 canonical memory，不阻断 Task 读取。memory_search 提供显式 hybrid retrieval。Milestone 不进入这个向量索引。
