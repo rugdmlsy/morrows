@@ -4,17 +4,25 @@ use axum::{
     http::{HeaderValue, Method, Request, header::AUTHORIZATION},
     middleware::Next,
 };
+const LSM_OAUTH_VERIFIED_HEADER: &str = "x-morrows-lsm-oauth-verified";
+
 #[derive(Clone)]
 pub struct AgentAuthState {
     store: Store,
     require_agent_auth: bool,
+    trusted_lsm_oauth_agent_id: Option<Id>,
 }
 
 impl AgentAuthState {
-    pub fn new(store: Store, require_agent_auth: bool) -> Self {
+    pub fn new(
+        store: Store,
+        require_agent_auth: bool,
+        trusted_lsm_oauth_agent_id: Option<Id>,
+    ) -> Self {
         Self {
             store,
             require_agent_auth,
+            trusted_lsm_oauth_agent_id,
         }
     }
 }
@@ -35,6 +43,28 @@ pub async fn authenticate_agent_requests(
         .get("x-agent-instance-id")
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned);
+    let lsm_oauth_verified = request
+        .headers()
+        .get(LSM_OAUTH_VERIFIED_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value == "1");
+
+    if lsm_oauth_verified && requires_agent_auth {
+        let Some(agent_id) = state.trusted_lsm_oauth_agent_id else {
+            return unauthorized("LSM OAuth bridge is not configured");
+        };
+        if state.store.get_agent(agent_id).await.is_err() {
+            return unauthorized("LSM OAuth bridge AgentInstance is unavailable");
+        }
+        let Ok(value) = HeaderValue::from_str(&agent_id.to_string()) else {
+            return unauthorized("invalid LSM OAuth bridge AgentInstance");
+        };
+        request.headers_mut().remove(LSM_OAUTH_VERIFIED_HEADER);
+        request.headers_mut().insert("x-agent-instance-id", value);
+        return next.run(request).await;
+    }
+
+    request.headers_mut().remove(LSM_OAUTH_VERIFIED_HEADER);
 
     if let Some(authorization) = authorization {
         let Some(token) = authorization.strip_prefix("Bearer ") else {
@@ -169,12 +199,13 @@ mod tests {
             .to_owned()
     }
 
-    async fn app(store: Store, require: bool) -> Router {
+    async fn app(store: Store, require: bool, trusted_lsm_oauth_agent_id: Option<Id>) -> Router {
         Router::new()
             .route("/employee", get(subject))
+            .route("/mcp", get(subject))
             .route("/api/agent-deliveries", get(subject))
             .layer(axum::middleware::from_fn_with_state(
-                AgentAuthState::new(store, require),
+                AgentAuthState::new(store, require, trusted_lsm_oauth_agent_id),
                 authenticate_agent_requests,
             ))
     }
@@ -187,7 +218,7 @@ mod tests {
             .issue_bridge_credential(agent.id, "test bridge", 600)
             .await
             .unwrap();
-        let response = app(store, true)
+        let response = app(store, true, None)
             .await
             .oneshot(
                 Request::builder()
@@ -215,7 +246,7 @@ mod tests {
             .await
             .unwrap();
 
-        let strict = app(store.clone(), true).await;
+        let strict = app(store.clone(), true, None).await;
         let legacy = strict
             .clone()
             .oneshot(
@@ -261,9 +292,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn strict_mcp_accepts_lsm_oauth_handoff_and_overrides_spoofed_identity() {
+        let store = Store::connect("sqlite::memory:").await.unwrap();
+        let trusted = store.register_agent("chatgpt-bridge", &[]).await.unwrap();
+        let spoofed = store.register_agent("spoofed-agent", &[]).await.unwrap();
+        let response = app(store, true, Some(trusted.id))
+            .await
+            .oneshot(
+                Request::builder()
+                    .uri("/mcp")
+                    .header(LSM_OAUTH_VERIFIED_HEADER, "1")
+                    .header("x-agent-instance-id", spoofed.id.to_string())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(body.as_ref(), trusted.id.to_string().as_bytes());
+    }
+
+    #[tokio::test]
+    async fn strict_mcp_rejects_lsm_oauth_handoff_without_configured_identity() {
+        let store = Store::connect("sqlite::memory:").await.unwrap();
+        let response = app(store, true, None)
+            .await
+            .oneshot(
+                Request::builder()
+                    .uri("/mcp")
+                    .header(LSM_OAUTH_VERIFIED_HEADER, "1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
     async fn strict_agent_surface_rejects_missing_bearer_even_without_identity_header() {
         let store = Store::connect("sqlite::memory:").await.unwrap();
-        let response = app(store, true)
+        let response = app(store, true, None)
             .await
             .oneshot(
                 Request::builder()
@@ -280,7 +352,7 @@ mod tests {
     async fn local_compat_mode_still_accepts_identity_header() {
         let store = Store::connect("sqlite::memory:").await.unwrap();
         let agent = store.register_agent("legacy-agent", &[]).await.unwrap();
-        let response = app(store, false)
+        let response = app(store, false, None)
             .await
             .oneshot(
                 Request::builder()

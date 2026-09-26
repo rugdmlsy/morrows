@@ -149,6 +149,12 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|_| "127.0.0.1:8787".into());
     let addr: SocketAddr = bind.parse().context("parse MORROWS_BIND")?;
     let require_agent_auth = env_bool("MORROWS_REQUIRE_AGENT_AUTH", false)?;
+    let trusted_lsm_oauth_agent_id = env::var("MORROWS_LSM_OAUTH_AGENT_ID")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .map(|value| Id::parse_str(&value).context("parse MORROWS_LSM_OAUTH_AGENT_ID"))
+        .transpose()?;
     let require_operator_auth = env_bool("MORROWS_REQUIRE_OPERATOR_AUTH", false)?;
     let allow_insecure_remote_http = env_bool("MORROWS_ALLOW_INSECURE_REMOTE_HTTP", false)?;
     let bootstrap_operator_token = env::var("MORROWS_BOOTSTRAP_OPERATOR_TOKEN")
@@ -165,6 +171,13 @@ async fn main() -> anyhow::Result<()> {
     let store = Store::connect(&db_url)
         .await
         .context("open Morrows database")?;
+    if let Some(agent_id) = trusted_lsm_oauth_agent_id {
+        store
+            .get_agent(agent_id)
+            .await
+            .context("MORROWS_LSM_OAUTH_AGENT_ID must identify an existing AgentInstance")?;
+        tracing::info!(%agent_id, "configured trusted LSM OAuth AgentInstance");
+    }
     let has_admin_operator = store.has_active_admin_operator_credential().await?;
     validate_bind_security(
         addr,
@@ -278,7 +291,11 @@ async fn main() -> anyhow::Result<()> {
     let web_dir = env::var("MORROWS_WEB_DIR")
         .or_else(|_| env::var("AC_WEB_DIR"))
         .unwrap_or_else(|_| "web/dist".into());
-    let auth_state = auth::AgentAuthState::new(store.clone(), require_agent_auth);
+    let auth_state = auth::AgentAuthState::new(
+        store.clone(),
+        require_agent_auth,
+        trusted_lsm_oauth_agent_id,
+    );
     let operator_auth_state = operator_auth::OperatorAuthState::new(
         store.clone(),
         require_operator_auth,
