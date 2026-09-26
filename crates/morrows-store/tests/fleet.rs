@@ -459,7 +459,21 @@ async fn migration_preserves_m21_uuids_and_references_and_capacity_is_append_onl
         before.push(dump(&pool, table).await);
     }
     let store = Store::connect(&url).await.unwrap();
+    // The pre-upgrade pool may retain SQLite schema metadata prepared before
+    // ALTER TABLE. Reopen a verification pool so post-migration snapshots use
+    // the actual upgraded schema, matching a real process restart.
+    pool.close().await;
+    let pool = sqlx::SqlitePool::connect(&url).await.unwrap();
     for (table, mut expected) in tables.into_iter().zip(before) {
+        if table == "tasks" {
+            // Migration 0030 appends assignment_mode. Legacy tasks have no
+            // dispatch policy in this fixture, so they deterministically become
+            // open while every preexisting column remains unchanged.
+            expected = expected
+                .into_iter()
+                .map(|row| format!("{row}|assignment_mode:Some(\"open\")"))
+                .collect();
+        }
         if table == "handoffs" {
             // Migration 0028 only appends the nullable milestone_id link to
             // legacy handoffs; every preexisting value must remain byte-for-byte
@@ -543,7 +557,10 @@ async fn migration_preserves_m21_uuids_and_references_and_capacity_is_append_onl
 
 async fn dump(pool: &sqlx::SqlitePool, table: &str) -> Vec<String> {
     use sqlx::Column;
+    // This helper spans ALTER TABLE migrations. Avoid reusing a prepared
+    // SELECT * whose cached column metadata predates the schema extension.
     let rows = sqlx::query(&format!("SELECT * FROM {table} ORDER BY rowid"))
+        .persistent(false)
         .fetch_all(pool)
         .await
         .unwrap();

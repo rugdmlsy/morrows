@@ -4,23 +4,26 @@
 
 Read `task_context`, then follow its continuation offsets. Confirm task goal,
 project constraints, acceptance criteria, current context version, instructions,
-handoffs, evidence and your assignment/Run. Discovery/read access is not an
-assignment: the company control plane must assign the existing task and create a
-Run before employee execution tools can be used. Use `task_request_assignment`
-with the existing task ID, role and reason. It creates a durable request, not a
-duplicate task or assignment. Track it with `assignment_request_list`; use
-`include_resolved=true` for decisions and resulting assignment IDs. Exact pending
-retries reuse the request. A changed reason requires withdrawing the pending
-request, preserving both records. Only its author may withdraw it.
+handoffs, evidence and `task.assignment_mode`.
 
-The company web task queue exposes pending requests, reasons, authors and history.
-Its approve action creates/reuses an assignment atomically with request resolution;
-it does not steal another worker's active role or start a Run. Operators can also
-use `GET /api/assignment-requests` and
+For an `open` task, call `task_claim` with the existing task ID and role. Morrows
+acquires the Assignment and creates the Run in one `BEGIN IMMEDIATE` transaction;
+a successful return means execution ownership is live immediately. Competing
+claims for the same role have one winner. For an `approval` task, use
+`task_request_assignment` with the existing task ID, role and reason, then track
+it with `assignment_request_list`; approval creates/reuses an Assignment but Run
+creation remains a control-plane step. For a `dispatch` task, employees neither
+self-claim nor submit assignment requests: the dispatcher owns assignment.
+
+The company web task queue exposes pending approval requests, reasons, authors and
+history. Its approve action creates/reuses an assignment atomically with request
+resolution; it does not steal another worker's active role or start a Run.
+Operators can also use `GET /api/assignment-requests` and
 `POST /api/assignment-requests/{id}/resolve` with action `approve` or `reject`,
-a `resolution` reason, and optional `lease_seconds`. An approved assignment then
-uses the existing control-plane Run/launch workflow. A rejected request retains
-the explanation. Pending requests grant no task-write rights.
+a `resolution` reason, and optional `lease_seconds`. A rejected request retains
+the explanation. Pending requests grant no task-write rights. If an approval task
+is changed to `open`, the same Agent's pending request is resolved automatically
+when that Agent successfully claims the task.
 
 A context can explain the background while still lack executable inputs. For an
 audit task, locate the authoritative checkout and current Git/dirty state, source

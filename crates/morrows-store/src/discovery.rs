@@ -93,7 +93,7 @@ impl Store {
             "SELECT t.id,t.project_id,p.name AS project_name,t.title,
                     substr(t.description,1,240) AS description_preview,
                     length(t.description)>240 AS description_truncated,
-                    t.state,t.priority,t.updated_at
+                    t.state,t.assignment_mode,t.priority,t.updated_at
              FROM tasks t LEFT JOIN projects p ON p.id=t.project_id
              WHERE (? IS NULL OR t.project_id=?)
                AND (? IS NULL OR t.state=?)
@@ -136,6 +136,10 @@ impl Store {
                     description_preview: r.try_get("description_preview").map_err(storage)?,
                     description_truncated: r.try_get("description_truncated").map_err(storage)?,
                     state: r.try_get::<String, _>("state").map_err(storage)?.parse()?,
+                    assignment_mode: r
+                        .try_get::<String, _>("assignment_mode")
+                        .map_err(storage)?
+                        .parse()?,
                     priority: r.try_get("priority").map_err(storage)?,
                     updated_at: parse_dt(r.try_get("updated_at").map_err(storage)?)?,
                 })

@@ -23,7 +23,7 @@ use axum::{
 };
 use mcp::MorrowsMcp;
 use memory_search::MemorySearch;
-use morrows_core::{CreateContextRevision, CreateProject, CreateTask, DomainError, Id};
+use morrows_core::{AssignmentMode, CreateContextRevision, CreateProject, CreateTask, DomainError, Id};
 use morrows_store::Store;
 use rmcp::transport::{
     StreamableHttpServerConfig,
@@ -90,6 +90,11 @@ struct RegisterAgentBody {
 #[derive(Deserialize)]
 struct SetTaskProjectBody {
     project_id: Option<Id>,
+}
+
+#[derive(Deserialize)]
+struct SetTaskAssignmentModeBody {
+    assignment_mode: AssignmentMode,
 }
 
 #[derive(Deserialize)]
@@ -213,6 +218,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/tasks", get(list_tasks).post(create_task))
         .route("/tasks/{id}", get(get_task))
         .route("/tasks/{id}/project", post(set_task_project))
+        .route("/tasks/{id}/assignment-mode", post(set_task_assignment_mode))
         .route("/tasks/{id}/claim", post(claim_task))
         .route("/assignments/{id}/renew", post(renew_assignment))
         .route("/tasks/{id}/context", get(get_context).post(create_context))
@@ -457,6 +463,22 @@ async fn set_task_project(
 ) -> Result<Json<Value>, ApiError> {
     Ok(Json(
         serde_json::to_value(state.store.set_task_project(id, body.project_id).await?).unwrap(),
+    ))
+}
+
+async fn set_task_assignment_mode(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<SetTaskAssignmentModeBody>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        serde_json::to_value(
+            state
+                .store
+                .set_task_assignment_mode(id, body.assignment_mode)
+                .await?,
+        )
+        .unwrap(),
     ))
 }
 

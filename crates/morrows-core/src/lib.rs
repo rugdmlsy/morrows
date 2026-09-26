@@ -52,6 +52,39 @@ impl std::str::FromStr for TaskState {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AssignmentMode {
+    Open,
+    Approval,
+    Dispatch,
+}
+
+impl fmt::Display for AssignmentMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Open => "open",
+            Self::Approval => "approval",
+            Self::Dispatch => "dispatch",
+        })
+    }
+}
+
+impl std::str::FromStr for AssignmentMode {
+    type Err = DomainError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "open" => Ok(Self::Open),
+            "approval" => Ok(Self::Approval),
+            "dispatch" => Ok(Self::Dispatch),
+            other => Err(DomainError::InvalidInput(format!(
+                "invalid assignment mode '{other}'; expected open, approval, or dispatch"
+            ))),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Project {
     #[serde(default)]
@@ -79,6 +112,7 @@ pub struct Task {
     pub description: String,
     pub owner_actor_id: String,
     pub state: TaskState,
+    pub assignment_mode: AssignmentMode,
     pub priority: i32,
     pub current_context_revision_id: Option<Id>,
     pub created_at: DateTime<Utc>,
@@ -132,6 +166,12 @@ pub struct Assignment {
     pub acquired_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
     pub renewed_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskClaim {
+    pub assignment: Assignment,
+    pub run: Run,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

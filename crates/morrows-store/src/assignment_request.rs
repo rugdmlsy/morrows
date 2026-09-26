@@ -33,6 +33,19 @@ impl Store {
         if matches!(task.state, TaskState::Done | TaskState::Cancelled) {
             return Err(DomainError::Conflict(format!("task is {}", task.state)));
         }
+        match task.assignment_mode {
+            AssignmentMode::Approval => {}
+            AssignmentMode::Open => {
+                return Err(DomainError::Conflict(
+                    "task is open; use task_claim to start execution directly".into(),
+                ));
+            }
+            AssignmentMode::Dispatch => {
+                return Err(DomainError::Conflict(
+                    "task is dispatcher-managed and does not accept assignment requests".into(),
+                ));
+            }
+        }
         if let Some(row) = sqlx::query("SELECT * FROM assignment_requests WHERE task_id=? AND agent_instance_id=? AND role=? AND status='pending'")
             .bind(task_id.to_string()).bind(agent_id.to_string()).bind(role).fetch_optional(&mut *tx).await.map_err(storage)? {
             let previous = row_to_request(row)?;
@@ -153,11 +166,18 @@ impl Store {
             )));
         }
         let assignment = if status == "approved" {
-            let state: String = sqlx::query_scalar("SELECT state FROM tasks WHERE id=?")
+            let task_row = sqlx::query("SELECT state,assignment_mode FROM tasks WHERE id=?")
                 .bind(request.task_id.to_string())
                 .fetch_one(&mut *tx)
                 .await
                 .map_err(storage)?;
+            let state: String = task_row.try_get("state").map_err(storage)?;
+            let mode: String = task_row.try_get("assignment_mode").map_err(storage)?;
+            if mode != "approval" {
+                return Err(DomainError::Conflict(format!(
+                    "task assignment mode is {mode}; approval is no longer valid"
+                )));
+            }
             if matches!(state.as_str(), "done" | "cancelled") {
                 return Err(DomainError::Conflict(format!("task is {state}")));
             }

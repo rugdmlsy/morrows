@@ -59,8 +59,9 @@ Readiness or verified completion is never inferred from a description or handoff
   not. Completed assignments are discoverable for terminal tasks when requested.
 - Without `state`, done/cancelled tasks are excluded unless `include_completed=true`.
   An explicit state takes precedence.
-- Task summaries include project names and 240-character description previews,
-  with an explicit truncation flag. `task_get` returns the complete task text.
+- Task summaries include project names, `assignment_mode`, and 240-character
+  description previews with an explicit truncation flag. `task_get` returns the
+  complete task text and assignment mode.
 - Responses echo the caller and effective filters. Empty lists explain that the
   filter matched nothing; they do not imply that no other tasks exist.
 - `project_list` pages all project summaries with a 240-character `description_preview`

@@ -495,8 +495,7 @@ capacity model. It does not launch, resume, or control external agent processes.
 
 A `TaskDispatchPolicy` is keyed by task and role. It stores required capabilities,
 optional AgentProfile / Account / Machine filters, heartbeat and capacity freshness
-TTLs, assignment lease duration, and an enabled flag. Updating a policy is audited;
-manual `task_claim` remains supported and unchanged.
+TTLs, assignment lease duration, and an enabled flag. Updating a policy is audited. The control-plane claim path remains available; tasks in `assignment_mode=open` also expose the employee `task_claim`, which atomically creates that caller's Assignment and Run. Enabling a dispatch policy changes the task to `dispatch`, so employee self-claim is disabled for dispatcher-owned work.
 
 `dispatch_preview` and actual dispatch use the same evaluator. For an executor task,
 the evaluator requires a dispatchable task state, completed prerequisites, no live

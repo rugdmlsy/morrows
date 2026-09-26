@@ -51,6 +51,16 @@ impl Store {
         .execute(&mut *tx)
         .await
         .map_err(storage)?;
+        if input.enabled {
+            sqlx::query(
+                "UPDATE tasks SET assignment_mode='dispatch',updated_at=? WHERE id=?",
+            )
+            .bind(now.to_rfc3339())
+            .bind(task_id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?;
+        }
         append_event_tx(
             &mut tx,
             "system",
@@ -58,7 +68,7 @@ impl Store {
             "task",
             task_id,
             "dispatch.policy.set",
-            json!({"role":role,"enabled":input.enabled}),
+            json!({"role":role,"enabled":input.enabled,"assignment_mode": if input.enabled { Some("dispatch") } else { None }}),
             None,
         )
         .await?;
@@ -289,7 +299,8 @@ impl Store {
         let tasks: Vec<String> = sqlx::query_scalar(
             "SELECT p.task_id FROM task_dispatch_policies p
              JOIN tasks t ON t.id=p.task_id
-             WHERE p.role=? AND p.enabled=1 AND t.state IN ('ready','in_progress')
+             WHERE p.role=? AND p.enabled=1 AND t.assignment_mode='dispatch'
+               AND t.state IN ('ready','in_progress')
              ORDER BY t.priority DESC,t.created_at ASC,t.id ASC",
         )
         .bind(role)
@@ -486,14 +497,18 @@ async fn evaluate_dispatch_conn(
     policy: TaskDispatchPolicy,
     now: DateTime<Utc>,
 ) -> Result<DispatchPreview, DomainError> {
-    let row = sqlx::query("SELECT state FROM tasks WHERE id=?")
+    let row = sqlx::query("SELECT state,assignment_mode FROM tasks WHERE id=?")
         .bind(task_id.to_string())
         .fetch_optional(&mut *conn)
         .await
         .map_err(storage)?
         .ok_or_else(|| DomainError::NotFound(format!("task {task_id}")))?;
     let state: String = row.try_get("state").map_err(storage)?;
+    let assignment_mode: String = row.try_get("assignment_mode").map_err(storage)?;
     let mut task_reasons = Vec::new();
+    if assignment_mode != "dispatch" {
+        task_reasons.push(format!("assignment_mode:{assignment_mode}"));
+    }
     if crate::continuation::predecessor_runtime_active(conn, task_id).await? {
         task_reasons.push("previous_execution_still_stopping".into());
     }
@@ -790,7 +805,7 @@ async fn insert_dispatch_assignment_tx(
     let result = sqlx::query(
         "INSERT INTO assignments(id,task_id,role,agent_instance_id,status,acquired_at,expires_at,renewed_at)
          SELECT ?,id,?,?,'active',?,?,? FROM tasks
-         WHERE id=? AND state IN ('ready','in_progress')",
+         WHERE id=? AND assignment_mode='dispatch' AND state IN ('ready','in_progress')",
     )
     .bind(id.to_string())
     .bind(role)

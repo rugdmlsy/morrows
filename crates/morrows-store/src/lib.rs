@@ -1,7 +1,8 @@
 use chrono::{DateTime, Duration, Utc};
 use morrows_core::{
-    AgentInstance, Assignment, ContextRevision, CreateContextRevision, CreateProject, CreateTask,
-    DomainError, Event, Id, Project, Run, Task, TaskState, UpdateContextRevision,
+    AgentInstance, Assignment, AssignmentMode, ContextRevision, CreateContextRevision, CreateProject,
+    CreateTask, DomainError, Event, Id, Project, Run, Task, TaskClaim, TaskState,
+    UpdateContextRevision,
 };
 use serde_json::{Value, json};
 use sqlx::{
@@ -148,6 +149,40 @@ impl Store {
         self.get_task(task_id).await
     }
 
+    pub async fn set_task_assignment_mode(
+        &self,
+        task_id: Id,
+        assignment_mode: AssignmentMode,
+    ) -> Result<Task, DomainError> {
+        self.get_task(task_id).await?;
+        let now = Utc::now();
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(storage)?;
+        sqlx::query("UPDATE tasks SET assignment_mode=?,updated_at=? WHERE id=?")
+            .bind(assignment_mode.to_string())
+            .bind(now.to_rfc3339())
+            .bind(task_id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?;
+        append_event_tx(
+            &mut tx,
+            "operator",
+            "control-plane",
+            "task",
+            task_id,
+            "task.assignment_mode_changed",
+            json!({"assignment_mode": assignment_mode}),
+            None,
+        )
+        .await?;
+        tx.commit().await.map_err(storage)?;
+        self.get_task(task_id).await
+    }
+
     pub async fn create_task(&self, input: CreateTask) -> Result<Task, DomainError> {
         if input.title.trim().is_empty() {
             return Err(DomainError::InvalidInput(
@@ -186,7 +221,7 @@ impl Store {
             "task",
             id,
             "task.created",
-            json!({"state": input.state, "title": input.title}),
+            json!({"state": input.state, "assignment_mode": "open", "title": input.title}),
             None,
         )
         .await?;
@@ -374,84 +409,110 @@ impl Store {
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(storage)?;
-        let row = sqlx::query(
-            "SELECT task_id,agent_instance_id,status,expires_at FROM assignments WHERE id=?",
+        let run = start_run_tx(
+            &mut tx,
+            assignment_id,
+            actor_agent_id,
+            external_session_ref,
         )
-        .bind(assignment_id.to_string())
+        .await?;
+        tx.commit().await.map_err(storage)?;
+        Ok(run)
+    }
+
+    /// Employee self-service path for an open task. Assignment acquisition and
+    /// Run creation share one IMMEDIATE transaction, so no observable
+    /// "assigned but not running" state is produced.
+    pub async fn claim_task_for_execution(
+        &self,
+        task_id: Id,
+        agent_id: Id,
+        role: &str,
+        lease_seconds: i64,
+    ) -> Result<TaskClaim, DomainError> {
+        self.get_agent(agent_id).await?;
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(storage)?;
+        let row = sqlx::query("SELECT state,assignment_mode FROM tasks WHERE id=?")
+            .bind(task_id.to_string())
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(storage)?
+            .ok_or_else(|| DomainError::NotFound(format!("task {task_id}")))?;
+        let state: String = row.try_get("state").map_err(storage)?;
+        let mode: String = row.try_get("assignment_mode").map_err(storage)?;
+        if mode != "open" {
+            return Err(DomainError::Conflict(match mode.as_str() {
+                "approval" => "task requires assignment approval; use task_request_assignment".into(),
+                "dispatch" => "task is dispatcher-managed and cannot be self-claimed".into(),
+                _ => format!("task assignment mode is {mode}"),
+            }));
+        }
+        if state != "ready" {
+            return Err(DomainError::Conflict(format!(
+                "task is {state}; only ready tasks can be self-claimed"
+            )));
+        }
+
+        let assignment = claim_task_tx(&mut tx, task_id, agent_id, role, lease_seconds).await?;
+        let run = start_run_tx(&mut tx, assignment.id, agent_id, None).await?;
+
+        let now = Utc::now();
+        let pending_request_id: Option<String> = sqlx::query_scalar(
+            "SELECT id FROM assignment_requests
+             WHERE task_id=? AND agent_instance_id=? AND role=? AND status='pending'",
+        )
+        .bind(task_id.to_string())
+        .bind(agent_id.to_string())
+        .bind(role)
         .fetch_optional(&mut *tx)
         .await
-        .map_err(storage)?
-        .ok_or_else(|| DomainError::NotFound(format!("assignment {assignment_id}")))?;
-        let status: String = row.try_get("status").map_err(storage)?;
-        let expires = parse_dt(row.try_get("expires_at").map_err(storage)?)?;
-        if status != "active" || expires <= Utc::now() {
-            return Err(DomainError::Conflict("assignment is not active".into()));
-        }
-        let task_id = Uuid::parse_str(
-            row.try_get::<String, _>("task_id")
-                .map_err(storage)?
-                .as_str(),
-        )
         .map_err(storage)?;
-        let agent_id = Uuid::parse_str(
-            row.try_get::<String, _>("agent_instance_id")
-                .map_err(storage)?
-                .as_str(),
-        )
-        .map_err(storage)?;
-        if agent_id != actor_agent_id {
-            return Err(DomainError::Conflict(
-                "assignment belongs to another agent instance".into(),
-            ));
-        }
-        // Serialize direct Run creation with launcher Run creation. An assignment
-        // grants one execution, not permission to start competing live Runs.
-        let live: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM runs WHERE assignment_id=? AND status IN ('running','paused','interrupted','cleanup_pending','cancelling'))")
-            .bind(assignment_id.to_string()).fetch_one(&mut *tx).await.map_err(storage)?;
-        if live {
-            return Err(DomainError::Conflict(
-                "assignment already has an active run".into(),
-            ));
-        }
-        let id = Uuid::new_v4();
-        let now = Utc::now();
-        let current_ctx_rev: Option<String> =
-            sqlx::query_scalar("SELECT current_context_revision_id FROM tasks WHERE id=?")
-                .bind(task_id.to_string())
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(storage)?
-                .flatten();
-
-        sqlx::query("INSERT INTO runs(id,task_id,assignment_id,agent_instance_id,external_session_ref,status,started_at) VALUES(?,?,?,?,?,'running',?)")
-            .bind(id.to_string()).bind(task_id.to_string()).bind(assignment_id.to_string()).bind(agent_id.to_string())
-            .bind(&external_session_ref).bind(now.to_rfc3339()).execute(&mut *tx).await.map_err(storage)?;
-
-        if let Some(ctx_id) = current_ctx_rev {
+        if let Some(request_id) = pending_request_id {
             sqlx::query(
-                "INSERT INTO run_context_revisions(run_id,context_revision_id,pinned_at) VALUES(?,?,?)",
+                "UPDATE assignment_requests
+                 SET status='approved',assignment_id=?,resolution='auto-approved by open task claim',resolved_at=?
+                 WHERE id=? AND status='pending'",
             )
-            .bind(id.to_string())
-            .bind(ctx_id)
+            .bind(assignment.id.to_string())
             .bind(now.to_rfc3339())
+            .bind(&request_id)
             .execute(&mut *tx)
             .await
             .map_err(storage)?;
+            append_event_tx(
+                &mut tx,
+                "system",
+                "open-task-claim",
+                "task",
+                task_id,
+                "assignment.request_resolved",
+                json!({
+                    "request_id":request_id,
+                    "status":"approved",
+                    "assignment_id":assignment.id,
+                    "resolution":"auto-approved by open task claim"
+                }),
+                None,
+            )
+            .await?;
         }
-
         append_event_tx(
             &mut tx,
             "agent_instance",
             &agent_id.to_string(),
-            "run",
-            id,
-            "run.started",
-            json!({"task_id":task_id,"assignment_id":assignment_id}),
+            "task",
+            task_id,
+            "task.claimed_for_execution",
+            json!({"assignment_id":assignment.id,"run_id":run.id,"role":role}),
             None,
         )
         .await?;
         tx.commit().await.map_err(storage)?;
-        self.get_run(id).await
+        Ok(TaskClaim { assignment, run })
     }
 
     pub async fn get_run(&self, id: Id) -> Result<Run, DomainError> {
@@ -818,6 +879,7 @@ fn row_to_project(row: sqlx::sqlite::SqliteRow) -> Result<Project, DomainError> 
 
 fn row_to_task(row: sqlx::sqlite::SqliteRow) -> Result<Task, DomainError> {
     let state: String = row.try_get("state").map_err(storage)?;
+    let assignment_mode: String = row.try_get("assignment_mode").map_err(storage)?;
     Ok(Task {
         id: parse_id(row.try_get("id").map_err(storage)?)?,
         project_id: parse_opt_id(row.try_get("project_id").map_err(storage)?)?,
@@ -825,6 +887,7 @@ fn row_to_task(row: sqlx::sqlite::SqliteRow) -> Result<Task, DomainError> {
         description: row.try_get("description").map_err(storage)?,
         owner_actor_id: row.try_get("owner_actor_id").map_err(storage)?,
         state: TaskState::from_str(&state)?,
+        assignment_mode: AssignmentMode::from_str(&assignment_mode)?,
         priority: row.try_get("priority").map_err(storage)?,
         current_context_revision_id: parse_opt_id(
             row.try_get("current_context_revision_id")
@@ -949,8 +1012,116 @@ mod operator_auth;
 mod completion;
 mod memory;
 
-// Reuse the exact claim checks for an operator-approved employee request.
-// The request resolution and assignment are committed together.
+async fn start_run_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    assignment_id: Id,
+    actor_agent_id: Id,
+    external_session_ref: Option<String>,
+) -> Result<Run, DomainError> {
+    let row = sqlx::query(
+        "SELECT task_id,agent_instance_id,status,expires_at FROM assignments WHERE id=?",
+    )
+    .bind(assignment_id.to_string())
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(storage)?
+    .ok_or_else(|| DomainError::NotFound(format!("assignment {assignment_id}")))?;
+    let status: String = row.try_get("status").map_err(storage)?;
+    let expires = parse_dt(row.try_get("expires_at").map_err(storage)?)?;
+    if status != "active" || expires <= Utc::now() {
+        return Err(DomainError::Conflict("assignment is not active".into()));
+    }
+    let task_id = parse_id(row.try_get("task_id").map_err(storage)?)?;
+    let agent_id = parse_id(row.try_get("agent_instance_id").map_err(storage)?)?;
+    if agent_id != actor_agent_id {
+        return Err(DomainError::Conflict(
+            "assignment belongs to another agent instance".into(),
+        ));
+    }
+    let live: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM runs WHERE assignment_id=?
+         AND status IN ('running','paused','interrupted','cleanup_pending','cancelling'))",
+    )
+    .bind(assignment_id.to_string())
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(storage)?;
+    if live {
+        return Err(DomainError::Conflict(
+            "assignment already has an active run".into(),
+        ));
+    }
+
+    let id = Uuid::new_v4();
+    let now = Utc::now();
+    let current_ctx_rev: Option<String> =
+        sqlx::query_scalar("SELECT current_context_revision_id FROM tasks WHERE id=?")
+            .bind(task_id.to_string())
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(storage)?
+            .flatten();
+
+    sqlx::query(
+        "INSERT INTO runs(id,task_id,assignment_id,agent_instance_id,external_session_ref,status,started_at)
+         VALUES(?,?,?,?,?,'running',?)",
+    )
+    .bind(id.to_string())
+    .bind(task_id.to_string())
+    .bind(assignment_id.to_string())
+    .bind(agent_id.to_string())
+    .bind(&external_session_ref)
+    .bind(now.to_rfc3339())
+    .execute(&mut **tx)
+    .await
+    .map_err(storage)?;
+
+    let context_revision_id = current_ctx_rev
+        .as_deref()
+        .map(|value| parse_id(value.to_owned()))
+        .transpose()?;
+    if let Some(ctx_id) = context_revision_id {
+        sqlx::query(
+            "INSERT INTO run_context_revisions(run_id,context_revision_id,pinned_at) VALUES(?,?,?)",
+        )
+        .bind(id.to_string())
+        .bind(ctx_id.to_string())
+        .bind(now.to_rfc3339())
+        .execute(&mut **tx)
+        .await
+        .map_err(storage)?;
+    }
+
+    append_event_tx(
+        tx,
+        "agent_instance",
+        &agent_id.to_string(),
+        "run",
+        id,
+        "run.started",
+        json!({"task_id":task_id,"assignment_id":assignment_id}),
+        None,
+    )
+    .await?;
+
+    Ok(Run {
+        id,
+        task_id,
+        assignment_id,
+        agent_instance_id: agent_id,
+        external_session_ref,
+        status: "running".into(),
+        stop_reason: None,
+        failure_reason: None,
+        checkpoint: None,
+        result: None,
+        started_at: now,
+        ended_at: None,
+        context_revision_id,
+    })
+}
+
+// Reuse the exact claim checks for operator assignment and approved employee requests.
 async fn claim_task_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     task_id: Id,

@@ -263,6 +263,10 @@ async fn project_publication_rejects_stale_context_and_foreign_or_private_source
 async fn assignment_requests_are_durable_deduplicated_and_control_plane_resolved() {
     let store = Store::connect("sqlite::memory:").await.unwrap();
     let (agent, _, task, _) = fixture(&store).await;
+    store
+        .set_task_assignment_mode(task, AssignmentMode::Approval)
+        .await
+        .unwrap();
     let other = store.register_agent("other", &[]).await.unwrap();
     let (a, b) = tokio::join!(
         store.request_assignment(task, agent, "executor", "I can continue"),

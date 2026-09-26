@@ -1,4 +1,4 @@
-use crate::{Id, TaskState};
+use crate::{AssignmentMode, Id, TaskState};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
@@ -31,6 +31,7 @@ pub struct TaskSummary {
     pub description_preview: String,
     pub description_truncated: bool,
     pub state: TaskState,
+    pub assignment_mode: AssignmentMode,
     pub priority: i32,
     pub updated_at: DateTime<Utc>,
 }

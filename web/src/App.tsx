@@ -50,6 +50,7 @@ type Task = {
   description: string;
   owner_actor_id: string;
   state: string;
+  assignment_mode: "open" | "approval" | "dispatch";
   priority: number;
   current_context_revision_id?: string | null;
   created_at: string;
@@ -465,6 +466,7 @@ export default function App() {
   });
   const [showProjectCreate, setShowProjectCreate] = useState(false);
   const [projectBusy, setProjectBusy] = useState(false);
+  const [assignmentModeBusy, setAssignmentModeBusy] = useState(false);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [projectMemories, setProjectMemories] = useState<MemoryEntry[]>([]);
   const [selectedProjectMemoryId, setSelectedProjectMemoryId] = useState<string | null>(null);
@@ -1086,6 +1088,24 @@ export default function App() {
     }
   }
 
+  async function changeTaskAssignmentMode(assignmentMode: Task["assignment_mode"]) {
+    if (!selectedTask) return;
+    setAssignmentModeBusy(true);
+    try {
+      const next = await api<Task>(`/api/tasks/${selectedTask.id}/assignment-mode`, {
+        method: "POST",
+        body: JSON.stringify({ assignment_mode: assignmentMode }),
+      });
+      setTasks((current) => current.map((task) => task.id === next.id ? next : task));
+      await Promise.all([refreshQueueBase(), refreshDetail()]);
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setAssignmentModeBusy(false);
+    }
+  }
+
   const viewMeta = {
     sessions: {
       zh: "会话",
@@ -1584,6 +1604,19 @@ export default function App() {
                         <span>{t("state")}</span>
                         <StateBadge state={selectedTask.state} locale={locale} />
                       </div>
+                      <label className="metadata-field">
+                        <span>{t("assignmentMode")}</span>
+                        <select
+                          value={selectedTask.assignment_mode}
+                          onChange={(event) => void changeTaskAssignmentMode(event.target.value as Task["assignment_mode"])}
+                          disabled={assignmentModeBusy}
+                        >
+                          <option value="open">{t("assignmentModeOpen")}</option>
+                          <option value="approval">{t("assignmentModeApproval")}</option>
+                          <option value="dispatch">{t("assignmentModeDispatch")}</option>
+                        </select>
+                        <small>{t("assignmentModeHint")}</small>
+                      </label>
                       <div className="metadata-field">
                         <span>{t("priority")}</span>
                         <strong>P{selectedTask.priority}</strong>

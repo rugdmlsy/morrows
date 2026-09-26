@@ -198,7 +198,7 @@ Current summary: {}",
             "missing_context": missing, "persisted_package": package_ref, "execution": execution,
             "acceptance_criteria_paths": acceptance_paths,
             "assignment_requests": requests,
-            "workflow": {"request_assignment":"task_request_assignment", "request_status":"assignment_request_list", "persist_milestone":"run_milestone", "handoff_requires_latest_milestone":true, "publish_project_knowledge":"project_memory_publish", "completion_preflight":"run_completion_check", "structured_completion_required_for_executor":context.as_ref().is_some_and(|c| !morrows_core::completion_criteria(&c.constraints).is_empty()), "project_memory_disposition_required_for_executor":task.project_id.is_some()},
+            "workflow": {"claim_open_task":"task_claim", "request_approval":"task_request_assignment", "request_status":"assignment_request_list", "persist_milestone":"run_milestone", "handoff_requires_latest_milestone":true, "publish_project_knowledge":"project_memory_publish", "completion_preflight":"run_completion_check", "structured_completion_required_for_executor":context.as_ref().is_some_and(|c| !morrows_core::completion_criteria(&c.constraints).is_empty()), "project_memory_disposition_required_for_executor":task.project_id.is_some()},
             "read_more": {"memory": "memory_get", "memory_search": "memory_search", "instructions": "instructions_get", "collaboration": "task_collaboration", "events": "task_events", "execution": "task_get"},
         }).to_string())
     }
@@ -341,6 +341,19 @@ pub struct RenewAssignmentRequest {
     pub assignment_id: String,
     #[serde(default = "default_lease")]
     pub lease_seconds: i64,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TaskClaimRequest {
+    pub task_id: String,
+    #[serde(default = "default_claim_role")]
+    pub role: String,
+    #[serde(default = "default_lease")]
+    pub lease_seconds: i64,
+}
+
+fn default_claim_role() -> String {
+    "executor".into()
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1253,7 +1266,30 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Request a role on an existing task without creating a duplicate task or claiming it. Persists a pending request visible in the control-plane queue; approval creates/reuses an assignment but does not start a Run. Exact pending retries reuse the request. Query assignment_request_list for resolution; execution still requires control-plane Run creation."
+        description = "Atomically claim an open task for the authenticated AgentInstance and start its Run. This creates the Assignment and Run in one transaction, so success means execution ownership is live immediately. Only tasks with assignment_mode=open can be self-claimed; approval tasks use task_request_assignment and dispatch tasks are control-plane managed. Concurrent claims for the same role allow only one winner."
+    )]
+    async fn task_claim(
+        &self,
+        Parameters(req): Parameters<TaskClaimRequest>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<String, String> {
+        serde_json::to_string(
+            &self
+                .store
+                .claim_task_for_execution(
+                    parse_id(&req.task_id)?,
+                    authenticated_agent(&parts)?,
+                    &req.role,
+                    req.lease_seconds,
+                )
+                .await
+                .map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())
+    }
+
+    #[tool(
+        description = "Request a role on an approval-mode task without creating a duplicate task or claiming it. Persists a pending request visible in the control-plane queue; approval creates/reuses an assignment but does not start a Run. Open tasks should use task_claim; dispatch tasks do not accept employee requests. Exact pending retries reuse the request."
     )]
     async fn task_request_assignment(
         &self,
@@ -1658,6 +1694,7 @@ mod tests {
             "run_complete",
             "run_completion_check",
             "project_memory_publish",
+            "task_claim",
             "task_request_assignment",
             "assignment_request_list",
             "assignment_request_withdraw",
@@ -1700,7 +1737,6 @@ mod tests {
             "external_launch_accept",
             "launch_instruction_send",
             "task_create",
-            "task_claim",
             "run_start",
             "dependency_add",
             "dependency_remove",
