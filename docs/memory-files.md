@@ -163,6 +163,6 @@ token/context buffer 自动还原未记录的推理，因此 Agent 应在实质�
 
 RunMilestone 是 Task 级执行历史，不是长期项目知识。任一已认证 Agent 读取 Task 时都能立即看到该 Task 的 milestones；不需要也不应该先调用 project_memory_publish。底层 Run/provider checkpoint 仍只向对应 Agent 暴露，避免把执行私有细节当成任务公共信息。
 
-Project Memory 才承担跨 Task 的可复用知识。Morrows 使用 Git MemoryEntry 作为唯一 authoritative source，并复用 Zilliz MemSearch 0.4.21 作为可删除、可重建的检索 shadow index：本地 ONNX BGE-M3 生成 dense embedding，Milvus Lite 同时维护 BM25 sparse index，检索由 MemSearch 使用 RRF 融合。索引只决定“候选 MemoryEntry 是谁”；最终返回内容会按 MemoryEntry ID 回读当前 Morrows authoritative projection，并过滤 stale/superseded 命中。
+Project Memory 才承担跨 Task 的可复用知识。Morrows 使用 Git MemoryEntry 作为唯一 authoritative source；检索采用纯 ripgrep：当前 shared Project Memory 被投影成只读 Markdown，查询拆成精确短语、英文 token 和中文片段后由 rg 搜索，排序依次考虑精确短语、命中 query term 数量、命中次数和 recency。没有 embedding、Milvus 或其他向量数据库。最终返回内容仍按 MemoryEntry ID 回读当前 authoritative projection，因此 stale/superseded 记录不会作为检索结果返回。
 
-task_context 保留确定性的 canonical memory page，并在 MemSearch 可用时附带 memory_retrieval；索引故障时只标记 unavailable 并回退 canonical memory，不阻断 Task 读取。memory_search 提供显式 hybrid retrieval。Milestone 不进入这个向量索引。
+task_context 保留确定性的 canonical memory page，并在 ripgrep 可用时附带 memory_retrieval；grep 故障时只标记 unavailable 并回退 canonical memory，不阻断 Task 读取。memory_search 提供显式 lexical retrieval。Milestone 不进入 Project Memory 检索层，而是直接通过 Task execution 信息读取。

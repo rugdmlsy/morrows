@@ -20,12 +20,6 @@ if [[ ! -x "$HOME/.cargo/bin/cargo" ]]; then
 fi
 source "$HOME/.cargo/env"
 
-export PATH="$HOME/.local/bin:$PATH"
-if ! command -v uv >/dev/null 2>&1; then
-  curl -LsSf https://astral.sh/uv/install.sh | sh
-  export PATH="$HOME/.local/bin:$PATH"
-fi
-
 if [[ ! -d "$root/.git" ]]; then
   mkdir -p "$(dirname "$root")"
   git clone --branch "$branch" "$repo" "$root"
@@ -47,18 +41,7 @@ cargo build --release -p morrows-server -p morrows-cli
 mkdir -p "$HOME/.local/bin"
 install -m 0755 target/release/morrows "$HOME/.local/bin/morrows"
 
-memsearch_root="$HOME/.local/share/morrows-memsearch"
-memsearch_venv="$memsearch_root/venv"
-mkdir -p "$memsearch_root"
-if [[ ! -x "$memsearch_venv/bin/python" ]]; then
-  uv venv "$memsearch_venv"
-fi
-uv pip install --python "$memsearch_venv/bin/python" 'memsearch[onnx]==0.4.21'
-doctor_dir="$(mktemp -d /tmp/morrows-memsearch-doctor.XXXXXX)"
-trap 'rm -rf "$doctor_dir"' EXIT
-"$memsearch_venv/bin/python" scripts/memory_search_bridge.py doctor   --work-dir "$doctor_dir"   --milvus-uri "$doctor_dir/milvus.db"
-rm -rf "$doctor_dir"
-trap - EXIT
+command -v rg >/dev/null 2>&1
 
 git diff --quiet --
 git diff --cached --quiet --
@@ -91,7 +74,6 @@ esac
 release_dir="$(mktemp -d "$guard_dir/release.XXXXXX")"
 install -m 0444 target/release/morrows-server "$release_dir/server"
 install -m 0444 scripts/run-vps.sh "$release_dir/launcher"
-install -m 0444 scripts/memory_search_bridge.py "$release_dir/memory_search_bridge.py"
 install -m 0444 deploy/morrows.service "$release_dir/unit"
 cp -R web/dist "$release_dir/web"
 chmod -R a-w "$release_dir"
@@ -113,8 +95,7 @@ while (( SECONDS < deadline )); do
     env_names="$(tr '\0' '\n' < "/proc/$pid/environ")"
     grep -q '^MORROWS_LSM_CONTROL_URL=http://127.0.0.1:8766$' <<<"$env_names"
     grep -q '^MORROWS_LSM_CONTROL_KEY=.' <<<"$env_names"
-    grep -q '^MORROWS_MEMSEARCH_PYTHON=.' <<<"$env_names"
-    python3 -c 'import json,sys; data=json.loads(sys.stdin.read()); assert data["memory_search"]["enabled"] is True' <<<"$body"
+    python3 -c 'import json,sys; data=json.loads(sys.stdin.read()); assert data["memory_search"]["enabled"] is True and data["memory_search"]["engine"] == "ripgrep"' <<<"$body"
     ! grep -q '^CLOUDFLARE_TUNNEL_TOKEN=' <<<"$env_names"
     ! grep -q '^LOCAL_SHELL_MCP_OAUTH_ADMIN_PIN=' <<<"$env_names"
 

@@ -166,8 +166,8 @@ Current summary: {}",
             }
             (None, Some(_)) => json!({
                 "available": false,
-                "engine": "memsearch",
-                "reason": "memsearch_not_configured",
+                "engine": "ripgrep",
+                "reason": "ripgrep_not_configured",
                 "fallback": "task_context.memory",
             }),
             (_, None) => json!({
@@ -1175,7 +1175,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Hybrid-search current shared project memory for any readable task. Uses Zilliz MemSearch (local ONNX dense embeddings + Milvus BM25 + RRF) as a rebuildable shadow index, then returns authoritative current Morrows MemoryEntry records. Milestones are task execution history and are read through task_get/task_context, not this memory index."
+        description = "Lexically search current shared project memory for any readable task using ripgrep over a derived read-only projection, then return authoritative current Morrows MemoryEntry records. Ranking prefers exact phrase matches, then number of matched query terms, match count and recency. Milestones are task execution history and are read through task_get/task_context, not this memory search."
     )]
     async fn memory_search(
         &self,
@@ -1193,10 +1193,9 @@ impl MorrowsMcp {
         let project_id = task
             .project_id
             .ok_or_else(|| "task has no project to search".to_string())?;
-        let search = self
-            .memory_search
-            .as_ref()
-            .ok_or_else(|| "MemSearch is not configured on this Morrows server".to_string())?;
+        let search = self.memory_search.as_ref().ok_or_else(|| {
+            "ripgrep memory search is not configured on this Morrows server".to_string()
+        })?;
         let value = search
             .search_project(&self.store, project_id, &req.query, req.top_k)
             .await?;
@@ -2070,32 +2069,19 @@ mod tests {
         use morrows_core::{CreateMemoryEntry, CreateProject};
         use std::{fs as stdfs, path::PathBuf};
 
-        let base = std::env::temp_dir().join(format!("morrows-mcp-search-{}", Id::new_v4()));
+        let base = std::env::temp_dir().join(format!("morrows-mcp-grep-{}", Id::new_v4()));
         stdfs::create_dir_all(&base).unwrap();
-        let bridge = base.join("fake_bridge.py");
-        stdfs::write(
-            &bridge,
-            r#"import argparse,json,sys
-from pathlib import Path
-p=argparse.ArgumentParser(); p.add_argument('command'); p.add_argument('--root'); p.add_argument('--milvus-uri'); p.add_argument('--collection'); a=p.parse_args()
-for line in sys.stdin:
-    req=json.loads(line)
-    files=sorted((Path(a.root)/str(req['project_id'])).glob('*.md'))
-    print(json.dumps({'ok':True,'engine':'fake-memsearch','version':'test','provider':'onnx','model':'fake','indexed_chunks':len(files),'results':[{'source':str(files[0]),'heading':'current','score':0.95}]}), flush=True)
-"#,
-        )
-        .unwrap();
         let store = Store::connect("sqlite::memory:").await.unwrap();
         let project = store
             .create_project(CreateProject {
                 name: "Search".into(),
-                description: "Hybrid".into(),
+                description: "Lexical".into(),
             })
             .await
             .unwrap();
         let task = store
             .create_task(serde_json::from_value(json!({
-                "project_id":project.id,"title":"Reader","description":"find protocol","state":"ready"
+                "project_id":project.id,"title":"Reader","description":"find alpha protocol","state":"ready"
             })).unwrap())
             .await
             .unwrap();
@@ -2120,12 +2106,7 @@ for line in sys.stdin:
             })
             .await
             .unwrap();
-        let search = MemorySearch::for_test(
-            PathBuf::from("python3"),
-            bridge,
-            base.join("projection"),
-            base.join("milvus.db"),
-        );
+        let search = MemorySearch::for_test(PathBuf::from("rg"), base.join("projection"));
         let mcp = MorrowsMcp::new_with_memory_search(store.clone(), Some(search));
         let result: Value = serde_json::from_str(
             &mcp.memory_search(
@@ -2140,27 +2121,23 @@ for line in sys.stdin:
             .unwrap(),
         )
         .unwrap();
+        assert_eq!(result["engine"], "ripgrep");
         assert_eq!(result["results"][0]["memory"]["id"], json!(memory.id));
         assert_eq!(
             result["results"][0]["memory"]["content"]["sentinel"],
             "SEARCH-ALPHA-17"
         );
+        assert_eq!(result["index_role"], "none");
         let _ = stdfs::remove_dir_all(base);
     }
 
     #[tokio::test]
-    async fn task_context_falls_back_when_memsearch_shadow_fails() {
+    async fn task_context_falls_back_when_ripgrep_is_unavailable() {
         use morrows_core::{CreateMemoryEntry, CreateProject};
         use std::{fs as stdfs, path::PathBuf};
 
-        let base = std::env::temp_dir().join(format!("morrows-mcp-search-fail-{}", Id::new_v4()));
+        let base = std::env::temp_dir().join(format!("morrows-mcp-grep-fail-{}", Id::new_v4()));
         stdfs::create_dir_all(&base).unwrap();
-        let bridge = base.join("fail_bridge.py");
-        stdfs::write(
-            &bridge,
-            "import sys\nsys.stderr.write('shadow unavailable')\nsys.exit(2)\n",
-        )
-        .unwrap();
         let store = Store::connect("sqlite::memory:").await.unwrap();
         let project = store
             .create_project(CreateProject {
@@ -2192,10 +2169,8 @@ for line in sys.stdin:
             .await
             .unwrap();
         let search = MemorySearch::for_test(
-            PathBuf::from("python3"),
-            bridge,
+            PathBuf::from("/definitely/missing/rg"),
             base.join("projection"),
-            base.join("milvus.db"),
         );
         let mcp = MorrowsMcp::new_with_memory_search(store.clone(), Some(search));
         let context: Value = serde_json::from_str(
@@ -2214,6 +2189,7 @@ for line in sys.stdin:
             "CANONICAL-SURVIVES"
         );
         assert_eq!(context["memory_retrieval"]["available"], false);
+        assert_eq!(context["memory_retrieval"]["engine"], "ripgrep");
         assert_eq!(
             context["memory_retrieval"]["fallback"],
             "task_context.memory"

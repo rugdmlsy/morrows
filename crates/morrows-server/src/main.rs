@@ -213,7 +213,7 @@ async fn main() -> anyhow::Result<()> {
     let managed_memory_search = MemorySearch::managed();
     tracing::info!(
         enabled = managed_memory_search.is_some(),
-        "configured MemSearch project-memory retrieval"
+        "configured ripgrep project-memory retrieval"
     );
     let state = AppState {
         store: store.clone(),
@@ -413,8 +413,8 @@ async fn health() -> Json<Value> {
         "mcp": {"ready": true, "path": "/mcp"},
         "memory_search": {
             "enabled": MemorySearch::managed().is_some(),
-            "engine": "memsearch",
-            "index_role": "rebuildable_shadow"
+            "engine": "ripgrep",
+            "index_role": "none"
         }
     }))
 }
