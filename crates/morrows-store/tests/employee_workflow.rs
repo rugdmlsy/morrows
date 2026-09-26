@@ -26,6 +26,64 @@ fn publication(task: Id, context: Id, key: &str) -> PublishProjectMemory {
 }
 
 #[tokio::test]
+async fn native_document_id_is_stable_unique_and_preserves_legacy_retry_shape() {
+    let store = Store::connect("sqlite::memory:").await.unwrap();
+    let (agent, _, task, context) = fixture(&store).await;
+    store
+        .claim_task(task, agent, "executor", 300)
+        .await
+        .unwrap();
+    let legacy = publication(task, context, "legacy");
+    assert!(
+        serde_json::to_value(&legacy)
+            .unwrap()
+            .get("new_memory_id")
+            .is_none()
+    );
+    let mut input = publication(task, context, "native-file");
+    let requested = Id::new_v4();
+    input.new_memory_id = Some(requested);
+    let entry = store
+        .publish_project_memory(agent, input.clone())
+        .await
+        .unwrap();
+    assert_eq!(entry.id, requested);
+    assert_eq!(
+        store
+            .publish_project_memory(agent, input.clone())
+            .await
+            .unwrap()
+            .id,
+        requested
+    );
+    let mut collision = input.clone();
+    collision.idempotency_key = "different-operation".into();
+    assert!(
+        store
+            .publish_project_memory(agent, collision)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("already in use")
+    );
+    input.idempotency_key = "invalid-revision".into();
+    input.new_memory_id = Some(Id::new_v4());
+    input.supersedes_memory_id = Some(requested);
+    assert!(
+        store
+            .publish_project_memory(agent, input)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("not a revision")
+    );
+    assert_eq!(
+        store.get_memory_entry(requested).await.unwrap().content,
+        entry.content
+    );
+}
+
+#[tokio::test]
 async fn project_publication_binds_scope_retains_history_and_handles_retry_and_races() {
     let store = Store::connect("sqlite::memory:").await.unwrap();
     let (agent, project, task, context) = fixture(&store).await;

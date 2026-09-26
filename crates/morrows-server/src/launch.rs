@@ -651,6 +651,11 @@ async fn execute_codebuddy_with_root(
     command.env_remove("MORROWS_LSM_CONTROL_KEY");
     command.env_remove("LOCAL_SHELL_MCP_CONTROL_API_KEY");
 
+    crate::configure_memory_cli(&mut command);
+    command.env(
+        "MORROWS_AGENT_AUTHORIZATION",
+        format!("Bearer {}", morrows_credential.token),
+    );
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(err) => {
@@ -933,6 +938,7 @@ async fn execute_codex_with_root(
     command.env_remove("LOCAL_SHELL_MCP_CONTROL_API_KEY");
     command.env_remove("MORROWS_AGENT_AUTHORIZATION");
     command.env_remove("MORROWS_AGENT_INSTANCE_ID");
+    crate::configure_memory_cli(&mut command);
     command.env(
         "MORROWS_AGENT_AUTHORIZATION",
         format!("Bearer {}", morrows_credential.token),
@@ -1850,6 +1856,8 @@ mod tests {
         );
         assert!(prompt.contains("project_memory_publish"));
         assert!(prompt.contains("run_completion_check"));
+        assert!(prompt.contains(include_str!("context_capture_instructions.md")));
+        assert!(prompt.contains(include_str!("execution_workflow_instructions.md")));
     }
 
     #[tokio::test]

@@ -37,7 +37,9 @@ chmod 755 scripts/run-vps.sh
   npm ci
   npm run build
 )
-cargo build --release -p morrows-server
+cargo build --release -p morrows-server -p morrows-cli
+mkdir -p "$HOME/.local/bin"
+install -m 0755 target/release/morrows "$HOME/.local/bin/morrows"
 
 git diff --quiet --
 git diff --cached --quiet --

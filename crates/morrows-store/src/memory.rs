@@ -63,6 +63,22 @@ impl Store {
                 "task has no project; control plane must set its project first".into(),
             )
         })?;
+        if let Some(id) = input.new_memory_id {
+            if input.supersedes_memory_id.is_some() {
+                return Err(DomainError::InvalidInput(
+                    "new_memory_id is only for a new document, not a revision".into(),
+                ));
+            }
+            let exists: bool =
+                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM memory_entries WHERE id=?)")
+                    .bind(id.to_string())
+                    .fetch_one(&mut *tx)
+                    .await
+                    .map_err(storage)?;
+            if exists {
+                return Err(DomainError::Conflict("new_memory_id is already in use; reuse the original publication key or choose a new document UUID".into()));
+            }
+        }
         if task.current_context_revision_id != Some(input.context_revision_id) {
             return Err(DomainError::Conflict(
                 "context changed; read task_context before publishing project knowledge".into(),
@@ -108,7 +124,7 @@ impl Store {
             supersedes_memory_id: input.supersedes_memory_id,
         };
         validate_memory_input(&entry)?;
-        let id = insert_memory_entry_conn(&mut tx, &entry).await?;
+        let id = insert_memory_entry_conn(&mut tx, &entry, input.new_memory_id).await?;
         let provenance = json!({"agent_instance_id":agent_id,"task_id":task.id,"context_revision_id":input.context_revision_id,
             "artifact_ids":input.artifact_ids,"decision_ids":input.decision_ids,"basis":input.basis,
             "verification_status":input.verification_status,"recorded_at":Utc::now(),"server_verified":false});
@@ -211,7 +227,7 @@ impl Store {
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(storage)?;
-        let id = insert_memory_entry_conn(&mut tx, &input).await?;
+        let id = insert_memory_entry_conn(&mut tx, &input, None).await?;
         tx.commit().await.map_err(storage)?;
         self.get_memory_entry(id).await
     }
@@ -395,8 +411,9 @@ fn row_to_memory_entry(row: sqlx::sqlite::SqliteRow) -> Result<MemoryEntry, Doma
 async fn insert_memory_entry_conn(
     conn: &mut sqlx::SqliteConnection,
     input: &CreateMemoryEntry,
+    requested_id: Option<Id>,
 ) -> Result<Id, DomainError> {
-    let id = Uuid::new_v4();
+    let id = requested_id.unwrap_or_else(Uuid::new_v4);
     let now = Utc::now();
     sqlx::query(
         "INSERT INTO memory_entries(

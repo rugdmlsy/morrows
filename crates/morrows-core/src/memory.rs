@@ -28,6 +28,11 @@ pub struct PublishProjectMemory {
     pub task_id: Id,
     /// Stable caller-generated key for this publication; retry with the same payload.
     pub idempotency_key: String,
+    /// Optional unused UUID for a new document; keeps a native file's identity stable.
+    /// Revisions use supersedes_memory_id instead. Omission preserves legacy receipts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Option<String>")]
+    pub new_memory_id: Option<Id>,
     pub title: String,
     pub content: Value,
     /// reported, verified, hypothesis, or unverified; an author claim, not server certification.

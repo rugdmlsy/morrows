@@ -39,6 +39,24 @@ struct AppState {
     store: Store,
 }
 
+/// Managed builds place the employee CLI next to the server. Expose its path to
+/// child runtimes without changing their PATH or assuming the agent's cwd.
+fn configure_memory_cli(command: &mut tokio::process::Command) {
+    command.env_remove("MORROWS_MEMORY_CLI");
+    if let Ok(executable) = std::env::current_exe()
+        && let Some(parent) = executable.parent()
+    {
+        let cli = parent.join(if cfg!(windows) {
+            "morrows.exe"
+        } else {
+            "morrows"
+        });
+        if cli.is_file() {
+            command.env("MORROWS_MEMORY_CLI", cli);
+        }
+    }
+}
+
 #[derive(Debug)]
 struct ApiError(DomainError);
 

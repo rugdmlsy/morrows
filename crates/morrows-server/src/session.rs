@@ -494,6 +494,7 @@ fn configure_session_runtime_env(
     token: &str,
 ) {
     command.env_remove("MORROWS_AGENT_AUTHORIZATION");
+    crate::configure_memory_cli(command);
     command.env_remove("MORROWS_AGENT_INSTANCE_ID");
     command.env_remove("MORROWS_SESSION_ID");
     command.env_remove("MORROWS_ACCOUNT_ID");
@@ -603,7 +604,7 @@ fn build_session_runtime_prompt(
             "This Session is scoped to Task {task_id}. Read task_context for that Task before substantive work. This direct Session runtime is not itself a Task Run, so do not create or complete Runs unless a separate assigned Run explicitly exists."
         ),
         (Some(project_id), None) => format!(
-            "This Session is scoped to Project {project_id}. Treat the Project association and Session history as durable context; do not invent a Task unless work is formally submitted."
+            "This Session is scoped to Project {project_id}. Read project_get for this Project and relevant current knowledge before substantive work; retrieve history when the shared instructions below call for it. Treat the Project association and Session history as durable context; do not invent a Task unless work is formally submitted."
         ),
         (None, None) => "This is a general Session with no Project or Task scope.".to_owned(),
     };
@@ -1045,6 +1046,13 @@ echo '{{"type":"thread.started","thread_id":"fake-session-thread-123"}}'
             1
         );
         assert!(prompt.contains("task_request_assignment"));
+        assert!(prompt.contains(include_str!("context_capture_instructions.md")));
+        assert!(prompt.contains(include_str!("execution_workflow_instructions.md")));
+        let mut project_session = session.clone();
+        project_session.project_id = Some(Uuid::new_v4());
+        let project_prompt = build_session_runtime_prompt(&attempt, &project_session, None, &[]);
+        assert!(project_prompt.contains("Read project_get for this Project"));
+        assert!(!project_prompt.contains("Read task_context for that Task"));
         assert!(prompt.contains("An external Session ID is not authorization"));
         assert_eq!(finished.model.as_deref(), Some("gpt-5.6-sol"));
         assert_eq!(finished.reasoning_effort.as_deref(), Some("high"));

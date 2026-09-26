@@ -33,6 +33,7 @@ Morrows 是一个本地优先、Agent 原生的工作协作系统，用于协调
 - 在 store/domain 边界进行 Run 所有权校验
 - 不可变 ContextRevision
 - 按 organization / project / Agent / task 作用域保存的长期 `MemoryEntry`，支持来源追踪与 supersede 链
+- 员工 [记忆文件 CLI](docs/memory-files.md)：多项目完整文本 checkout，原生 rg/grep/sed，带来源、历史和冲突检查的显式发布；[Git 版本管理设计](docs/memory-versioning.md) 尚未迁移上线
 - 持久化 Artifact / Decision / MessageThread / Message / Handoff / TaskDependency
 - 支持 reply/correlation metadata 的 Agent 定向消息
 - 原子化 Handoff 创建，以及与接受方 Run 关联的显式接受流程

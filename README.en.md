@@ -33,6 +33,7 @@ Human / Web UI / automation
 - Run ownership checks at the store/domain boundary
 - Immutable context revisions
 - Long-term `MemoryEntry` records scoped to organization / project / Agent / task, with provenance and supersede chains
+- [Native Git memory worktrees](docs/memory-files.md): shared object storage with independent project histories, full text search/editing and authorized publication; [server-side Git versioning](docs/memory-versioning.md) remains a design, not a completed migration
 - Durable Artifact / Decision / MessageThread / Message / Handoff / TaskDependency records
 - Directed agent messages with reply/correlation metadata
 - Atomic handoff creation and explicit acceptance linked to the accepting Run

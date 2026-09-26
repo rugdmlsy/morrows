@@ -47,6 +47,22 @@ not automatically fetch private sources or reconstruct facts never saved to Morr
 
 ## What to save and when
 
+Before substantive work, read applicable current project/organization knowledge;
+a first page is not the entire collection. Proactively retrieve superseded history
+when resolving conflicting observations, understanding an earlier decision or
+constraint, revisiting a failed approach, or correcting a conclusion. Task context
+history and Session history are different records. Shared prompts specify these
+triggers, rather than injecting every historical body at startup.
+
+At meaningful milestones and before handoff/completion, publish reusable facts,
+decisions, failure lessons and corrections with provenance and uncertainty. Check
+current entries first to avoid duplicates. Preserve useful unknowns as hypotheses;
+do not promote them to verified facts. Project-only Sessions still need an
+authorized source Task for project publication and can retain candidates in their
+Session summary meanwhile. For broad search and native text editing, use the
+[memory file CLI](memory-files.md); [multi-project Git management](memory-versioning.md)
+is a separate, not-yet-migrated storage design.
+
 | Record | When to use it | What it does not do |
 | --- | --- | --- |
 | `run_checkpoint` | Recoverable progress and run-local state at a meaningful milestone | Does not change shared context/project memory; keeps the latest checkpoint rather than all intermediate observations |
