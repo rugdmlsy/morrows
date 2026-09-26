@@ -11,7 +11,6 @@ impl Store {
         input.name = input.name.trim().to_owned();
         input.adapter = input.adapter.trim().to_owned();
         input.program = input.program.trim().to_owned();
-        input.codex_home = trim_optional(input.codex_home);
         input.default_cwd = trim_optional(input.default_cwd);
         input.model = trim_optional(input.model);
         if input.name.is_empty() {
@@ -27,22 +26,10 @@ impl Store {
         }
         if is_local_adapter(&input.adapter) {
             validate_absolute("program", &input.program)?;
-            if input.adapter == "codex_cli" {
-                if let Some(value) = &input.codex_home {
-                    validate_absolute("codex_home", value)?;
-                }
-            } else if input.codex_home.is_some() {
-                return Err(DomainError::InvalidInput(
-                    "codebuddy_cli does not use codex_home".into(),
-                ));
-            }
             if let Some(value) = &input.default_cwd {
                 validate_absolute("default_cwd", value)?;
             }
-        } else if !input.program.is_empty()
-            || input.codex_home.is_some()
-            || input.default_cwd.is_some()
-            || input.model.is_some()
+        } else if !input.program.is_empty() || input.default_cwd.is_some() || input.model.is_some()
         {
             return Err(DomainError::InvalidInput(
                 "external adapters cannot configure a local process".into(),
@@ -54,15 +41,14 @@ impl Store {
         let id = Uuid::new_v4();
         let mut tx = self.pool.begin().await.map_err(storage)?;
         sqlx::query(
-            "INSERT INTO launch_profiles(id,name,adapter,agent_instance_id,program,codex_home,default_cwd,model,enabled,metadata_json,created_at,updated_at)
-             VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO launch_profiles(id,name,adapter,agent_instance_id,program,default_cwd,model,enabled,metadata_json,created_at,updated_at)
+             VALUES(?,?,?,?,?,?,?,?,?,?,?)",
         )
         .bind(id.to_string())
         .bind(&input.name)
         .bind(&input.adapter)
         .bind(input.agent_instance_id.to_string())
         .bind(&input.program)
-        .bind(&input.codex_home)
         .bind(&input.default_cwd)
         .bind(&input.model)
         .bind(input.enabled)
@@ -584,10 +570,16 @@ impl Store {
             Err(err) => return Err(err),
         };
         let instructions = self.launch_instructions(id).await?;
+        let agent = self.get_agent(attempt.agent_instance_id).await?;
+        let account = match agent.account_id {
+            Some(account_id) => Some(self.get_account(account_id).await?),
+            None => None,
+        };
         Ok(LaunchExecution {
             attempt: self.get_launch_attempt(id).await?,
             run: self.get_run(run_id).await?,
             profile,
+            account,
             task,
             context,
             instructions,
@@ -1414,7 +1406,6 @@ fn row_to_launch_profile(row: sqlx::sqlite::SqliteRow) -> Result<LaunchProfile, 
         adapter: row.try_get("adapter").map_err(storage)?,
         agent_instance_id: parse_id(row.try_get("agent_instance_id").map_err(storage)?)?,
         program: row.try_get("program").map_err(storage)?,
-        codex_home: row.try_get("codex_home").map_err(storage)?,
         default_cwd: row.try_get("default_cwd").map_err(storage)?,
         model: row.try_get("model").map_err(storage)?,
         enabled: row.try_get("enabled").map_err(storage)?,

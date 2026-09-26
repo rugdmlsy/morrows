@@ -147,7 +147,39 @@ async fn normalized_and_legacy_registration_preserve_identity() {
 }
 
 #[tokio::test]
-async fn managed_codex_provisioning_binds_one_isolated_account_per_agent() {
+async fn account_credential_reference_is_external_and_rebindable() {
+    let store = Store::connect("sqlite::memory:").await.unwrap();
+    let account = store
+        .register_account(input(json!({
+            "provider":"openai",
+            "label":"default",
+            "email":"user@example.com",
+            "metadata":{"auth_isolation":{"credential_store":"file","path":"/legacy/home"}}
+        })))
+        .await
+        .unwrap();
+    assert!(account.credential_kind.is_none());
+    assert!(account.credential_ref.is_none());
+
+    let updated = store
+        .set_account_credential_ref(
+            account.id,
+            SetAccountCredentialRef {
+                credential_kind: "codex_home".into(),
+                credential_ref: "~/.codex".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated.credential_kind.as_deref(), Some("codex_home"));
+    assert_eq!(updated.credential_ref.as_deref(), Some("~/.codex"));
+    assert!(updated.metadata.get("auth_isolation").is_none());
+    assert_eq!(updated.metadata["credential_source"], "external_reference");
+    assert_eq!(updated.metadata["credential_secret_stored"], false);
+}
+
+#[tokio::test]
+async fn managed_codex_provisioning_binds_one_external_credential_reference_per_agent() {
     let store = Store::connect("sqlite::memory:").await.unwrap();
     let profile = store
         .register_profile(input(json!({
@@ -175,7 +207,7 @@ async fn managed_codex_provisioning_binds_one_isolated_account_per_agent() {
             " User@Example.com ",
             None,
             "/usr/local/bin/codex",
-            "/tmp/morrows-codex-account-a",
+            "~/.codex",
             "/tmp",
             Some("gpt-5.6"),
         )
@@ -193,17 +225,13 @@ async fn managed_codex_provisioning_binds_one_isolated_account_per_agent() {
     assert_eq!(launch.agent_instance_id, agent.id);
     assert_eq!(launch.adapter, "codex_cli");
     assert_eq!(launch.program, "/usr/local/bin/codex");
-    assert_eq!(
-        launch.codex_home.as_deref(),
-        Some("/tmp/morrows-codex-account-a")
-    );
+    assert_eq!(account.credential_kind.as_deref(), Some("codex_home"));
+    assert_eq!(account.credential_ref.as_deref(), Some("~/.codex"));
     assert_eq!(launch.default_cwd.as_deref(), Some("/tmp"));
     assert_eq!(launch.model.as_deref(), Some("gpt-5.6"));
-    assert_eq!(launch.metadata["auth_isolation"], "codex_home_file");
-    assert_eq!(
-        account.metadata["auth_isolation"]["credential_store"],
-        "file"
-    );
+    assert_eq!(launch.metadata["credential_source"], "account_ref");
+    assert_eq!(account.metadata["credential_source"], "external_reference");
+    assert_eq!(account.metadata["credential_secret_stored"], false);
 
     assert!(matches!(
         store
@@ -213,7 +241,7 @@ async fn managed_codex_provisioning_binds_one_isolated_account_per_agent() {
                 "user@example.com",
                 None,
                 "/usr/local/bin/codex",
-                "/tmp/morrows-codex-account-b",
+                "~/.codex",
                 "/tmp",
                 None,
             )
@@ -230,7 +258,7 @@ async fn managed_codex_provisioning_binds_one_isolated_account_per_agent() {
             "second@example.com",
             Some("research-codex"),
             "/usr/local/bin/codex",
-            "/tmp/morrows-codex-account-c",
+            "~/.codex-personal",
             "/tmp",
             None,
         )

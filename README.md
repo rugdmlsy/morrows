@@ -54,7 +54,7 @@ Morrows 是一个本地优先、Agent 原生的工作协作系统，用于协调
 - 可选 LSM Run 集成：每个 Run 一个持久 Logical Session、作用域化 Codex MCP 权限、独立 control API、执行证据、显式 restart 与有界 cleanup
 - 中英文 Web UI，首次访问默认中文
 - SQLite 持久化 launcher job 与支持 provider resume 的事务型 Agent delivery outbox
-- Agent Fleet 可手动添加 Codex Agent：选择现有 `auth.json`，自动解析已验证邮箱，并导入到独立 `CODEX_HOME`
+- Agent Fleet 可手动添加 Codex Agent：填写账号邮箱与目标机器上的凭据引用（如 `~/.codex`、`~/.codex-personal`）；Morrows 不上传、不复制、不保存 Codex `auth.json` 或 Provider 登录 token
 - 每个受管 Codex Account 使用独立认证目录；认证文件不写入 Morrows 数据库，也不会提交到 Git
 - 可复用的本地部署脚本 `scripts/deploy.sh`，负责构建、重启 tmux 服务并执行健康检查
 

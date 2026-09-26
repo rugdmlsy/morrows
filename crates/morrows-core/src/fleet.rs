@@ -32,6 +32,8 @@ pub struct Account {
     pub label: String,
     pub email: Option<String>,
     pub external_account_ref: Option<String>,
+    pub credential_kind: Option<String>,
+    pub credential_ref: Option<String>,
     pub status: String,
     pub metadata: Value,
     pub created_at: DateTime<Utc>,
@@ -44,6 +46,8 @@ pub struct RegisterAccount {
     pub label: String,
     pub email: Option<String>,
     pub external_account_ref: Option<String>,
+    pub credential_kind: Option<String>,
+    pub credential_ref: Option<String>,
     #[serde(default = "active_status")]
     pub status: String,
     #[serde(default = "empty_object")]
@@ -62,6 +66,12 @@ pub struct Machine {
     pub last_seen_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SetAccountCredentialRef {
+    pub credential_kind: String,
+    pub credential_ref: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

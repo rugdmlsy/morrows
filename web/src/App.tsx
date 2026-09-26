@@ -97,7 +97,15 @@ type Agent = {
 type FleetEntry = {
   instance: Agent;
   profile: { id: string; name: string; provider: string; kind: string };
-  account: { id: string; label: string; email?: string | null; provider: string; status: string } | null;
+  account: {
+    id: string;
+    label: string;
+    email?: string | null;
+    provider: string;
+    credential_kind?: string | null;
+    credential_ref?: string | null;
+    status: string;
+  } | null;
   machine: { id: string; name: string; hostname: string; os: string; arch: string } | null;
   latest_capacity: {
     status: string;
@@ -252,7 +260,6 @@ type LaunchProfile = {
   adapter: string;
   agent_instance_id: string;
   program: string;
-  codex_home?: string | null;
   default_cwd?: string | null;
   model?: string | null;
   enabled: boolean;
@@ -268,13 +275,15 @@ type ManagedCodexProvision = {
     provider: string;
     label: string;
     email?: string | null;
+    credential_kind?: string | null;
+    credential_ref?: string | null;
     status: string;
   };
   instance: Agent;
   launch_profile: LaunchProfile;
-  codex_home: string;
-  credential_backend: string;
-  auth_imported: boolean;
+  credential_kind: string;
+  credential_ref: string;
+  credential_secret_stored: boolean;
 };
 
 type LaunchAttempt = {
@@ -397,21 +406,6 @@ function agentAvailabilityRank(entry: FleetEntry) {
   return 3;
 }
 
-function parseCodexAuthEmail(authJson: string) {
-  const auth = JSON.parse(authJson) as { tokens?: { id_token?: string } };
-  const idToken = auth.tokens?.id_token;
-  if (!idToken) throw new Error("tokens.id_token missing");
-  const payload = idToken.split(".")[1];
-  if (!payload) throw new Error("invalid id_token");
-  const base64 = payload.replaceAll("-", "+").replaceAll("_", "/").padEnd(Math.ceil(payload.length / 4) * 4, "=");
-  const bytes = Uint8Array.from(atob(base64), (char) => char.charCodeAt(0));
-  const claims = JSON.parse(new TextDecoder().decode(bytes)) as { email?: string; email_verified?: boolean };
-  if (claims.email_verified === false) throw new Error("email is not verified");
-  const email = claims.email?.trim();
-  if (!email || !email.includes("@")) throw new Error("email missing");
-  return email.toLowerCase();
-}
-
 export default function App() {
   const [locale, setLocale] = useState<Locale>(initialLocale);
   const [theme, setTheme] = useState<"dark" | "light">(() => {
@@ -476,8 +470,8 @@ export default function App() {
   const [agentNameDraft, setAgentNameDraft] = useState("");
   const [agentRenameBusy, setAgentRenameBusy] = useState(false);
   const [showAgentCreate, setShowAgentCreate] = useState(false);
-  const [newAgentAuthFile, setNewAgentAuthFile] = useState<File | null>(null);
-  const [newAgentDetectedEmail, setNewAgentDetectedEmail] = useState("");
+  const [newAgentEmail, setNewAgentEmail] = useState("");
+  const [newAgentCredentialRef, setNewAgentCredentialRef] = useState("~/.codex");
   const [newAgentDisplayName, setNewAgentDisplayName] = useState("");
   const [newAgentModel, setNewAgentModel] = useState("");
   const [agentCreateBusy, setAgentCreateBusy] = useState(false);
@@ -990,39 +984,25 @@ export default function App() {
     }
   }
 
-  async function selectManagedCodexAuth(file: File | null) {
-    setNewAgentAuthFile(null);
-    setNewAgentDetectedEmail("");
-    if (!file) return;
-    try {
-      if (file.size > 512 * 1024) throw new Error(t("codexAuthTooLarge"));
-      const authJson = await file.text();
-      const email = parseCodexAuthEmail(authJson);
-      setNewAgentAuthFile(file);
-      setNewAgentDetectedEmail(email);
-      setError(null);
-    } catch {
-      setError(t("invalidCodexAuth"));
-    }
-  }
-
   async function createManagedCodexAgent(event: FormEvent) {
     event.preventDefault();
-    if (!newAgentAuthFile || !newAgentDetectedEmail || agentCreateBusy) return;
+    const email = newAgentEmail.trim().toLowerCase();
+    const credentialRef = newAgentCredentialRef.trim();
+    if (!email || !email.includes("@") || !credentialRef || agentCreateBusy) return;
     setAgentCreateBusy(true);
     try {
-      const authJson = await newAgentAuthFile.text();
       const provisioned = await api<ManagedCodexProvision>("/api/agent-fleet/codex", {
         method: "POST",
         body: JSON.stringify({
-          auth_json: authJson,
+          email,
+          credential_ref: credentialRef,
           display_name: newAgentDisplayName.trim() || null,
           model: newAgentModel.trim() || null,
         }),
       });
       setAgentCreateResult(provisioned);
-      setNewAgentAuthFile(null);
-      setNewAgentDetectedEmail("");
+      setNewAgentEmail("");
+      setNewAgentCredentialRef("~/.codex");
       setNewAgentDisplayName("");
       setNewAgentModel("");
       await Promise.all([refreshFleet(), refreshQueueBase()]);
@@ -1037,8 +1017,8 @@ export default function App() {
   function closeAgentCreate() {
     setShowAgentCreate(false);
     setAgentCreateResult(null);
-    setNewAgentAuthFile(null);
-    setNewAgentDetectedEmail("");
+    setNewAgentEmail("");
+    setNewAgentCredentialRef("~/.codex");
     setNewAgentDisplayName("");
     setNewAgentModel("");
   }
@@ -2094,16 +2074,17 @@ export default function App() {
                     <>
                       <div className="agent-create-head">
                         <div>
-                          <span className="section-caption">{t("codexAuthImported")}</span>
+                          <span className="section-caption">{t("codexCredentialLinked")}</span>
                           <strong>{agentCreateResult.instance.display_name}</strong>
-                          <p>{t("codexAuthImportedHint")}</p>
+                          <p>{t("codexCredentialLinkedHint")}</p>
                         </div>
                         <button type="button" className="secondary" onClick={closeAgentCreate}>{t("closeAddAgent")}</button>
                       </div>
                       <dl className="agent-create-result-meta">
                         <div><dt>{t("accountEmail")}</dt><dd>{agentCreateResult.account.email || agentCreateResult.account.label}</dd></div>
-                        <div><dt>{t("isolatedCodexHome")}</dt><dd><code>{agentCreateResult.codex_home}</code></dd></div>
-                        <div><dt>{t("credentialBackend")}</dt><dd><code>{agentCreateResult.credential_backend}</code></dd></div>
+                        <div><dt>{t("credentialKind")}</dt><dd><code>{agentCreateResult.credential_kind}</code></dd></div>
+                        <div><dt>{t("credentialRef")}</dt><dd><code>{agentCreateResult.credential_ref}</code></dd></div>
+                        <div><dt>{t("providerSecretStored")}</dt><dd>{agentCreateResult.credential_secret_stored ? t("yes") : t("no")}</dd></div>
                       </dl>
                     </>
                   ) : (
@@ -2121,18 +2102,25 @@ export default function App() {
                           <span>{t("agentProvider")}</span>
                           <input value="Codex" disabled />
                         </label>
-                        <label className="agent-auth-file-field">
-                          <span>{t("codexAuthFile")}</span>
+                        <label>
+                          <span>{t("accountEmail")}</span>
                           <input
-                            type="file"
-                            accept=".json,application/json"
-                            onChange={(event) => void selectManagedCodexAuth(event.target.files?.[0] ?? null)}
+                            type="email"
+                            value={newAgentEmail}
+                            onChange={(event) => setNewAgentEmail(event.target.value)}
+                            placeholder="name@example.com"
+                            autoComplete="off"
                           />
-                          <small>
-                            {newAgentAuthFile
-                              ? newAgentAuthFile.name + " · " + newAgentDetectedEmail
-                              : t("codexAuthFileHint")}
-                          </small>
+                        </label>
+                        <label>
+                          <span>{t("credentialRef")}</span>
+                          <input
+                            value={newAgentCredentialRef}
+                            onChange={(event) => setNewAgentCredentialRef(event.target.value)}
+                            placeholder="~/.codex"
+                            autoComplete="off"
+                          />
+                          <small>{t("credentialRefHint")}</small>
                         </label>
                         <label>
                           <span>{t("agentDisplayNameOptional")}</span>
@@ -2154,7 +2142,7 @@ export default function App() {
                         </label>
                       </div>
                       <div className="agent-create-actions">
-                        <button type="submit" disabled={agentCreateBusy || !newAgentAuthFile || !newAgentDetectedEmail}>
+                        <button type="submit" disabled={agentCreateBusy || !newAgentEmail.trim() || !newAgentCredentialRef.trim()}>
                           {agentCreateBusy ? t("creatingAgent") : t("createAgent")}
                         </button>
                       </div>

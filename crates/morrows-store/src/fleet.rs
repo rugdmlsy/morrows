@@ -46,8 +46,12 @@ impl Store {
         if let Some(email) = input.email.as_deref() {
             nonempty(email, "email")?;
         }
-        sqlx::query("INSERT INTO accounts(id,provider,label,email,external_account_ref,status,metadata_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(provider,label) DO UPDATE SET email=COALESCE(excluded.email,accounts.email),updated_at=excluded.updated_at")
-            .bind(Uuid::new_v4().to_string()).bind(&input.provider).bind(&input.label).bind(input.email.as_deref()).bind(&input.external_account_ref).bind(&input.status).bind(serde_json::to_string(&input.metadata).map_err(storage)?)
+        validate_credential_reference(
+            input.credential_kind.as_deref(),
+            input.credential_ref.as_deref(),
+        )?;
+        sqlx::query("INSERT INTO accounts(id,provider,label,email,external_account_ref,credential_kind,credential_ref,status,metadata_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(provider,label) DO UPDATE SET email=COALESCE(excluded.email,accounts.email),credential_kind=COALESCE(excluded.credential_kind,accounts.credential_kind),credential_ref=COALESCE(excluded.credential_ref,accounts.credential_ref),updated_at=excluded.updated_at")
+            .bind(Uuid::new_v4().to_string()).bind(&input.provider).bind(&input.label).bind(input.email.as_deref()).bind(&input.external_account_ref).bind(input.credential_kind.as_deref()).bind(input.credential_ref.as_deref()).bind(&input.status).bind(serde_json::to_string(&input.metadata).map_err(storage)?)
             .bind(&now).bind(&now).execute(&self.pool).await.map_err(storage)?;
         let row = sqlx::query("SELECT * FROM accounts WHERE provider=? AND label=?")
             .bind(&input.provider)
@@ -75,6 +79,42 @@ impl Store {
             .into_iter()
             .map(row_to_account)
             .collect()
+    }
+    pub async fn set_account_credential_ref(
+        &self,
+        id: Id,
+        input: SetAccountCredentialRef,
+    ) -> Result<Account, DomainError> {
+        validate_credential_reference(
+            Some(input.credential_kind.as_str()),
+            Some(input.credential_ref.as_str()),
+        )?;
+        let mut metadata = self.get_account(id).await?.metadata;
+        if let Some(object) = metadata.as_object_mut() {
+            object.remove("auth_isolation");
+            object.insert(
+                "credential_source".into(),
+                Value::String("external_reference".into()),
+            );
+            object.insert("credential_secret_stored".into(), Value::Bool(false));
+        }
+        let now = Utc::now().to_rfc3339();
+        let changed = sqlx::query(
+            "UPDATE accounts SET credential_kind=?,credential_ref=?,metadata_json=?,updated_at=? WHERE id=?",
+        )
+        .bind(input.credential_kind.trim())
+        .bind(input.credential_ref.trim())
+        .bind(metadata.to_string())
+        .bind(now)
+        .bind(id.to_string())
+        .execute(&self.pool)
+        .await
+        .map_err(storage)?
+        .rows_affected();
+        if changed == 0 {
+            return Err(DomainError::NotFound(format!("account {id}")));
+        }
+        self.get_account(id).await
     }
     /// Register by name; an existing identity is returned unchanged.
     pub async fn register_machine(&self, input: RegisterMachine) -> Result<Machine, DomainError> {
@@ -137,6 +177,8 @@ fn row_to_account(row: sqlx::sqlite::SqliteRow) -> Result<Account, DomainError> 
         label: row.try_get("label").map_err(storage)?,
         email: row.try_get("email").map_err(storage)?,
         external_account_ref: row.try_get("external_account_ref").map_err(storage)?,
+        credential_kind: row.try_get("credential_kind").map_err(storage)?,
+        credential_ref: row.try_get("credential_ref").map_err(storage)?,
         status: row.try_get("status").map_err(storage)?,
         metadata: serde_json::from_str(
             &row.try_get::<String, _>("metadata_json").map_err(storage)?,
@@ -382,7 +424,7 @@ impl Store {
         email: &str,
         display_name: Option<&str>,
         program: &str,
-        codex_home: &str,
+        credential_ref: &str,
         default_cwd: &str,
         model: Option<&str>,
     ) -> Result<(Account, AgentInstance, LaunchProfile), DomainError> {
@@ -397,7 +439,7 @@ impl Store {
             ));
         }
         nonempty(program, "program")?;
-        nonempty(codex_home, "codex_home")?;
+        validate_credential_reference(Some("codex_home"), Some(credential_ref))?;
         nonempty(default_cwd, "default_cwd")?;
 
         let profile = self.get_profile(profile_id).await?;
@@ -435,12 +477,8 @@ impl Store {
         .map_err(storage)?;
         let account_metadata = json!({
             "managed_by": "morrows",
-            "auth_isolation": {
-                "kind": "codex_home",
-                "credential_store": "file",
-                "path": codex_home,
-                "version": 1
-            }
+            "credential_source": "external_reference",
+            "credential_secret_stored": false
         });
 
         let account_id = if let Some(raw) = existing_account_id {
@@ -458,9 +496,10 @@ impl Store {
                 )));
             }
             sqlx::query(
-                "UPDATE accounts SET label=?,status='active',metadata_json=?,updated_at=? WHERE id=?",
+                "UPDATE accounts SET label=?,credential_kind='codex_home',credential_ref=?,status='active',metadata_json=?,updated_at=? WHERE id=?",
             )
             .bind(&email)
+            .bind(credential_ref.trim())
             .bind(account_metadata.to_string())
             .bind(&now_text)
             .bind(id.to_string())
@@ -471,12 +510,13 @@ impl Store {
         } else {
             let id = Uuid::new_v4();
             sqlx::query(
-                "INSERT INTO accounts(id,provider,label,email,status,metadata_json,created_at,updated_at)
-                 VALUES(?,'openai',?,?,'active',?,?,?)",
+                "INSERT INTO accounts(id,provider,label,email,credential_kind,credential_ref,status,metadata_json,created_at,updated_at)
+                 VALUES(?,'openai',?,?,'codex_home',?,'active',?,?,?)",
             )
             .bind(id.to_string())
             .bind(&email)
             .bind(&email)
+            .bind(credential_ref.trim())
             .bind(account_metadata.to_string())
             .bind(&now_text)
             .bind(&now_text)
@@ -518,19 +558,18 @@ impl Store {
         let launch_metadata = json!({
             "managed_by": "morrows",
             "account_id": account_id,
-            "auth_isolation": "codex_home_file",
+            "credential_source": "account_ref",
         });
         sqlx::query(
             "INSERT INTO launch_profiles(
-                id,name,adapter,agent_instance_id,program,codex_home,default_cwd,
+                id,name,adapter,agent_instance_id,program,default_cwd,
                 model,enabled,metadata_json,created_at,updated_at
-             ) VALUES(?,?,'codex_cli',?,?,?,?,?,1,?,?,?)",
+             ) VALUES(?,?,'codex_cli',?,?,?,?,1,?,?,?)",
         )
         .bind(launch_profile_id.to_string())
         .bind(format!("{display_name} · Morrows"))
         .bind(agent_id.to_string())
         .bind(program)
-        .bind(codex_home)
         .bind(default_cwd)
         .bind(model)
         .bind(launch_metadata.to_string())
@@ -552,7 +591,9 @@ impl Store {
                 "profile_id": profile_id,
                 "launch_profile_id": launch_profile_id,
                 "machine_id": machine_id,
-                "auth_isolation": "codex_home_file"
+                "credential_kind": "codex_home",
+                "credential_ref": credential_ref,
+                "credential_secret_stored": false
             }),
             None,
         )
@@ -753,6 +794,29 @@ impl Store {
             });
         }
         Ok(fleet)
+    }
+}
+
+fn validate_credential_reference(
+    kind: Option<&str>,
+    reference: Option<&str>,
+) -> Result<(), DomainError> {
+    match (kind.map(str::trim), reference.map(str::trim)) {
+        (None, None) => Ok(()),
+        (Some(""), _) | (_, Some("")) => Err(DomainError::InvalidInput(
+            "credential_kind and credential_ref cannot be empty".into(),
+        )),
+        (Some(kind), Some(reference)) => {
+            if kind.len() > 80 || reference.len() > 1024 || reference.contains('\0') {
+                return Err(DomainError::InvalidInput(
+                    "credential reference is invalid or too long".into(),
+                ));
+            }
+            Ok(())
+        }
+        _ => Err(DomainError::InvalidInput(
+            "credential_kind and credential_ref must be provided together".into(),
+        )),
     }
 }
 

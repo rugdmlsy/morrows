@@ -54,7 +54,7 @@ Human / Web UI / automation
 - Optional LSM Run integration: one durable Logical Session per Run, scoped Codex MCP access, separate control API, execution evidence, explicit restart and bounded cleanup
 - Chinese/English Web UI with Chinese as the first-visit default
 - SQLite durable jobs for launcher work and a transactional Agent delivery outbox with provider resume
-- Manual Codex Agent provisioning from an existing `auth.json`: Morrows derives the verified account email and imports credentials into an isolated `CODEX_HOME`
+- Manual Codex Agent provisioning uses the account email plus a target-machine credential reference such as `~/.codex` or `~/.codex-personal`; Morrows never uploads, copies, or stores Codex `auth.json` or provider login tokens
 - One private authentication directory per managed Codex Account; credential files are not stored in the Morrows database or committed to Git
 - Reusable local deployment script `scripts/deploy.sh` for build, tmux restart, and health verification
 

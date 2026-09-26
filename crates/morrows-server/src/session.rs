@@ -210,7 +210,12 @@ async fn runtime_options(
         })));
     };
 
-    let (models, efforts) = discover_runtime_model_options(profile).await;
+    let agent = state.store.get_agent(session.agent_instance_id).await?;
+    let account = match agent.account_id {
+        Some(account_id) => Some(state.store.get_account(account_id).await?),
+        None => None,
+    };
+    let (models, efforts) = discover_runtime_model_options(profile, account.as_ref()).await;
     Ok(Json(json!({
         "available": true,
         "adapter": profile.adapter,
@@ -224,12 +229,16 @@ async fn runtime_options(
 
 async fn discover_runtime_model_options(
     profile: &morrows_core::LaunchProfile,
+    account: Option<&morrows_core::Account>,
 ) -> (Vec<Value>, Vec<String>) {
     match profile.adapter.as_str() {
         "codex_cli" => {
             let mut command = Command::new(&profile.program);
             command.args(["debug", "models", "--bundled"]);
-            if let Some(home) = profile.codex_home.as_deref() {
+            let Ok(codex_home) = super::launch::resolve_codex_home(account) else {
+                return (Vec::new(), Vec::new());
+            };
+            if let Some(home) = codex_home.as_deref() {
                 command.env("CODEX_HOME", home);
             }
             let Ok(output) = command.output().await else {
@@ -410,7 +419,8 @@ async fn execute_session_runtime(
                 .stdout(Stdio::from(stdout_file))
                 .stderr(Stdio::from(stderr_file))
                 .kill_on_drop(true);
-            if let Some(home) = profile.codex_home.as_deref() {
+            let codex_home = super::launch::resolve_codex_home(account.as_ref())?;
+            if let Some(home) = codex_home.as_deref() {
                 command.env("CODEX_HOME", home);
             }
             configure_session_runtime_env(

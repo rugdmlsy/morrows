@@ -9,7 +9,6 @@ pub struct RegisterLaunchProfile {
     pub agent_instance_id: Id,
     #[serde(default)]
     pub program: String,
-    pub codex_home: Option<String>,
     pub default_cwd: Option<String>,
     pub model: Option<String>,
     #[serde(default = "default_enabled")]
@@ -25,7 +24,6 @@ pub struct LaunchProfile {
     pub adapter: String,
     pub agent_instance_id: Id,
     pub program: String,
-    pub codex_home: Option<String>,
     pub default_cwd: Option<String>,
     pub model: Option<String>,
     pub enabled: bool,
@@ -113,6 +111,7 @@ pub struct LaunchExecution {
     pub attempt: LaunchAttempt,
     pub run: Run,
     pub profile: LaunchProfile,
+    pub account: Option<Account>,
     pub task: Task,
     pub context: Option<ContextRevision>,
     pub instructions: Vec<LaunchInstruction>,

@@ -816,6 +816,42 @@ async fn execute_codebuddy_with_root(
     Ok(())
 }
 
+pub(crate) fn resolve_codex_home(account: Option<&Account>) -> anyhow::Result<Option<PathBuf>> {
+    let Some(account) = account else {
+        return Ok(None);
+    };
+    match (
+        account.credential_kind.as_deref(),
+        account.credential_ref.as_deref(),
+    ) {
+        (None, None) => Ok(None),
+        (Some("codex_home"), Some(reference)) => {
+            let path = if reference == "~" {
+                std::env::var_os("HOME")
+                    .map(PathBuf::from)
+                    .ok_or_else(|| anyhow::anyhow!("HOME is unavailable for credential_ref ~"))?
+            } else if let Some(rest) = reference.strip_prefix("~/") {
+                std::env::var_os("HOME")
+                    .map(PathBuf::from)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("HOME is unavailable for credential_ref {reference}")
+                    })?
+                    .join(rest)
+            } else {
+                PathBuf::from(reference)
+            };
+            if !path.is_absolute() {
+                anyhow::bail!(
+                    "codex_home credential_ref must be absolute or start with ~/: {reference}"
+                );
+            }
+            Ok(Some(path))
+        }
+        (Some(kind), Some(_)) => anyhow::bail!("unsupported credential kind for Codex: {kind}"),
+        _ => anyhow::bail!("Account credential_kind and credential_ref must be set together"),
+    }
+}
+
 async fn execute_codex_with_root(
     store: Store,
     execution: LaunchExecution,
@@ -836,10 +872,14 @@ async fn execute_codex_with_root(
             execution.profile.program
         );
     }
-    if let Some(home) = execution.profile.codex_home.as_deref()
-        && !FsPath::new(home).is_dir()
+    let codex_home = resolve_codex_home(execution.account.as_ref())?;
+    if let Some(home) = codex_home.as_deref()
+        && !home.is_dir()
     {
-        anyhow::bail!("CODEX_HOME does not exist or is not a directory: {home}");
+        anyhow::bail!(
+            "credential_ref CODEX_HOME does not exist on this runtime machine: {}",
+            home.display()
+        );
     }
 
     let control = LsmControl::from_env()?;
@@ -907,7 +947,7 @@ async fn execute_codex_with_root(
     if let Some(binding) = &agent_binding {
         command.env("MORROWS_LSM_CAPABILITY", &binding.capability);
     }
-    if let Some(home) = execution.profile.codex_home.as_deref() {
+    if let Some(home) = codex_home.as_deref() {
         command.env("CODEX_HOME", home);
     }
     let mut child = command.spawn()?;
@@ -1541,7 +1581,6 @@ mod tests {
             adapter: "codex_cli".into(),
             agent_instance_id: uuid::Uuid::new_v4(),
             program: "/bin/codex".into(),
-            codex_home: Some("/tmp/home".into()),
             default_cwd: Some("/tmp/work".into()),
             model: Some("gpt-test".into()),
             enabled: true,
@@ -1567,7 +1606,6 @@ mod tests {
             adapter: "codex_cli".into(),
             agent_instance_id: uuid::Uuid::new_v4(),
             program: "/bin/codex".into(),
-            codex_home: None,
             default_cwd: Some("/tmp/work".into()),
             model: None,
             enabled: true,
@@ -1592,7 +1630,6 @@ mod tests {
             adapter: "codebuddy_cli".into(),
             agent_instance_id: uuid::Uuid::new_v4(),
             program: "/opt/homebrew/bin/codebuddy".into(),
-            codex_home: None,
             default_cwd: Some("/tmp/work".into()),
             model: Some("glm-5.3-flash".into()),
             enabled: true,

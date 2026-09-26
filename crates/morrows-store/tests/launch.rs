@@ -308,28 +308,18 @@ async fn launch_profile_must_match_assignment_agent_and_executor_role() {
 }
 
 #[tokio::test]
-async fn codebuddy_cli_registers_as_local_process_and_rejects_codex_home() {
+async fn codebuddy_cli_registers_as_local_process() {
     let store = Store::connect("sqlite::memory:").await.unwrap();
     let worker = agent(&store, "codebuddy-worker").await;
 
     let mut local_profile = profile_input(worker.id);
     local_profile.name = "CodeBuddy local".into();
     local_profile.adapter = "codebuddy_cli".into();
-    local_profile.codex_home = None;
     local_profile.model = Some("glm-5.3-flash".into());
     let profile = store.register_launch_profile(local_profile).await.unwrap();
     assert_eq!(profile.adapter, "codebuddy_cli");
     assert_eq!(profile.program, "/bin/echo");
     assert_eq!(profile.model.as_deref(), Some("glm-5.3-flash"));
-
-    let mut invalid = profile_input(worker.id);
-    invalid.name = "CodeBuddy invalid".into();
-    invalid.adapter = "codebuddy_cli".into();
-    invalid.codex_home = Some("/tmp".into());
-    assert!(matches!(
-        store.register_launch_profile(invalid).await,
-        Err(DomainError::InvalidInput(_))
-    ));
 }
 
 #[tokio::test]
