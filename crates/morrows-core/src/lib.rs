@@ -54,6 +54,8 @@ impl std::str::FromStr for TaskState {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Project {
+    #[serde(default)]
+    pub memory_head: Option<String>,
     pub id: Id,
     pub name: String,
     pub description: String,

@@ -81,7 +81,7 @@ cargo run -p morrows-server
 ```
 
 该脚本会在 VPS 上同步 `main`、构建 Web UI 和 release 后端，并通过
-`morrows.service` 重启服务。生产启动还会校验由该脚本写入的部署指纹：Git commit、
+`morrows.service` 重启服务。生产启动还会逐字比较该脚本保留的发布文件（不做 checksum 检查）：Git commit、
 后端二进制、`web/dist`、`run-vps.sh` 和已安装的 systemd unit 必须全部一致。
 手工 `git pull/reset`、手工 rebuild、替换前端或 unit 后直接重启都会以 exit 78 拒绝启动，并提示：
 

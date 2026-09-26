@@ -160,6 +160,9 @@ pub async fn run(command: Command) -> Result<()> {
                 show_json(&dir, &commit, &structured)?
             };
             let request = PublishProjectMemory {
+                base_commit: project_data["project"]["memory_head"]
+                    .as_str()
+                    .map(str::to_owned),
                 task_id: task,
                 idempotency_key: key.to_string(),
                 new_memory_id: if supersedes.is_none() {
@@ -209,6 +212,7 @@ async fn fetch_project(client: &Client, project: Uuid) -> Result<(Value, Vec<Mem
     let mut offset = 0;
     let mut entries = Vec::new();
     let mut seen = HashSet::new();
+    let mut snapshot_head: Option<Value> = None;
     loop {
         let response = client
             .call(
@@ -220,6 +224,15 @@ async fn fetch_project(client: &Client, project: Uuid) -> Result<(Value, Vec<Mem
             response["project"]["id"] == json!(project),
             "unexpected project response"
         );
+        let head = response["project"]["memory_head"].clone();
+        if let Some(expected) = &snapshot_head {
+            ensure!(
+                *expected == head,
+                "project head changed during pagination; retry checkout"
+            );
+        } else {
+            snapshot_head = Some(head);
+        }
         let page: Vec<MemoryEntry> = serde_json::from_value(response["memory"]["items"].clone())?;
         for entry in page {
             ensure!(

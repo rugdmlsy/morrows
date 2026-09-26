@@ -562,6 +562,15 @@ impl MorrowsMcp {
             )
             .await
             .map_err(|e| e.to_string())?;
+        if self
+            .store
+            .project_memory_head(project_id)
+            .await
+            .map_err(|e| e.to_string())?
+            != project.memory_head
+        {
+            return Err("project memory changed while reading; retry project_get".into());
+        }
         Ok(json!({"project": project, "memory": memory, "include_superseded": req.include_superseded}).to_string())
     }
 

@@ -81,8 +81,8 @@ Production is deployed to the OVH VPS by default. After committing and pushing, 
 ```
 
 The script synchronizes `main` on the VPS, builds the Web UI and release server, and
-restarts `morrows.service`. Production startup also verifies a deployment fingerprint written
-only by this flow: the Git commit, server binary, `web/dist`, `run-vps.sh`, and installed
+restarts `morrows.service`. Production startup also compares the exact release artifacts retained
+only by this flow (without checksum passes): the Git commit, server binary, `web/dist`, `run-vps.sh`, and installed
 systemd unit must all match. A manual `git pull/reset`, rebuild, frontend replacement, or unit
 replacement followed by restart exits with status 78 and prints:
 

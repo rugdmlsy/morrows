@@ -30,10 +30,9 @@ import 分支记录服务端导入，main 保存本地工作，通过原生 Git 
 `--history` 将已替代版本的正文和 metadata 另存到 `history/`。查询输出只显示目录，
 全文在文件中，Agent 可先检索相关段落再读取上下文。组织知识可读，员工不能改写它。
 
-当前服务端还是 SQL：CLI 会遍历全部共享记忆历史页，沿 supersedes 链计算稳定目录名，
-避免每次发布改文件名；`--history` 控制是否额外生成历史目录。它不是原子的项目快照；
-发现重复 ID、缺失祖先或分叉会中止，不假装导入完整。Git 后端上线后可直接 fetch 项目 ref，
-省掉 SQL 全量导入。这一过渡开销不产生全量 LLM prompt。
+CLI 会遍历全部共享记忆历史页，沿 supersedes 链计算稳定目录名，
+避免每次发布改文件名；`--history` 控制是否额外生成历史目录。SQL 后端尚未切换的项目不是原子的项目快照；
+发现重复 ID、缺失祖先或分叉会中止，不假装导入完整。Git 后端通过 memory_head 检查分页快照一致性，仍走受权限保护的内容接口。这一过渡开销不产生全量 LLM prompt。
 
 ## 编辑、提交和发布
 
@@ -94,3 +93,43 @@ git -C "./knowledge/projects/$PROJECT_A" diff HEAD~1 HEAD
 
 共享提示词在 MCP initialize、Task launch、Session runtime 三处复用，明确主动查询历史、
 主动沉淀知识及此文件工作流；不会把全部历史正文注入每次启动。
+
+## 服务端 Git 权威存储（逐项目显式切换）
+
+服务端现在支持 Git 后端；新建或尚未切换的项目仍以 SQL 为权威。操作员使用以下
+control-plane API（需 Operator 凭据，不属于员工 MCP）逐项目迁移：
+
+1. `POST /api/projects/<UUID>/memory/mirror`：建立只读镜像并返回 `verified_commit`。
+   它不改变 SQL 正文或项目的读写后端。保留所有共享项目版本、原始 JSON 文本、完整正文、
+   标题、UUID、scope/项目/任务/Agent 标识、来源、visibility、supersedes、原始时间字符串、
+   provenance，以及 publication 的原始请求与证据引用。组织和私有知识不进入项目对象库。
+2. `POST /api/projects/<UUID>/memory/cutover`，body 为 `{"verified_commit":"<commit>"}`。
+   只有当前 SQL 全部记录与镜像逐字段完全一致，且实际 ref 仍是该已验证 commit，才切换。
+   镜像后有任何 SQL 变化都必须重新 mirror。SQL 原记录保留，没有清空、摘要化或自动切换。
+3. `POST /api/memory/reconcile` 可重试断点恢复；服务启动和记忆读写也执行恢复。
+
+对象库在数据库旁，例如 `data/morrows.knowledge.git`。每个项目有独立的
+`refs/heads/projects/<UUID>/main` 和独立根提交；导入时不会把旧 SQL 时间虚构成 Git 提交顺序。
+Git `snapshot.json` 是完整原始记录，另有 `<revision UUID>.md/json` 原生正文 blob。
+原始 supersedes 和时间保留在 manifest；镜像提交时间只是本次迁移时间。
+备份必须同时保留数据库和 Git 目录。这个共享对象库只含共同可读的项目知识，ref 不是 ACL，
+服务端不向员工开放任意 Git 对象访问。
+
+切换后 `project_get.project.memory_head` 给出实际 Git head。CLI 把 checkout 所读 head
+保存在 `project.json`，发布从指定的本地 commit 读取这个值作为 `base_commit`；不会偷偷读取
+最新 head 来掩盖陈旧编辑。旧 checkout 必须 refresh，分页期间 head 改变会中止 checkout。
+现有文件布局和原生 Git merge/revert/diff/log、rg、sed 工作流保持可用；CLI 仍通过受权限保护的
+分页 API 导入内容，不开放裸对象库 fetch。每次发布仍是一个文档。
+
+发布先在 SQL 提交 durable operation，再写 Git 对象及保留 ref，使用 `git update-ref` CAS
+推进该项目 ref，最后事务性更新 SQL projection 和操作状态。SQL 与 Git **不是原子事务**。
+若 CAS 后进程退出，重启依据实际 ref 和保留的 operation ref 幂等完成 indexing；意外 ref
+移动会记录 conflict，绝不覆盖。相同 actor/key/payload 返回原回执，改变 payload 会冲突。
+保留 operation refs 使未完成操作和旧版本经原生 Git GC 后仍可读。
+
+Git 后端禁用共享项目的通用 SQL-only create 路径。读 projection 时持有应用 writer lock，
+核对其 indexed_commit 和完整记录均与实际 Git head 一致；损坏或未完成索引时拒绝读取，
+不会把竞争的 SQL 内容当成事实。恢复与切换是显式操作，不删除历史。
+
+`POST /api/projects/<UUID>/memory/rebuild` 可以从已知权威 head 重建缺失或损坏的索引记录。
+意外 head 移动或额外 SQL 记录必须先调查；rebuild 不认可未知 commit，也不删除额外证据。

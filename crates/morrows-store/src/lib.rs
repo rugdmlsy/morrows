@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 mod continuation;
 mod discovery;
+mod git_memory;
 mod runtime;
 
 enum ContextRevisionWrite {
@@ -23,6 +24,9 @@ enum ContextRevisionWrite {
 #[derive(Clone)]
 pub struct Store {
     pool: SqlitePool,
+    git_memory_path: std::path::PathBuf,
+    #[cfg(test)]
+    fail_after_memory_cas: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Store {
@@ -32,6 +36,11 @@ impl Store {
             .create_if_missing(true)
             .foreign_keys(true)
             .busy_timeout(StdDuration::from_secs(5));
+        let git_memory_path = if database_url == "sqlite::memory:" {
+            std::env::temp_dir().join(format!("morrows-knowledge-{}.git", Uuid::new_v4()))
+        } else {
+            options.get_filename().with_extension("knowledge.git")
+        };
         let pool = SqlitePoolOptions::new()
             .max_connections(5)
             .connect_with(options)
@@ -41,7 +50,14 @@ impl Store {
             .run(&pool)
             .await
             .map_err(storage)?;
-        Ok(Self { pool })
+        let store = Self {
+            pool,
+            git_memory_path,
+            #[cfg(test)]
+            fail_after_memory_cas: Default::default(),
+        };
+        store.reconcile_git_memory().await?;
+        Ok(store)
     }
 
     pub async fn create_project(&self, input: CreateProject) -> Result<Project, DomainError> {
@@ -92,7 +108,9 @@ impl Store {
             .await
             .map_err(storage)?
             .ok_or_else(|| DomainError::NotFound(format!("project {id}")))?;
-        row_to_project(row)
+        let mut project = row_to_project(row)?;
+        project.memory_head = self.project_memory_head(id).await?;
+        Ok(project)
     }
 
     pub async fn set_task_project(
@@ -786,6 +804,7 @@ fn row_to_context_revision(row: sqlx::sqlite::SqliteRow) -> Result<ContextRevisi
 
 fn row_to_project(row: sqlx::sqlite::SqliteRow) -> Result<Project, DomainError> {
     Ok(Project {
+        memory_head: None,
         id: parse_id(row.try_get("id").map_err(storage)?)?,
         name: row.try_get("name").map_err(storage)?,
         description: row.try_get("description").map_err(storage)?,

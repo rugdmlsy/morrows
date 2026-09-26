@@ -102,6 +102,7 @@ impl Client {
             .context("server publication schema has no properties")?;
         if !properties.contains_key("expected_project_id")
             || !properties.contains_key("new_memory_id")
+            || !properties.contains_key("base_commit")
         {
             bail!("server needs the native-memory publication update before this CLI can publish");
         }

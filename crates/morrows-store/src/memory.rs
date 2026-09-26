@@ -21,6 +21,7 @@ impl Store {
         agent_id: Id,
         input: morrows_core::PublishProjectMemory,
     ) -> Result<MemoryEntry, DomainError> {
+        self.reconcile_git_memory().await?;
         if input.idempotency_key.trim().is_empty() || input.idempotency_key.len() > 128 {
             return Err(DomainError::InvalidInput(
                 "idempotency_key must contain 1..128 bytes".into(),
@@ -49,7 +50,35 @@ impl Store {
             .await
             .map_err(storage)?;
         let task = task_writer_conn(&mut tx, input.task_id, agent_id).await?;
+        // The durable prepare/CAS gap must also reserve caller-selected UUIDs
+        // against publications in other projects. Retry will reconcile first.
+        let pending: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM memory_git_operations WHERE state='prepared')",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(storage)?;
+        if pending {
+            return Err(DomainError::Conflict(
+                "memory operation pending; retry after reconciliation".into(),
+            ));
+        }
         let input_json = serde_json::to_string(&input).map_err(storage)?;
+        if let Some(row) = sqlx::query(
+            "SELECT request_json,state FROM memory_git_operations WHERE actor_id=? AND retry_key=?",
+        )
+        .bind(agent_id.to_string())
+        .bind(&input.idempotency_key)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(storage)?
+        {
+            let saved: String = row.try_get("request_json").map_err(storage)?;
+            let state: String = row.try_get("state").map_err(storage)?;
+            if saved != input_json || state != "indexed" {
+                return Err(DomainError::Conflict("Git publication retry differs or operation conflicted; reconcile before retrying".into()));
+            }
+        }
         if let Some(row) = sqlx::query("SELECT memory_id,input_json FROM memory_publications WHERE agent_instance_id=? AND idempotency_key=?")
             .bind(agent_id.to_string()).bind(&input.idempotency_key).fetch_optional(&mut *tx).await.map_err(storage)? {
             let saved: String = row.try_get("input_json").map_err(storage)?;
@@ -68,6 +97,15 @@ impl Store {
             .is_some_and(|expected| expected != project_id)
         {
             return Err(DomainError::Conflict("task project changed; reconcile the source task and target project before publishing".into()));
+        }
+        let git_backend = Self::git_backend(&mut tx, &project_id.to_string()).await?;
+        if git_backend
+            && (input.base_commit.is_none()
+                || self.project_memory_head_conn(&mut tx, project_id).await? != input.base_commit)
+        {
+            return Err(DomainError::Conflict(
+                "base_commit must match the project head read by the caller".into(),
+            ));
         }
         if let Some(id) = input.new_memory_id {
             if input.supersedes_memory_id.is_some() {
@@ -117,6 +155,10 @@ impl Store {
                 return Err(DomainError::Conflict("supersedes_memory_id must be current shared memory in the source task's project; read project_get to reconcile".into()));
             }
         }
+        sqlx::query("SAVEPOINT memory_payload")
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?;
         let entry = CreateMemoryEntry {
             scope_type: "project".into(),
             project_id: Some(project_id),
@@ -141,7 +183,46 @@ impl Store {
             .await
             .map_err(storage)?;
         sqlx::query("INSERT INTO memory_publications(agent_instance_id,idempotency_key,input_json,memory_id) VALUES(?,?,?,?)")
-            .bind(agent_id.to_string()).bind(&input.idempotency_key).bind(input_json).bind(id.to_string()).execute(&mut *tx).await.map_err(storage)?;
+            .bind(agent_id.to_string()).bind(&input.idempotency_key).bind(&input_json).bind(id.to_string()).execute(&mut *tx).await.map_err(storage)?;
+        if git_backend {
+            let payload = super::git_memory::snapshot(&mut tx, &project_id.to_string()).await?;
+            // Validation used the normal SQL constraints in a savepoint. Roll it
+            // back: only the durable intent may become visible before Git CAS.
+            sqlx::query("ROLLBACK TO memory_payload")
+                .execute(&mut *tx)
+                .await
+                .map_err(storage)?;
+            sqlx::query("RELEASE memory_payload")
+                .execute(&mut *tx)
+                .await
+                .map_err(storage)?;
+            let operation = self
+                .prepare_memory_operation(
+                    &mut tx,
+                    &project_id.to_string(),
+                    "publication",
+                    Some(agent_id),
+                    Some(&input.idempotency_key),
+                    &input_json,
+                    &payload,
+                    input.base_commit.as_deref(),
+                )
+                .await?;
+            tx.commit().await.map_err(storage)?;
+            self.reconcile_git_memory().await?;
+            let state: String =
+                sqlx::query_scalar("SELECT state FROM memory_git_operations WHERE id=?")
+                    .bind(operation)
+                    .fetch_one(&self.pool)
+                    .await
+                    .map_err(storage)?;
+            if state != "indexed" {
+                return Err(DomainError::Conflict(
+                    "Git publication CAS conflicted; read the latest project head".into(),
+                ));
+            }
+            return self.get_memory_entry(id).await;
+        }
         append_event_tx(&mut tx,"agent_instance",&agent_id.to_string(),"task",task.id,"memory.project_published",
             json!({"memory_id":id,"project_id":project_id,"supersedes_memory_id":entry.supersedes_memory_id}),None).await?;
         tx.commit().await.map_err(storage)?;
@@ -162,6 +243,7 @@ impl Store {
         offset: i64,
     ) -> Result<morrows_core::Page<MemoryEntry>, DomainError> {
         super::discovery::validate_page(limit, offset)?;
+        let mut read = self.memory_read_transaction().await?;
         let rows = sqlx::query(
             "SELECT m.* FROM memory_entries m
              WHERE ((m.visibility='shared' AND (
@@ -182,7 +264,7 @@ impl Store {
         .bind(agent_id.map(|id| id.to_string()))
         .bind(limit + 1)
         .bind(offset)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *read)
         .await
         .map_err(storage)?;
         let items = rows
@@ -233,15 +315,24 @@ impl Store {
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(storage)?;
+        if input.scope_type == "project"
+            && input.visibility == "shared"
+            && Self::git_backend(&mut tx, &input.project_id.unwrap().to_string()).await?
+        {
+            return Err(DomainError::Conflict(
+                "project uses Git; publish through project_memory_publish with base_commit".into(),
+            ));
+        }
         let id = insert_memory_entry_conn(&mut tx, &input, None).await?;
         tx.commit().await.map_err(storage)?;
         self.get_memory_entry(id).await
     }
 
     pub async fn get_memory_entry(&self, id: Id) -> Result<MemoryEntry, DomainError> {
+        let mut read = self.memory_read_transaction().await?;
         let row = sqlx::query("SELECT * FROM memory_entries WHERE id=?")
             .bind(id.to_string())
-            .fetch_optional(&self.pool)
+            .fetch_optional(&mut *read)
             .await
             .map_err(storage)?
             .ok_or_else(|| DomainError::NotFound(format!("memory entry {id}")))?;
@@ -255,6 +346,7 @@ impl Store {
         agent_instance_id: Option<Id>,
         task_id: Option<Id>,
     ) -> Result<Vec<MemoryEntry>, DomainError> {
+        let mut read = self.memory_read_transaction().await?;
         let project_id = project_id.map(|value| value.to_string());
         let agent_instance_id = agent_instance_id.map(|value| value.to_string());
         let task_id = task_id.map(|value| value.to_string());
@@ -274,7 +366,7 @@ impl Store {
         .bind(agent_instance_id.as_deref())
         .bind(task_id.as_deref())
         .bind(task_id.as_deref())
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *read)
         .await
         .map_err(storage)?;
         rows.into_iter().map(row_to_memory_entry).collect()
@@ -286,6 +378,7 @@ impl Store {
         agent_id: Id,
     ) -> Result<Vec<MemoryEntry>, DomainError> {
         let task = self.get_task(task_id).await?;
+        let mut read = self.memory_read_transaction().await?;
         let project_id = task.project_id.map(|value| value.to_string());
         let rows = sqlx::query(
             "SELECT * FROM memory_entries
@@ -315,7 +408,7 @@ impl Store {
         .bind(task_id.to_string())
         .bind(agent_id.to_string())
         .bind(agent_id.to_string())
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *read)
         .await
         .map_err(storage)?;
         rows.into_iter().map(row_to_memory_entry).collect()

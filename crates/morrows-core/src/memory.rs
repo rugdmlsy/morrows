@@ -37,6 +37,9 @@ pub struct PublishProjectMemory {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(with = "Option<String>")]
     pub expected_project_id: Option<Id>,
+    /// Required after Git cutover: the project head actually read by the caller.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_commit: Option<String>,
     pub title: String,
     pub content: Value,
     /// reported, verified, hypothesis, or unverified; an author claim, not server certification.

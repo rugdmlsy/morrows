@@ -1,6 +1,6 @@
 # 长期记忆的多项目 Git 管理设计
 
-状态：服务端版本存储的设计方案。当前已实现原生 Git 多项目 worktree 与受权限约束的单条发布桥接，尚未把生产记忆存储迁移到 Git。
+状态：已实现逐项目 Git 镜像、完整等价校验、显式 cutover、CAS 发布与断点索引恢复。操作说明见 memory-files.md。下文保留目标设计；当前采用 refs/heads/projects/<UUID>/main 独立根，而非 GIT_NAMESPACE；远端分支合并和多项目 manifest API 尚未实现，本地原生 Git 工作流可用。
 
 ## 目标与已有基础
 
@@ -9,7 +9,7 @@ Agent 在同一个工作目录管理多个项目的知识，每个项目独立�
 所有项目捆在一个全局 main 上。Git 已有的对象、提交图、差异、合并和回退语义直接复用。
 
 当前 MemoryEntry 已保留不可变内容、来源、验证声明和 supersedes 链；项目参与者通过
-所属任务直接发布。它还没有项目整体 commit、分支或 merge。当前 CLI 的文件接口见
+所属任务直接发布。Git 后端每次发布创建项目整体 commit；远端分支或 merge API 尚未开放。当前 CLI 的文件接口见
 [memory-files.md](memory-files.md)，不把本地修改伪装成已经写入服务端的事实。
 
 ## 存储：共享对象库，各项目独立引用与历史
