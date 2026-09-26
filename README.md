@@ -108,8 +108,10 @@ https://mcp.xycdev.com/morrows/ui/
 VPS 上的 Local Shell MCP 已移到 `127.0.0.1:8766`。本地路由层占用
 `127.0.0.1:8765`：公网 `/morrows` MCP 先进入 Local Shell MCP，复用与
 Blender、Keynote 等 MCP 相同的 ChatGPT OAuth 边界；LSM 验证成功后会移除公网
-OAuth token 和调用方伪造的 Morrows 身份头，只通过 loopback 注入一个可信标记，
-Morrows 再将该标记映射到 `MORROWS_LSM_OAUTH_AGENT_ID` 指定的 AgentInstance。
+OAuth token 和调用方伪造的 Morrows 身份头，并只通过 loopback 注入已验证的
+OAuth `client_id`（以及可选 `client_name`）作为可信 provenance。Morrows
+按该 `client_id` 自动解析/创建一个稳定的技术 AgentInstance；名称、账号邮箱、
+平台和设备由 Agent 使用 `agent_identity_report` 自行查询并上报，绝不用于授权。
 WebUI / control-plane 路径仍直接进入 Morrows。
 原有 `https://mcp.xycdev.com/mcp` 保持不变。这个共享 Caddy 入口由
 `local-shell-mcp` 仓库的 `deploy/morrow/deploy-vps.sh` 统一管理；Morrows
@@ -139,8 +141,6 @@ MORROWS_MCP_URL=https://mcp.xycdev.com/morrows
 # 可选：loopback LSM 集成
 MORROWS_LSM_CONTROL_URL=http://127.0.0.1:8766
 MORROWS_LSM_SUBJECT=local-mcp-client
-# 公网 /morrows 经 LSM OAuth 验证后映射到这个 Morrows AgentInstance。
-MORROWS_LSM_OAUTH_AGENT_ID=<agent-instance-uuid>
 MORROWS_AGENT_RESTART_GRACE_SECONDS=600
 # VPS 上无需复制 MORROWS_LSM_CONTROL_KEY：
 # scripts/run-vps.sh 只从 LSM 的私密 service.env 读取
@@ -189,8 +189,9 @@ X-Agent-Instance-Id: <uuid>   # 使用 Bearer 时可选；若提供则必须匹�
 
 这套 credential 只用于 Codex / CodeBuddy 等 Morrows 管理的 Agent runtime；
 **ChatGPT 公网客户端不直接持有 `mrw_agent_*`**。ChatGPT 只完成现有 LSM OAuth，
-LSM 在验证后通过 loopback 可信标记进入 Morrows，Morrows 将该请求映射到
-`MORROWS_LSM_OAUTH_AGENT_ID` 指定的固定 AgentInstance，不需要第二套共享密钥。
+LSM 在验证后通过 loopback 传递可信 OAuth client provenance；Morrows 按已验证
+`client_id` 绑定稳定的技术 AgentInstance，不需要第二套共享密钥。Agent 的
+`agent_name/account_email/platform/device` 是独立的自报审计信息，不参与授权。
 
 本地控制面可通过 `/api/agents/{id}/credentials` 和
 `/api/agent-credentials/{id}/revoke` 签发、列出和撤销 bridge credential。

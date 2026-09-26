@@ -119,6 +119,13 @@ type FleetEntry = {
     quota_state: string | null;
     observed_at: string;
   } | null;
+  reported_identity: {
+    agent_name?: string | null;
+    account_email?: string | null;
+    platform?: string | null;
+    device?: string | null;
+    reported_at: string;
+  } | null;
 };
 
 type Assignment = {
@@ -346,15 +353,6 @@ function StateBadge({ state, locale }: { state: string; locale: Locale }) {
   return <span className={`badge state-${state}`}>{formatState(locale, state)}</span>;
 }
 
-function providerDisplayName(provider: string, locale: Locale) {
-  const key = provider.trim().toLowerCase();
-  if (key === "openai") return "OpenAI";
-  if (key === "tencent") return "Tencent";
-  if (key === "local") return locale === "zh-CN" ? "本地" : "Local";
-  if (key === "legacy") return locale === "zh-CN" ? "历史兼容" : "Legacy";
-  return provider || (locale === "zh-CN" ? "未知来源" : "Unknown");
-}
-
 function agentKindDisplayName(kind: string, locale: Locale) {
   const key = kind.trim().toLowerCase();
   if (key === "coding_agent") return locale === "zh-CN" ? "编码 Agent" : "Coding agent";
@@ -365,7 +363,8 @@ function agentKindDisplayName(kind: string, locale: Locale) {
 }
 
 function cleanAgentDisplayName(entry: FleetEntry, locale: Locale) {
-  const { instance, profile, machine } = entry;
+  const { instance, profile, machine, reported_identity } = entry;
+  if (reported_identity?.agent_name?.trim()) return reported_identity.agent_name.trim();
   if (instance.display_name?.trim()) return instance.display_name.trim();
   if (profile.kind === "legacy" || profile.provider === "legacy") {
     const raw = instance.name.toLowerCase();
@@ -389,17 +388,18 @@ function cleanAgentDisplayName(entry: FleetEntry, locale: Locale) {
 }
 
 function accountDisplayName(entry: FleetEntry, locale: Locale) {
-  if (!entry.account) return locale === "zh-CN" ? "未绑定账号" : "No account";
-  return entry.account.email?.trim() || (locale === "zh-CN" ? "未记录邮箱" : "Email not recorded");
+  return entry.reported_identity?.account_email?.trim()
+    || (locale === "zh-CN" ? "未上报" : "Not reported");
+}
+
+function platformDisplayName(entry: FleetEntry, locale: Locale) {
+  return entry.reported_identity?.platform?.trim()
+    || (locale === "zh-CN" ? "未上报" : "Not reported");
 }
 
 function machineDisplayName(entry: FleetEntry, locale: Locale) {
-  const machine = entry.machine;
-  if (!machine) return locale === "zh-CN" ? "Provider 托管" : "Provider managed";
-  if (machine.name.startsWith("legacy:") || entry.profile.kind === "legacy") {
-    return locale === "zh-CN" ? "历史记录" : "Legacy record";
-  }
-  return `${machine.name}${machine.os && machine.os !== "unknown" ? ` · ${machine.os}` : ""}`;
+  return entry.reported_identity?.device?.trim()
+    || (locale === "zh-CN" ? "未上报" : "Not reported");
 }
 
 function agentAvailabilityRank(entry: FleetEntry) {
@@ -2136,7 +2136,7 @@ export default function App() {
 
             <div className="agent-grid">
               {orderedAgents.map((entry) => {
-                const { instance: agent, profile, account, machine, latest_capacity: capacity } = entry;
+                const { instance: agent, profile, latest_capacity: capacity } = entry;
                 const displayName = cleanAgentDisplayName(entry, locale);
                 const legacy = profile.kind === "legacy" || profile.provider === "legacy";
                 return (
@@ -2188,7 +2188,7 @@ export default function App() {
                             {legacy && <span className="badge">{t("legacyRecord")}</span>}
                           </div>
                         )}
-                        <span>{agentKindDisplayName(profile.kind, locale)} · {providerDisplayName(profile.provider, locale)}</span>
+                        <span>{agentKindDisplayName(profile.kind, locale)} · {platformDisplayName(entry, locale)}</span>
                       </div>
                       <StateBadge state={agent.status} locale={locale} />
                     </div>
@@ -2214,7 +2214,7 @@ export default function App() {
 
                     <dl className="fleet-identity">
                       <div><dt>{t("agentType")}</dt><dd>{profile.name} · {agentKindDisplayName(profile.kind, locale)}</dd></div>
-                      <div><dt>{t("identity")}</dt><dd>{accountDisplayName(entry, locale)}{account && account.status !== "active" ? ` · ${formatState(locale, account.status)}` : ""}</dd></div>
+                      <div><dt>{t("identity")}</dt><dd>{accountDisplayName(entry, locale)}</dd></div>
                       <div><dt>{t("runtimeLocation")}</dt><dd>{machineDisplayName(entry, locale)}</dd></div>
                     </dl>
 
@@ -2251,8 +2251,8 @@ export default function App() {
                         <div><dt>{t("instanceId")}</dt><dd><code>{agent.id}</code></dd></div>
                         <div><dt>{t("rawName")}</dt><dd><code>{agent.name}</code></dd></div>
                         <div><dt>{t("profile")}</dt><dd><code>{profile.name} · {shortId(profile.id)}</code></dd></div>
-                        <div><dt>{t("account")}</dt><dd><code>{account ? `${account.label} · ${shortId(account.id)}` : "—"}</code></dd></div>
-                        <div><dt>{t("machine")}</dt><dd><code>{machine ? `${machine.name} · ${shortId(machine.id)}` : "—"}</code></dd></div>
+                        <div><dt>{t("account")}</dt><dd><code>{entry.account ? `${entry.account.label} · ${shortId(entry.account.id)}` : "—"}</code></dd></div>
+                        <div><dt>{t("machine")}</dt><dd><code>{entry.machine ? `${entry.machine.name} · ${shortId(entry.machine.id)}` : "—"}</code></dd></div>
                         {agent.external_instance_ref && <div><dt>{t("externalRef")}</dt><dd><code>{agent.external_instance_ref}</code></dd></div>}
                       </dl>
                     </details>

@@ -111,9 +111,12 @@ Local Shell MCP on the VPS moves to `127.0.0.1:8766`. A loopback router owns
 `127.0.0.1:8765`: the public `/morrows` MCP first enters Local Shell MCP and reuses
 the same ChatGPT OAuth boundary as the Blender, Keynote, and other MCP integrations.
 After LSM validates OAuth, it strips the public bearer and any caller-supplied
-Morrows identity headers, adds a trusted loopback handoff marker, and forwards the
-request to `127.0.0.1:8787/mcp`. Morrows maps that marker to the AgentInstance
-configured by `MORROWS_LSM_OAUTH_AGENT_ID`. WebUI/control-plane paths still go
+Morrows identity headers, then forwards only validated OAuth client provenance
+(`client_id` and optional `client_name`) over the trusted loopback hop to
+`127.0.0.1:8787/mcp`. Morrows resolves a stable technical AgentInstance per
+validated `client_id`. Human-readable agent name, account email, platform, and
+device are queried and self-reported by the Agent with `agent_identity_report`;
+they never participate in authorization. WebUI/control-plane paths still go
 directly to Morrows. The existing `https://mcp.xycdev.com/mcp` endpoint is
 unchanged. This shared Caddy edge is owned by `deploy/morrow/deploy-vps.sh` in the
 `local-shell-mcp` repository; Morrows does not maintain a second router copy.
@@ -142,8 +145,6 @@ MORROWS_MCP_URL=https://mcp.xycdev.com/morrows
 # Optional loopback LSM integration
 MORROWS_LSM_CONTROL_URL=http://127.0.0.1:8766
 MORROWS_LSM_SUBJECT=local-mcp-client
-# Map LSM-OAuth-authenticated public /morrows calls to this Morrows AgentInstance.
-MORROWS_LSM_OAUTH_AGENT_ID=<agent-instance-uuid>
 MORROWS_AGENT_RESTART_GRACE_SECONDS=600
 # On the VPS, do not copy MORROWS_LSM_CONTROL_KEY manually.
 # scripts/run-vps.sh reads only LOCAL_SHELL_MCP_CONTROL_API_KEY from the
@@ -192,9 +193,11 @@ X-Agent-Instance-Id: <uuid>   # optional with Bearer; if present it must match
 
 These credentials are for Morrows-managed runtimes such as Codex/CodeBuddy.
 **Public ChatGPT clients never receive or present a `mrw_agent_*` credential.**
-They authenticate only with the existing LSM OAuth flow; after validation LSM uses
-a trusted loopback handoff marker and Morrows maps it to the AgentInstance configured
-by `MORROWS_LSM_OAUTH_AGENT_ID`. No second shared bearer secret is required.
+They authenticate only with the existing LSM OAuth flow; after validation LSM
+forwards trusted OAuth client provenance over loopback, and Morrows binds the
+validated `client_id` to a stable technical AgentInstance. No second shared bearer
+secret is required. `agent_name/account_email/platform/device` are separate
+self-reported audit metadata and do not affect authorization.
 
 The local control plane can issue/list/revoke bridge credentials with
 `/api/agents/{id}/credentials` and `/api/agent-credentials/{id}/revoke`. Provider

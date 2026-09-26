@@ -9,6 +9,17 @@ fn caller(id: Option<Id>) -> Extension<Parts> {
     Extension(request.body(()).unwrap().into_parts().0)
 }
 
+fn oauth_caller(id: Id, client_id: &str, client_name: &str) -> Extension<Parts> {
+    let request = axum::http::Request::builder()
+        .header("x-agent-instance-id", id.to_string())
+        .header(AUTH_SOURCE_HEADER, "lsm_oauth")
+        .header(LSM_OAUTH_CLIENT_ID_HEADER, client_id)
+        .header(LSM_OAUTH_CLIENT_NAME_HEADER, client_name)
+        .body(())
+        .unwrap();
+    Extension(request.into_parts().0)
+}
+
 fn request<T: serde::de::DeserializeOwned>(value: Value) -> Parameters<T> {
     Parameters(serde_json::from_value(value).unwrap())
 }
@@ -155,6 +166,44 @@ async fn task(
         })
         .await
         .unwrap()
+}
+
+#[tokio::test]
+async fn whoami_includes_trusted_provenance_and_latest_self_report() {
+    let store = Store::connect("sqlite::memory:").await.unwrap();
+    let agent = store.register_agent("technical-agent", &[]).await.unwrap();
+    let mcp = MorrowsMcp::new(store.clone());
+
+    let report = value(
+        mcp.agent_identity_report(
+            request(json!({
+                "agent_name":"codex-1",
+                "account_email":"agent@example.com",
+                "platform":"codex",
+                "device":"node-01"
+            })),
+            oauth_caller(agent.id, "oauth-client-1", "Codex"),
+        )
+        .await,
+    );
+    assert_eq!(report["agent_instance_id"], json!(agent.id));
+    assert_eq!(report["agent_name"], "codex-1");
+
+    let identity = value(
+        mcp.whoami(oauth_caller(agent.id, "oauth-client-1", "Codex"))
+            .await,
+    );
+    assert_eq!(identity["agent_instance_id"], json!(agent.id));
+    assert_eq!(identity["auth"]["source"], "lsm_oauth");
+    assert_eq!(identity["auth"]["oauth_client_id"], "oauth-client-1");
+    assert_eq!(identity["auth"]["oauth_client_name"], "Codex");
+    assert_eq!(identity["reported_identity"]["agent_name"], "codex-1");
+    assert_eq!(
+        identity["reported_identity"]["account_email"],
+        "agent@example.com"
+    );
+    assert_eq!(identity["reported_identity"]["platform"], "codex");
+    assert_eq!(identity["reported_identity"]["device"], "node-01");
 }
 
 #[tokio::test]

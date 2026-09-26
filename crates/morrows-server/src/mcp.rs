@@ -1,10 +1,15 @@
-use crate::memory_search::MemorySearch;
+use crate::{
+    auth::{AUTH_SOURCE_HEADER, LSM_OAUTH_CLIENT_ID_HEADER, LSM_OAUTH_CLIENT_NAME_HEADER},
+    memory_search::MemorySearch,
+};
 use axum::http::request::Parts;
 use morrows_core::{
     CreateArtifact, CreateDecision, CreateHandoff, CreateMessage, CreateSessionSummaryRevision,
     CreateThread, SessionHistoryRequest, SessionReply,
 };
-use morrows_core::{CreateTask, Id, TaskQuery, TaskState, UpdateContextRevision};
+use morrows_core::{
+    CreateTask, Id, ReportAgentIdentity, TaskQuery, TaskState, UpdateContextRevision,
+};
 use morrows_store::Store;
 use rmcp::{
     ServerHandler,
@@ -512,21 +517,48 @@ pub struct ReviseSessionSummaryRequest {
 #[tool_router(router = tool_router)]
 impl MorrowsMcp {
     #[tool(
-        description = "Identify the authenticated agent and the default discovery scope. Does not return credentials."
+        description = "Identify the authenticated technical AgentInstance, trusted authentication provenance, and latest self-reported identity. Self-reported fields are descriptive only and never grant authorization."
     )]
     async fn whoami(&self, Extension(parts): Extension<Parts>) -> Result<String, String> {
+        let agent_id = authenticated_agent(&parts)?;
         let agent = self
             .store
-            .get_agent(authenticated_agent(&parts)?)
+            .get_agent(agent_id)
+            .await
+            .map_err(|e| e.to_string())?;
+        let reported_identity = self
+            .store
+            .latest_agent_identity_report(agent_id)
             .await
             .map_err(|e| e.to_string())?;
         Ok(json!({
-            "agent_instance_id": agent.id, "name": agent.name,
-            "display_name": agent.display_name, "status": agent.status,
-            "default_task_scope": "assigned", "can_query_other_tasks": true,
-            "start_here": "task_list; use scope=all to discover other tasks; then task_context"
+            "agent_instance_id": agent.id,
+            "name": agent.name,
+            "display_name": agent.display_name,
+            "status": agent.status,
+            "auth": auth_provenance(&parts),
+            "reported_identity": reported_identity,
+            "default_task_scope": "assigned",
+            "can_query_other_tasks": true,
+            "start_here": "If reported_identity is missing or stale, inspect your own runtime/account/device and call agent_identity_report. Then use task_list; use scope=all to discover other tasks; then task_context."
         })
         .to_string())
+    }
+
+    #[tool(
+        description = "Report your own descriptive identity after querying it from your runtime: agent_name (for example codex-1), account_email, platform (for example codex), and device (for example node-01). Use null when you cannot verify a field. The server binds the report to the authenticated AgentInstance; these values never affect authorization."
+    )]
+    async fn agent_identity_report(
+        &self,
+        Parameters(req): Parameters<ReportAgentIdentity>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<String, String> {
+        let report = self
+            .store
+            .report_agent_identity(authenticated_agent(&parts)?, req)
+            .await
+            .map_err(|e| e.to_string())?;
+        serde_json::to_string(&report).map_err(|e| e.to_string())
     }
 
     #[tool(
@@ -1471,6 +1503,21 @@ impl ServerHandler for MorrowsMcp {
 
 fn parse_id(raw: &str) -> Result<Id, String> {
     Uuid::parse_str(raw).map_err(|_| format!("invalid UUID: {raw}"))
+}
+
+fn auth_provenance(parts: &Parts) -> Value {
+    let text = |name: &str| {
+        parts
+            .headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned)
+    };
+    json!({
+        "source": text(AUTH_SOURCE_HEADER).unwrap_or_else(|| "unknown".into()),
+        "oauth_client_id": text(LSM_OAUTH_CLIENT_ID_HEADER),
+        "oauth_client_name": text(LSM_OAUTH_CLIENT_NAME_HEADER),
+    })
 }
 
 fn authenticated_agent(parts: &Parts) -> Result<Id, String> {

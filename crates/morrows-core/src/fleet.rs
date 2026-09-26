@@ -106,6 +106,33 @@ pub struct RegisterAgentInstance {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ReportAgentIdentity {
+    /// Agent-chosen human-readable name, for example codex-1. This is descriptive only.
+    #[serde(default)]
+    pub agent_name: Option<String>,
+    /// Account email reported by the agent itself. Unknown values should remain null.
+    #[serde(default)]
+    pub account_email: Option<String>,
+    /// Agent platform reported by the agent itself, for example codex or chatgpt.
+    #[serde(default)]
+    pub platform: Option<String>,
+    /// Device or execution host reported by the agent itself, for example node-01.
+    #[serde(default)]
+    pub device: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentIdentityReport {
+    pub id: Id,
+    pub agent_instance_id: Id,
+    pub agent_name: Option<String>,
+    pub account_email: Option<String>,
+    pub platform: Option<String>,
+    pub device: Option<String>,
+    pub reported_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RecordCapacity {
     pub status: String,
     pub available_slots: i64,
@@ -144,6 +171,7 @@ pub struct FleetEntry {
     pub account: Option<Account>,
     pub machine: Option<Machine>,
     pub latest_capacity: Option<CapacitySnapshot>,
+    pub reported_identity: Option<AgentIdentityReport>,
 }
 
 fn active_status() -> String {
