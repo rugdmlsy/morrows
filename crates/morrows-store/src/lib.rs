@@ -1,7 +1,7 @@
 use chrono::{DateTime, Duration, Utc};
 use morrows_core::{
     AgentInstance, Assignment, ContextRevision, CreateContextRevision, CreateProject, CreateTask,
-    DomainError, Event, Id, Project, Run, Task, TaskState,
+    DomainError, Event, Id, Project, Run, Task, TaskState, UpdateContextRevision,
 };
 use serde_json::{Value, json};
 use sqlx::{
@@ -13,6 +13,11 @@ use uuid::Uuid;
 
 mod discovery;
 mod runtime;
+
+enum ContextRevisionWrite {
+    Replace(CreateContextRevision),
+    Patch(UpdateContextRevision),
+}
 
 #[derive(Clone)]
 pub struct Store {
@@ -653,6 +658,40 @@ impl Store {
         task_id: Id,
         input: CreateContextRevision,
     ) -> Result<ContextRevision, DomainError> {
+        self.write_context_revision(task_id, ContextRevisionWrite::Replace(input))
+            .await
+    }
+
+    pub async fn update_context_revision(
+        &self,
+        task_id: Id,
+        input: UpdateContextRevision,
+    ) -> Result<ContextRevision, DomainError> {
+        if input.goal.is_none()
+            && input.background.is_none()
+            && input.current_summary.is_none()
+            && input
+                .constraints
+                .as_ref()
+                .is_none_or(serde_json::Map::is_empty)
+        {
+            return Err(DomainError::InvalidInput(
+                "provide at least one context field to update".into(),
+            ));
+        }
+        self.write_context_revision(task_id, ContextRevisionWrite::Patch(input))
+            .await
+    }
+
+    /// Serialize the read/merge/write under the existing SQLite writer lock.
+    /// Two partial updates therefore merge against the actual latest revision;
+    /// a supplied base ID rejects stale reasoning before changing any durable state.
+    /// The full-replacement control-plane API keeps its existing semantics.
+    async fn write_context_revision(
+        &self,
+        task_id: Id,
+        write: ContextRevisionWrite,
+    ) -> Result<ContextRevision, DomainError> {
         self.get_task(task_id).await?;
         let now = Utc::now();
         let id = Uuid::new_v4();
@@ -661,15 +700,55 @@ impl Store {
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(storage)?;
-        let latest=sqlx::query("SELECT id,version FROM context_revisions WHERE task_id=? ORDER BY version DESC LIMIT 1")
-            .bind(task_id.to_string()).fetch_optional(&mut *tx).await.map_err(storage)?;
-        let (parent, version) = if let Some(row) = latest {
-            (
-                Some(row.try_get::<String, _>("id").map_err(storage)?),
-                row.try_get::<i64, _>("version").map_err(storage)? + 1,
-            )
-        } else {
-            (None, 1)
+        let latest = sqlx::query(
+            "SELECT * FROM context_revisions WHERE task_id=? ORDER BY version DESC LIMIT 1",
+        )
+        .bind(task_id.to_string())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(storage)?
+        .map(row_to_context_revision)
+        .transpose()?;
+        let parent = latest.as_ref().map(|c| c.id.to_string());
+        let version = latest.as_ref().map_or(1, |c| c.version + 1);
+        let input = match write {
+            ContextRevisionWrite::Replace(input) => input,
+            ContextRevisionWrite::Patch(patch) => {
+                if patch.expected_context_revision_id.is_some()
+                    && patch.expected_context_revision_id != latest.as_ref().map(|c| c.id)
+                {
+                    return Err(DomainError::Conflict(
+                        "context changed; read memory_get and retry with the current revision ID"
+                            .into(),
+                    ));
+                }
+                let mut constraints = latest
+                    .as_ref()
+                    .map_or_else(|| json!({}), |c| c.constraints.clone());
+                if let Some(additions) = patch.constraints {
+                    let object = constraints.as_object_mut().ok_or_else(|| DomainError::InvalidInput(
+                        "existing constraints are not an object; use the control-plane full revision API to replace them".into()
+                    ))?;
+                    merge_context_constraints(object, additions);
+                }
+                CreateContextRevision {
+                    goal: patch.goal.unwrap_or_else(|| {
+                        latest.as_ref().map_or_else(String::new, |c| c.goal.clone())
+                    }),
+                    background: patch.background.unwrap_or_else(|| {
+                        latest
+                            .as_ref()
+                            .map_or_else(String::new, |c| c.background.clone())
+                    }),
+                    current_summary: patch.current_summary.unwrap_or_else(|| {
+                        latest
+                            .as_ref()
+                            .map_or_else(String::new, |c| c.current_summary.clone())
+                    }),
+                    constraints,
+                    created_by_actor_id: patch.created_by_actor_id,
+                }
+            }
         };
         sqlx::query("INSERT INTO context_revisions(id,task_id,version,parent_revision_id,goal,background,constraints_json,current_summary,created_by_actor_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)")
             .bind(id.to_string()).bind(task_id.to_string()).bind(version).bind(&parent).bind(&input.goal).bind(&input.background)
@@ -733,6 +812,24 @@ impl Store {
         .await
         .map_err(storage)?;
         rows.into_iter().map(row_to_event).collect()
+    }
+}
+
+/// Preserve unmentioned keys at every object level. Explicit non-object values
+/// (including arrays and null) replace that key's value, never remove the key.
+fn merge_context_constraints(
+    current: &mut serde_json::Map<String, Value>,
+    additions: serde_json::Map<String, Value>,
+) {
+    for (key, value) in additions {
+        match (current.get_mut(&key), value) {
+            (Some(Value::Object(existing)), Value::Object(nested)) => {
+                merge_context_constraints(existing, nested)
+            }
+            (_, value) => {
+                current.insert(key, value);
+            }
+        }
     }
 }
 

@@ -18,6 +18,55 @@ fn value(result: Result<String, String>) -> Value {
 }
 
 #[tokio::test]
+async fn memory_revise_preserves_omitted_fields_and_rejects_a_stale_read() {
+    let store = Store::connect("sqlite::memory:").await.unwrap();
+    let agent = store.register_agent("context-writer", &[]).await.unwrap();
+    let task = task(&store, "Audit", None, TaskState::Ready).await;
+    store
+        .claim_task(task.id, agent.id, "executor", 300)
+        .await
+        .unwrap();
+    let original=store.create_context_revision(task.id,serde_json::from_value(json!({
+        "goal":"Goal", "background":"Background", "constraints":{"freeze_requires":["Pass gate"]}
+    })).unwrap()).await.unwrap();
+    let mcp = MorrowsMcp::new(store.clone());
+    let revised = value(
+        mcp.memory_revise(
+            request(json!({
+                "task_id":task.id,"current_summary":"Progress only", "constraints":null,
+                "expected_context_revision_id":original.id
+            })),
+            caller(Some(agent.id)),
+        )
+        .await,
+    );
+    assert_eq!(revised["goal"], original.goal);
+    assert_eq!(revised["background"], original.background);
+    assert_eq!(revised["constraints"], original.constraints);
+    assert_eq!(revised["parent_revision_id"], json!(original.id));
+    assert_eq!(
+        revised["created_by_actor_id"],
+        format!("agent:{}", agent.id)
+    );
+    assert!(mcp.memory_revise(request(json!({
+        "task_id":task.id,"current_summary":"Stale", "expected_context_revision_id":original.id
+    })),caller(Some(agent.id))).await.unwrap_err().contains("context changed"));
+    assert!(
+        mcp.memory_revise(request(json!({"task_id":task.id})), caller(Some(agent.id)))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        store
+            .get_current_context(task.id)
+            .await
+            .unwrap()
+            .current_summary,
+        "Progress only"
+    );
+}
+
+#[tokio::test]
 async fn live_and_persisted_context_use_the_newest_handoff() {
     let store = Store::connect("sqlite::memory:").await.unwrap();
     let agent = store.register_agent("handoff-owner", &[]).await.unwrap();

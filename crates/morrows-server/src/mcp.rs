@@ -3,7 +3,7 @@ use morrows_core::{
     CreateArtifact, CreateDecision, CreateHandoff, CreateMessage, CreateSessionSummaryRevision,
     CreateThread, SessionHistoryRequest, SessionReply,
 };
-use morrows_core::{CreateContextRevision, CreateTask, Id, TaskQuery, TaskState};
+use morrows_core::{CreateTask, Id, TaskQuery, TaskState, UpdateContextRevision};
 use morrows_store::Store;
 use rmcp::{
     ServerHandler,
@@ -329,15 +329,15 @@ pub struct CompleteRunRequest {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ReviseContextRequest {
     pub task_id: String,
-    #[serde(default)]
-    pub goal: String,
-    #[serde(default)]
-    pub background: String,
-    #[serde(default)]
-    #[schemars(with = "std::collections::BTreeMap<String, Value>")]
-    pub constraints: Value,
-    #[serde(default)]
-    pub current_summary: String,
+    /// Omitted fields retain their current values; provided strings replace them.
+    pub goal: Option<String>,
+    pub background: Option<String>,
+    /// Recursively merge object keys. Explicit arrays/scalars/null replace that key's value; unmentioned keys survive.
+    #[schemars(with = "Option<std::collections::BTreeMap<String, Value>>")]
+    pub constraints: Option<serde_json::Map<String, Value>>,
+    pub current_summary: Option<String>,
+    /// Use the revision ID you read to reject an update based on stale context.
+    pub expected_context_revision_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1093,7 +1093,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Write a new immutable working-memory revision for a work item owned by, assigned to, or explicitly shared through an open Task Session with the authenticated employee."
+        description = "Patch shared task working memory with a new immutable revision. Omitted fields are preserved; constraint objects merge recursively. Supply expected_context_revision_id to reject stale updates. Requires task ownership, assignment history, or an open Task Session; this does not update project memory."
     )]
     async fn memory_revise(
         &self,
@@ -1105,17 +1105,18 @@ impl MorrowsMcp {
         self.ensure_task_write_access(task_id, agent_id).await?;
         let context = self
             .store
-            .create_context_revision(
+            .update_context_revision(
                 task_id,
-                CreateContextRevision {
+                UpdateContextRevision {
                     goal: req.goal,
                     background: req.background,
-                    constraints: if req.constraints.is_null() {
-                        json!({})
-                    } else {
-                        req.constraints
-                    },
+                    constraints: req.constraints,
                     current_summary: req.current_summary,
+                    expected_context_revision_id: req
+                        .expected_context_revision_id
+                        .as_deref()
+                        .map(parse_id)
+                        .transpose()?,
                     created_by_actor_id: format!("agent:{agent_id}"),
                 },
             )

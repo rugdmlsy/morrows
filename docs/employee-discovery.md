@@ -1,5 +1,8 @@
 # Employee discovery and context
 
+For execution readiness, checkpoint/context responsibilities and long-term memory
+promotion boundaries, see [Employee workflow](employee-workflow.md).
+
 All employee tools require an authenticated, registered Agent. Task and project
 reads are company knowledge: an Agent may explicitly query another Agent's task
 without taking ownership. Writes, assignment renewal, execution completion, and

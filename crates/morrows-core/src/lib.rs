@@ -177,6 +177,18 @@ pub struct CreateContextRevision {
     pub created_by_actor_id: String,
 }
 
+/// An employee patch to the latest working context. Omitted fields survive;
+/// constraints merge recursively so adding one rule cannot discard other gates.
+#[derive(Debug, Clone, Default)]
+pub struct UpdateContextRevision {
+    pub goal: Option<String>,
+    pub background: Option<String>,
+    pub constraints: Option<serde_json::Map<String, Value>>,
+    pub current_summary: Option<String>,
+    pub expected_context_revision_id: Option<Id>,
+    pub created_by_actor_id: String,
+}
+
 fn empty_object() -> Value {
     serde_json::json!({})
 }
