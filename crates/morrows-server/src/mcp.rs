@@ -2075,11 +2075,13 @@ mod tests {
         let bridge = base.join("fake_bridge.py");
         stdfs::write(
             &bridge,
-            r#"import argparse,json
+            r#"import argparse,json,sys
 from pathlib import Path
-p=argparse.ArgumentParser(); p.add_argument('command'); p.add_argument('--root'); p.add_argument('--milvus-uri'); p.add_argument('--collection'); p.add_argument('--query'); p.add_argument('--top-k'); a=p.parse_args()
-files=sorted(Path(a.root).glob('*.md'))
-print(json.dumps({'engine':'fake-memsearch','version':'test','provider':'onnx','model':'fake','indexed_chunks':len(files),'results':[{'source':str(files[0]),'heading':'current','score':0.95}]}))
+p=argparse.ArgumentParser(); p.add_argument('command'); p.add_argument('--root'); p.add_argument('--milvus-uri'); p.add_argument('--collection'); a=p.parse_args()
+for line in sys.stdin:
+    req=json.loads(line)
+    files=sorted((Path(a.root)/str(req['project_id'])).glob('*.md'))
+    print(json.dumps({'ok':True,'engine':'fake-memsearch','version':'test','provider':'onnx','model':'fake','indexed_chunks':len(files),'results':[{'source':str(files[0]),'heading':'current','score':0.95}]}), flush=True)
 "#,
         )
         .unwrap();

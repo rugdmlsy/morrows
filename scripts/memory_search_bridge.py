@@ -96,9 +96,80 @@ async def doctor(args: argparse.Namespace) -> dict:
         ms.close()
 
 
+async def serve(args: argparse.Namespace) -> None:
+    from memsearch.core import MemSearch
+
+    root = Path(args.root).expanduser().resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    ms = MemSearch(
+        [root],
+        embedding_provider=PROVIDER,
+        embedding_model=MODEL,
+        milvus_uri=str(Path(args.milvus_uri).expanduser().resolve()),
+        collection=args.collection,
+        reranker_model="",
+        description="Morrows rebuildable project-memory search index",
+    )
+    try:
+        while True:
+            line = await asyncio.to_thread(input)
+            if not line:
+                continue
+            try:
+                request = json.loads(line)
+                operation = request.get("op")
+                if operation == "ping":
+                    response = {
+                        "ok": True,
+                        "engine": "memsearch",
+                        "version": version("memsearch"),
+                        "provider": PROVIDER,
+                        "model": MODEL,
+                    }
+                elif operation == "search":
+                    project = str(request["project_id"])
+                    project_root = (root / project).resolve()
+                    if project_root.parent != root:
+                        raise ValueError("invalid project_id")
+                    report = await ms.index_with_report(force=False)
+                    if report.failed_files:
+                        raise RuntimeError(
+                            "MemSearch failed to index projection files: "
+                            + "; ".join(f"{item.path}: {item.error}" for item in report.failed_files)
+                        )
+                    results = await ms.search(
+                        str(request["query"]),
+                        top_k=int(request["top_k"]),
+                        source_prefix=project_root,
+                    )
+                    response = {
+                        "ok": True,
+                        "engine": "memsearch",
+                        "version": version("memsearch"),
+                        "provider": PROVIDER,
+                        "model": MODEL,
+                        "indexed_chunks": report.indexed_chunks,
+                        "results": results,
+                    }
+                else:
+                    raise ValueError(f"unknown operation: {operation!r}")
+            except Exception as exc:
+                response = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+            print(json.dumps(response, ensure_ascii=False), flush=True)
+    except EOFError:
+        return
+    finally:
+        ms.close()
+
+
 def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="command", required=True)
+
+    server = sub.add_parser("serve")
+    server.add_argument("--root", required=True)
+    server.add_argument("--milvus-uri", required=True)
+    server.add_argument("--collection", required=True)
 
     search = sub.add_parser("index-search")
     search.add_argument("--root", required=True)
@@ -115,6 +186,9 @@ def parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = parser().parse_args()
+    if args.command == "serve":
+        asyncio.run(serve(args))
+        return
     if args.command == "index-search":
         result = asyncio.run(index_search(args))
     else:

@@ -6,10 +6,17 @@ use std::{
     collections::{HashMap, HashSet},
     env,
     path::{Path, PathBuf},
+    process::Stdio,
     sync::Arc,
     time::Duration,
 };
-use tokio::{fs, process::Command, sync::Mutex, time::timeout};
+use tokio::{
+    fs,
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    process::{Child, ChildStdin, ChildStdout, Command},
+    sync::Mutex,
+    time::timeout,
+};
 
 const DEFAULT_COLLECTION: &str = "morrows_project_memory";
 const DEFAULT_TOP_K: usize = 8;
@@ -19,7 +26,14 @@ const MAX_QUERY_BYTES: usize = 4096;
 #[derive(Clone)]
 pub(crate) struct MemorySearch {
     cfg: Arc<MemorySearchConfig>,
-    lock: Arc<Mutex<()>>,
+    operation_lock: Arc<Mutex<()>>,
+    process: Arc<Mutex<Option<BridgeProcess>>>,
+}
+
+struct BridgeProcess {
+    child: Child,
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
 }
 
 #[derive(Clone)]
@@ -34,6 +48,11 @@ struct MemorySearchConfig {
 
 #[derive(Debug, Deserialize)]
 struct BridgeResult {
+    #[serde(default)]
+    ok: bool,
+    #[serde(default)]
+    error: String,
+    #[serde(default)]
     engine: String,
     version: String,
     provider: String,
@@ -94,7 +113,8 @@ impl MemorySearch {
     fn from_config(cfg: MemorySearchConfig) -> Self {
         Self {
             cfg: Arc::new(cfg),
-            lock: Arc::new(Mutex::new(())),
+            operation_lock: Arc::new(Mutex::new(())),
+            process: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -117,7 +137,7 @@ impl MemorySearch {
         if !(1..=MAX_TOP_K).contains(&top_k) {
             return Err(format!("memory search top_k must be 1..={MAX_TOP_K}"));
         }
-        let _guard = self.lock.lock().await;
+        let _operation = self.operation_lock.lock().await;
         let current = self.sync_projection(store, project_id).await?;
         if current.is_empty() {
             return Ok(json!({
@@ -129,40 +149,23 @@ impl MemorySearch {
             }));
         }
 
-        let project_root = self.cfg.projection_root.join(project_id.to_string());
         if let Some(parent) = self.cfg.milvus_uri.parent() {
             fs::create_dir_all(parent)
                 .await
                 .map_err(|e| format!("create memory-search state directory: {e}"))?;
         }
         let fetch_k = (top_k * 3).min(60);
-        let mut command = Command::new(&self.cfg.python);
-        command
-            .arg(&self.cfg.bridge)
-            .arg("index-search")
-            .arg("--root")
-            .arg(&project_root)
-            .arg("--milvus-uri")
-            .arg(&self.cfg.milvus_uri)
-            .arg("--collection")
-            .arg(&self.cfg.collection)
-            .arg("--query")
-            .arg(query)
-            .arg("--top-k")
-            .arg(fetch_k.to_string())
-            .kill_on_drop(true);
-        let output = timeout(self.cfg.timeout, command.output())
-            .await
-            .map_err(|_| "MemSearch bridge timed out".to_string())?
-            .map_err(|e| format!("start MemSearch bridge: {e}"))?;
-        if !output.status.success() {
-            return Err(format!(
-                "MemSearch bridge failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ));
+        let bridge = self
+            .request_bridge(json!({
+                "op": "search",
+                "project_id": project_id,
+                "query": query,
+                "top_k": fetch_k,
+            }))
+            .await?;
+        if !bridge.ok {
+            return Err(format!("MemSearch bridge failed: {}", bridge.error));
         }
-        let bridge: BridgeResult = serde_json::from_slice(&output.stdout)
-            .map_err(|e| format!("decode MemSearch bridge output: {e}"))?;
 
         let mut seen = HashSet::new();
         let mut ranked = Vec::new();
@@ -221,6 +224,77 @@ impl MemorySearch {
                 "fallback": "task_context.memory",
             }),
         }
+    }
+
+    async fn request_bridge(&self, request: Value) -> Result<BridgeResult, String> {
+        let mut process = self.process.lock().await;
+        for attempt in 0..2 {
+            if process
+                .as_mut()
+                .is_some_and(|bridge| bridge.child.try_wait().ok().flatten().is_some())
+            {
+                *process = None;
+            }
+            if process.is_none() {
+                *process = Some(self.spawn_bridge()?);
+            }
+            let result = timeout(
+                self.cfg.timeout,
+                bridge_round_trip(process.as_mut().expect("bridge initialized"), &request),
+            )
+            .await;
+            match result {
+                Ok(Ok(response)) => return Ok(response),
+                Ok(Err(error)) if attempt == 0 => {
+                    if let Some(mut stale) = process.take() {
+                        let _ = stale.child.kill().await;
+                    }
+                    tracing::warn!(%error, "restarting failed MemSearch bridge");
+                }
+                Ok(Err(error)) => return Err(error),
+                Err(_) if attempt == 0 => {
+                    if let Some(mut stale) = process.take() {
+                        let _ = stale.child.kill().await;
+                    }
+                    tracing::warn!("restarting timed-out MemSearch bridge");
+                }
+                Err(_) => return Err("MemSearch bridge timed out".into()),
+            }
+        }
+        unreachable!()
+    }
+
+    fn spawn_bridge(&self) -> Result<BridgeProcess, String> {
+        let mut command = Command::new(&self.cfg.python);
+        command
+            .arg(&self.cfg.bridge)
+            .arg("serve")
+            .arg("--root")
+            .arg(&self.cfg.projection_root)
+            .arg("--milvus-uri")
+            .arg(&self.cfg.milvus_uri)
+            .arg("--collection")
+            .arg(&self.cfg.collection)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .kill_on_drop(true);
+        let mut child = command
+            .spawn()
+            .map_err(|e| format!("start persistent MemSearch bridge: {e}"))?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| "MemSearch bridge stdin unavailable".to_string())?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "MemSearch bridge stdout unavailable".to_string())?;
+        Ok(BridgeProcess {
+            child,
+            stdin,
+            stdout: BufReader::new(stdout),
+        })
     }
 
     async fn sync_projection(
@@ -288,6 +362,35 @@ impl MemorySearch {
     }
 }
 
+async fn bridge_round_trip(
+    bridge: &mut BridgeProcess,
+    request: &Value,
+) -> Result<BridgeResult, String> {
+    let mut encoded =
+        serde_json::to_vec(request).map_err(|e| format!("encode MemSearch request: {e}"))?;
+    encoded.push(b'\n');
+    bridge
+        .stdin
+        .write_all(&encoded)
+        .await
+        .map_err(|e| format!("write MemSearch request: {e}"))?;
+    bridge
+        .stdin
+        .flush()
+        .await
+        .map_err(|e| format!("flush MemSearch request: {e}"))?;
+    let mut line = String::new();
+    let read = bridge
+        .stdout
+        .read_line(&mut line)
+        .await
+        .map_err(|e| format!("read MemSearch response: {e}"))?;
+    if read == 0 {
+        return Err("MemSearch bridge closed stdout".into());
+    }
+    serde_json::from_str(&line).map_err(|e| format!("decode MemSearch response: {e}"))
+}
+
 fn render_memory(entry: &MemoryEntry) -> String {
     let content =
         serde_json::to_string_pretty(&entry.content).unwrap_or_else(|_| entry.content.to_string());
@@ -316,27 +419,28 @@ mod tests {
         let bridge = base.join("fake_bridge.py");
         stdfs::write(
             &bridge,
-            r#"import argparse,json
+            r#"import argparse,json,sys
 from pathlib import Path
 p=argparse.ArgumentParser()
 p.add_argument("command")
 p.add_argument("--root")
 p.add_argument("--milvus-uri")
 p.add_argument("--collection")
-p.add_argument("--query")
-p.add_argument("--top-k")
 a=p.parse_args()
-files=sorted(Path(a.root).glob("*.md"))
-stale=Path(a.root)/"00000000-0000-0000-0000-000000000001.md"
-print(json.dumps({
-  "engine":"fake-memsearch","version":"test","provider":"onnx","model":"fake",
-  "indexed_chunks":2,
-  "results":[
-    {"source":str(stale),"heading":"stale","score":1.0},
-    {"source":str(files[0]),"heading":"current","score":0.9},
-    {"source":str(files[0]),"heading":"duplicate","score":0.8}
-  ]
-}))
+for line in sys.stdin:
+    req=json.loads(line)
+    project=Path(a.root)/str(req["project_id"])
+    files=sorted(project.glob("*.md"))
+    stale=project/"00000000-0000-0000-0000-000000000001.md"
+    print(json.dumps({
+      "ok":True,"engine":"fake-memsearch","version":"test","provider":"onnx","model":"fake",
+      "indexed_chunks":2,
+      "results":[
+        {"source":str(stale),"heading":"stale","score":1.0},
+        {"source":str(files[0]),"heading":"current","score":0.9},
+        {"source":str(files[0]),"heading":"duplicate","score":0.8}
+      ]
+    }), flush=True)
 "#,
         )
         .unwrap();
@@ -382,6 +486,11 @@ print(json.dumps({
             "AUTHORITATIVE-ALPHA-17"
         );
         assert_eq!(result["index_role"], "rebuildable_shadow");
+        let repeated = search
+            .search_project(&store, project.id, "alpha protocol again", 5)
+            .await
+            .unwrap();
+        assert_eq!(repeated["results"][0]["memory"]["id"], json!(memory.id));
         let _ = stdfs::remove_dir_all(base);
     }
 
