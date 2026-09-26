@@ -80,7 +80,17 @@ Production is deployed to the OVH VPS by default. After committing and pushing, 
 ```
 
 The script synchronizes `main` on the VPS, builds the Web UI and release server, and
-restarts `morrows.service`. Morrows itself listens only on VPS loopback
+restarts `morrows.service`. Production startup also verifies a deployment fingerprint written
+only by this flow: the Git commit, server binary, `web/dist`, `run-vps.sh`, and installed
+systemd unit must all match. A manual `git pull/reset`, rebuild, frontend replacement, or unit
+replacement followed by restart exits with status 78 and prints:
+
+```text
+ERROR: refusing to start an unmanaged Morrows production deployment.
+Deploy with: ./scripts/deploy-vps.sh
+```
+
+A normal restart of an unchanged deployed build remains valid. Morrows itself listens only on VPS loopback
 `127.0.0.1:8787`; the public MCP endpoint is exposed through the existing Cloudflare
 Tunnel and VPS routing layer at:
 

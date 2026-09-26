@@ -80,7 +80,16 @@ cargo run -p morrows-server
 ```
 
 该脚本会在 VPS 上同步 `main`、构建 Web UI 和 release 后端，并通过
-`morrows.service` 重启服务。Morrows 本身只监听 VPS loopback
+`morrows.service` 重启服务。生产启动还会校验由该脚本写入的部署指纹：Git commit、
+后端二进制、`web/dist`、`run-vps.sh` 和已安装的 systemd unit 必须全部一致。
+手工 `git pull/reset`、手工 rebuild、替换前端或 unit 后直接重启都会以 exit 78 拒绝启动，并提示：
+
+```text
+ERROR: refusing to start an unmanaged Morrows production deployment.
+Deploy with: ./scripts/deploy-vps.sh
+```
+
+正常重启一个未被修改的已部署版本仍然允许。Morrows 本身只监听 VPS loopback
 `127.0.0.1:8787`；公网 MCP 通过现有 Cloudflare Tunnel 与 VPS 路由层暴露为：
 
 ```text

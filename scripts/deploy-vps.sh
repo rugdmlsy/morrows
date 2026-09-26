@@ -39,7 +39,45 @@ chmod 755 scripts/run-vps.sh
 )
 cargo build --release -p morrows-server
 
+git diff --quiet --
+git diff --cached --quiet --
+
+web_dist_sha256() {
+  (
+    cd "$root"
+    find web/dist -type f -print0 |
+      LC_ALL=C sort -z |
+      xargs -0 sha256sum |
+      sha256sum |
+      awk '{print $1}'
+  )
+}
+
+commit="$(git rev-parse HEAD)"
+server_sha256="$(sha256sum target/release/morrows-server | awk '{print $1}')"
+web_sha256="$(web_dist_sha256)"
+launcher_sha256="$(sha256sum scripts/run-vps.sh | awk '{print $1}')"
+unit_sha256="$(sha256sum deploy/morrows.service | awk '{print $1}')"
+
 sudo install -m 0644 deploy/morrows.service /etc/systemd/system/morrows.service
+test "$(sha256sum /etc/systemd/system/morrows.service | awk '{print $1}')" = "$unit_sha256"
+
+guard_dir=/home/morrow/.config/morrows
+guard_file="$guard_dir/DEPLOYED_RELEASE"
+mkdir -p "$guard_dir"
+chmod 700 "$guard_dir"
+umask 022
+guard_tmp="$(mktemp "$guard_dir/.DEPLOYED_RELEASE.XXXXXX")"
+cat > "$guard_tmp" <<EOF
+commit=$commit
+server_sha256=$server_sha256
+web_sha256=$web_sha256
+launcher_sha256=$launcher_sha256
+unit_sha256=$unit_sha256
+EOF
+chmod 0444 "$guard_tmp"
+mv -f "$guard_tmp" "$guard_file"
+
 sudo systemctl daemon-reload
 sudo systemctl enable --now morrows.service
 sudo systemctl restart morrows.service
