@@ -167,6 +167,7 @@ pub async fn run(command: Command) -> Result<()> {
                 } else {
                     None
                 },
+                expected_project_id: Some(project),
                 title: show(&dir, &commit, &format!("current/{memory}/title.txt"))?,
                 content,
                 verification_status,
@@ -181,11 +182,7 @@ pub async fn run(command: Command) -> Result<()> {
                 project_data["endpoint"] == client.endpoint,
                 "checkout belongs to a different MORROWS_MCP_URL"
             );
-            let source = client.call("task_get", json!({"task_id":task})).await?;
-            ensure!(
-                source["project_id"] == json!(project),
-                "source task belongs to another project"
-            );
+            client.require_native_publication().await?;
             eprintln!(
                 "Publishing commit {commit}, document {memory}, key {key}; retry with this exact commit and arguments if the result is uncertain."
             );

@@ -9,7 +9,8 @@ Morrows。版本管理直接使用 Git；没有自制的 status、diff、提交�
 独立客户端使用已签发的 `MORROWS_AGENT_TOKEN` 和 `MORROWS_MCP_URL`；受管 runtime
 可直接复用 `MORROWS_AGENT_AUTHORIZATION`（优先级高于 TOKEN），并通过 `MORROWS_MEMORY_CLI`
 找到可执行文件的绝对路径，可用 `"${MORROWS_MEMORY_CLI:-morrows}"` 调用。凭据不写入记忆目录，
-不扫描认证文件，不跟随 HTTP 重定向。需要本机 Git。
+不扫描认证文件，不跟随 HTTP 重定向。需要本机 Git。发布前会核对服务端工具 schema 支持
+稳定文档 UUID 与目标项目校验；旧服务端应先更新，不会静默忽略这些必要参数。
 
 ```sh
 morrows memory checkout --project "$PROJECT_A" --root ./knowledge --history
@@ -53,7 +54,8 @@ morrows memory publish --dir . --memory "$MEMORY_KEY" --rev HEAD \
 先读来源任务 context，把实际读到的 revision ID 用于发布。`verified` 必须有同任务的
 `--artifact UUID` 或 `--decision UUID`；真实性仍由作者负责。正文字符串保留重复段落、
 换行和不确定信息，JSON 必须有效。服务端绑定作者、项目和来源，检查写权限、上下文版本
-与旧知识是否已被替代。修改原始 metadata 会被拒绝；它不能替代认证或伪造来源。
+与旧知识是否已被替代。CLI 还传入 `expected_project_id`，在发布事务内拒绝来源任务已被
+移到其他项目的情况。修改原始 metadata 会被拒绝；它不能替代认证或伪造来源。
 
 发布读取指定 commit 的原生 Git blob，**不读取尚未提交的工作文件**。成功返回完整回执、
 来源 commit 与服务端 MemoryEntry ID。网络结果不确定时用同一 key、明确的 commit ID

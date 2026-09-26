@@ -84,6 +84,46 @@ async fn native_document_id_is_stable_unique_and_preserves_legacy_retry_shape() 
 }
 
 #[tokio::test]
+async fn project_move_cannot_redirect_a_prepared_native_publication() {
+    let store = Store::connect("sqlite::memory:").await.unwrap();
+    let (agent, project, task, context) = fixture(&store).await;
+    store
+        .claim_task(task, agent, "executor", 300)
+        .await
+        .unwrap();
+    let other = store
+        .create_project(serde_json::from_value(json!({"name":"Other"})).unwrap())
+        .await
+        .unwrap();
+    let mut input = publication(task, context, "pin-project");
+    assert!(
+        serde_json::to_value(&input)
+            .unwrap()
+            .get("expected_project_id")
+            .is_none()
+    );
+    input.expected_project_id = Some(project);
+    input.new_memory_id = Some(Id::new_v4());
+    store.set_task_project(task, Some(other.id)).await.unwrap();
+    assert!(
+        store
+            .publish_project_memory(agent, input)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("task project changed")
+    );
+    assert!(
+        store
+            .context_memories_page(None, Some(other.id), None, true, 20, 0)
+            .await
+            .unwrap()
+            .items
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn project_publication_binds_scope_retains_history_and_handles_retry_and_races() {
     let store = Store::connect("sqlite::memory:").await.unwrap();
     let (agent, project, task, context) = fixture(&store).await;

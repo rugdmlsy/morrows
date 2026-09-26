@@ -33,6 +33,10 @@ pub struct PublishProjectMemory {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(with = "Option<String>")]
     pub new_memory_id: Option<Id>,
+    /// Pin the project actually read; checked inside the publication transaction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(with = "Option<String>")]
+    pub expected_project_id: Option<Id>,
     pub title: String,
     pub content: Value,
     /// reported, verified, hypothesis, or unverified; an author claim, not server certification.

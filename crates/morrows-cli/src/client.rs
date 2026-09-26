@@ -85,4 +85,26 @@ impl Client {
         }
         serde_json::from_str(&text).with_context(|| format!("decode {name} result"))
     }
+
+    /// Older servers ignore unknown optional JSON fields. Refuse publication
+    /// unless they advertise the project pin and stable new-document identity.
+    pub async fn require_native_publication(&self) -> Result<()> {
+        let tools =
+            tokio::time::timeout(Duration::from_secs(30), self.service.list_all_tools()).await??;
+        let tool = tools
+            .iter()
+            .find(|t| t.name == "project_memory_publish")
+            .context("server does not support project memory publication")?;
+        let properties = tool
+            .input_schema
+            .get("properties")
+            .and_then(Value::as_object)
+            .context("server publication schema has no properties")?;
+        if !properties.contains_key("expected_project_id")
+            || !properties.contains_key("new_memory_id")
+        {
+            bail!("server needs the native-memory publication update before this CLI can publish");
+        }
+        Ok(())
+    }
 }

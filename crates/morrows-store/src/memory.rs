@@ -63,6 +63,12 @@ impl Store {
                 "task has no project; control plane must set its project first".into(),
             )
         })?;
+        if input
+            .expected_project_id
+            .is_some_and(|expected| expected != project_id)
+        {
+            return Err(DomainError::Conflict("task project changed; reconcile the source task and target project before publishing".into()));
+        }
         if let Some(id) = input.new_memory_id {
             if input.supersedes_memory_id.is_some() {
                 return Err(DomainError::InvalidInput(
