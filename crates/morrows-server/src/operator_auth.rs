@@ -286,7 +286,7 @@ mod tests {
                 store: store.clone(),
             })
             .layer(axum::middleware::from_fn_with_state(
-                crate::auth::AgentAuthState::new(store.clone(), true),
+                crate::auth::AgentAuthState::new(store.clone(), true, None),
                 crate::auth::authenticate_agent_requests,
             ))
             .layer(axum::middleware::from_fn_with_state(
@@ -504,7 +504,7 @@ mod tests {
             .route("/api/tasks", get(|| async { "control" }))
             .route("/api/agent-deliveries", get(|| async { "agent" }))
             .layer(axum::middleware::from_fn_with_state(
-                crate::auth::AgentAuthState::new(store.clone(), true),
+                crate::auth::AgentAuthState::new(store.clone(), true, None),
                 crate::auth::authenticate_agent_requests,
             ))
             .layer(axum::middleware::from_fn_with_state(
