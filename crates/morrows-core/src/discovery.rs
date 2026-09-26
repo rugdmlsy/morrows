@@ -42,3 +42,14 @@ pub struct TaskQuery {
     pub state: Option<TaskState>,
     pub include_completed: bool,
 }
+
+#[derive(Debug, Serialize)]
+pub struct ProjectSummary {
+    pub id: Id,
+    pub name: String,
+    pub description_preview: String,
+    pub description_truncated: bool,
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}

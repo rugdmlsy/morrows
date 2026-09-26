@@ -34,8 +34,11 @@ Morrows itself does not repeat the shared text in its tool descriptions.
    `instructions_get` to acknowledge only instructions returned to their recipient.
 
 `missing_context` reports absent task/project/context background and absent
-`constraints.acceptance_criteria`. Acceptance criteria written only in free text
-are preserved verbatim; the missing **structured** field is reported, not invented.
+structured acceptance criteria. `acceptance_criteria_paths` points to nonempty
+`context.constraints.acceptance_criteria` and/or `context.constraints.freeze_requires`
+without duplicating or rewriting their original values. Acceptance criteria written
+only in free text are preserved verbatim; the missing **structured** field is
+reported, not invented.
 Readiness or verified completion is never inferred from a description or handoff.
 
 ## Discovery filters
@@ -57,7 +60,8 @@ Readiness or verified completion is never inferred from a description or handoff
   with an explicit truncation flag. `task_get` returns the complete task text.
 - Responses echo the caller and effective filters. Empty lists explain that the
   filter matched nothing; they do not imply that no other tasks exist.
-- `project_list` pages all project summaries with 240-character description previews.
+- `project_list` pages all project summaries with a 240-character `description_preview`
+  and `description_truncated` flag, never a silently shortened `description`.
   `project_get` returns the complete project description and a page of current shared
   organization/project memory. Use `task_list(scope=all, project_id=...)` for its work.
 
@@ -78,6 +82,16 @@ Queries use database `LIMIT/OFFSET`, with one extra row to detect continuation.
   `next_offset`. It no longer repeats the entire task, collaboration, and execution
   history. Current knowledge excludes visible superseded revisions. The caller's
   own private Agent memory remains visible only to that caller.
+- `memory_get(include_superseded=true)` exposes replaced long-term memories with
+  full content, source references and supersession links. `project_get` accepts the
+  same flag for shared organization/project memory. No stored history is deleted.
+- `memory_get(include_context_history=true)` adds `context_history`, a newest-first
+  page of full immutable revisions with its own `next_offset`. `context_revision_id`
+  selects one revision of the specified task; `current_context_revision_id` and
+  `context_is_current` distinguish it from today's context. Selecting an old context
+  does not reconstruct long-term memory at that point in time: memory and context
+  history are independent collections. Page them with the same filters and each
+  collection's continuation offset.
 - `task_get` retains task fields and adds `execution`: paged assignments and
   caller-owned execution records/checkpoints. Its page parameters apply to each
   execution collection. Other Agents' private provider-thread history is not read.

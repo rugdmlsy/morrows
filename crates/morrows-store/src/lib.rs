@@ -719,18 +719,7 @@ impl Store {
             .await
             .map_err(storage)?
             .ok_or_else(|| DomainError::NotFound(format!("context revision {id}")))?;
-        Ok(ContextRevision {
-            id,
-            task_id: parse_id(row.try_get("task_id").map_err(storage)?)?,
-            version: row.try_get("version").map_err(storage)?,
-            parent_revision_id: parse_opt_id(row.try_get("parent_revision_id").map_err(storage)?)?,
-            goal: row.try_get("goal").map_err(storage)?,
-            background: row.try_get("background").map_err(storage)?,
-            constraints: parse_json(row.try_get("constraints_json").map_err(storage)?)?,
-            current_summary: row.try_get("current_summary").map_err(storage)?,
-            created_by_actor_id: row.try_get("created_by_actor_id").map_err(storage)?,
-            created_at: parse_dt(row.try_get("created_at").map_err(storage)?)?,
-        })
+        row_to_context_revision(row)
     }
 
     pub async fn task_events(&self, task_id: Id) -> Result<Vec<Event>, DomainError> {
@@ -745,6 +734,21 @@ impl Store {
         .map_err(storage)?;
         rows.into_iter().map(row_to_event).collect()
     }
+}
+
+fn row_to_context_revision(row: sqlx::sqlite::SqliteRow) -> Result<ContextRevision, DomainError> {
+    Ok(ContextRevision {
+        id: parse_id(row.try_get("id").map_err(storage)?)?,
+        task_id: parse_id(row.try_get("task_id").map_err(storage)?)?,
+        version: row.try_get("version").map_err(storage)?,
+        parent_revision_id: parse_opt_id(row.try_get("parent_revision_id").map_err(storage)?)?,
+        goal: row.try_get("goal").map_err(storage)?,
+        background: row.try_get("background").map_err(storage)?,
+        constraints: parse_json(row.try_get("constraints_json").map_err(storage)?)?,
+        current_summary: row.try_get("current_summary").map_err(storage)?,
+        created_by_actor_id: row.try_get("created_by_actor_id").map_err(storage)?,
+        created_at: parse_dt(row.try_get("created_at").map_err(storage)?)?,
+    })
 }
 
 fn row_to_project(row: sqlx::sqlite::SqliteRow) -> Result<Project, DomainError> {

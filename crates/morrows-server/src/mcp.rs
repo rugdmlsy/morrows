@@ -73,7 +73,7 @@ impl MorrowsMcp {
         };
         let memory = self
             .store
-            .context_memories_page(Some(task_id), task.project_id, Some(agent_id), 20, 0)
+            .context_memories_page(Some(task_id), task.project_id, Some(agent_id), false, 20, 0)
             .await
             .map_err(|e| e.to_string())?;
         let instructions = self
@@ -106,14 +106,25 @@ impl MorrowsMcp {
         {
             missing.push("context_background");
         }
-        let acceptance = context
-            .as_ref()
-            .and_then(|c| c.constraints.get("acceptance_criteria"));
-        if acceptance.is_none_or(|v| {
-            v.is_null()
-                || v.as_str().is_some_and(|s| s.trim().is_empty())
-                || v.as_array().is_some_and(Vec::is_empty)
-        }) {
+        // Imported research tasks also name explicit acceptance gates
+        // `freeze_requires`. Point to the original fields without rewriting or
+        // duplicating criteria, and do not interpret them as passed checks.
+        let acceptance_paths: Vec<_> = ["acceptance_criteria", "freeze_requires"]
+            .into_iter()
+            .filter(|key| {
+                context
+                    .as_ref()
+                    .and_then(|c| c.constraints.get(*key))
+                    .is_some_and(|v| match v {
+                        Value::String(s) => !s.trim().is_empty(),
+                        Value::Array(a) => !a.is_empty(),
+                        Value::Object(o) => !o.is_empty(),
+                        _ => false,
+                    })
+            })
+            .map(|key| format!("context.constraints.{key}"))
+            .collect();
+        if acceptance_paths.is_empty() {
             missing.push("structured_acceptance_criteria");
         }
         let latest_package = self
@@ -135,6 +146,7 @@ impl MorrowsMcp {
             "task": task, "project": project, "context": context,
             "memory": memory, "instructions": instructions, "collaboration": collaboration,
             "missing_context": missing, "persisted_package": package_ref, "execution": execution,
+            "acceptance_criteria_paths": acceptance_paths,
             "read_more": {"memory": "memory_get", "instructions": "instructions_get", "collaboration": "task_collaboration", "events": "task_events", "execution": "task_get"},
         }).to_string())
     }
@@ -238,6 +250,22 @@ pub struct TaskPageRequest {
 }
 
 #[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct MemoryRequest {
+    pub task_id: String,
+    /// Omit for the current context; select an immutable revision belonging to this task.
+    pub context_revision_id: Option<String>,
+    /// Include superseded visible long-term memories, retaining original content and provenance.
+    #[serde(default)]
+    pub include_superseded: bool,
+    /// Also return a newest-first page of full context revisions, with its own next_offset.
+    #[serde(default)]
+    pub include_context_history: bool,
+    /// Applies independently to long-term memory and requested context history.
+    #[serde(flatten)]
+    pub page: PageRequest,
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct CollaborationRequest {
     pub task_id: String,
     /// handoffs, artifacts, decisions, threads, messages, or dependencies; omitted returns all sections.
@@ -257,6 +285,9 @@ pub struct EventsRequest {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ProjectRequest {
     pub project_id: String,
+    /// Include superseded shared memory entries; defaults to current knowledge only.
+    #[serde(default)]
+    pub include_superseded: bool,
     /// Pagination applies to project/organization memory, not the project description.
     #[serde(flatten)]
     pub page: PageRequest,
@@ -453,12 +484,14 @@ impl MorrowsMcp {
             "filters": {"scope": if agent_id.is_some() { "assigned" } else { "all" }, "agent_instance_id": agent_id,
                 "project_id": project_id, "state": state, "include_completed": req.include_completed},
             "items": tasks.items, "next_offset": tasks.next_offset,
-            "empty_reason": if tasks.items.is_empty() { Some("No tasks match these filters; this is not a permission restriction. Use scope=all or include_completed=true to broaden discovery.") } else { None },
+            "empty_reason": if !tasks.items.is_empty() { None } else if req.page.offset > 0 {
+                Some("No tasks at this offset. Restart at offset=0 with the same filters to refresh this live listing.")
+            } else { Some("No tasks match these filters; this is not a permission restriction. Use scope=all or include_completed=true to broaden discovery.") },
         }).to_string())
     }
 
     #[tool(
-        description = "List all project summaries, with description previews capped at 240 characters. Follow next_offset; project_get returns full background and current shared memory."
+        description = "List all project summaries, with description_preview capped at 240 characters and an explicit description_truncated flag. Follow next_offset; project_get returns full background and shared memory."
     )]
     async fn project_list(
         &self,
@@ -478,7 +511,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Read any project's full background and a page of current shared organization/project memory. Use task_list(scope=all, project_id=...) to discover its work."
+        description = "Read any project's full background and a page of shared organization/project memory. Defaults to current memory; include_superseded exposes history with provenance. Use task_list(scope=all, project_id=...) to discover its work."
     )]
     async fn project_get(
         &self,
@@ -501,12 +534,13 @@ impl MorrowsMcp {
                 None,
                 Some(project_id),
                 None,
+                req.include_superseded,
                 req.page.limit,
                 req.page.offset,
             )
             .await
             .map_err(|e| e.to_string())?;
-        Ok(json!({"project": project, "memory": memory}).to_string())
+        Ok(json!({"project": project, "memory": memory, "include_superseded": req.include_superseded}).to_string())
     }
 
     #[tool(
@@ -991,11 +1025,11 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Read current context and a page of current visible memories for any task. No message history; use task_collaboration separately."
+        description = "Read a task's current context and visible long-term memory. include_superseded retrieves replaced memory; include_context_history pages full context revisions; context_revision_id selects one revision. Each history keeps its provenance. Message history is available through task_collaboration."
     )]
     async fn memory_get(
         &self,
-        Parameters(req): Parameters<TaskPageRequest>,
+        Parameters(req): Parameters<MemoryRequest>,
         Extension(parts): Extension<Parts>,
     ) -> Result<String, String> {
         let task_id = parse_id(&req.task_id)?;
@@ -1006,32 +1040,56 @@ impl MorrowsMcp {
             .get_task(task_id)
             .await
             .map_err(|e| e.to_string())?;
-        let context = match task.current_context_revision_id {
-            Some(_) => Some(
+        let revision_id = req
+            .context_revision_id
+            .as_deref()
+            .map(parse_id)
+            .transpose()?
+            .or(task.current_context_revision_id);
+        let context = match revision_id {
+            Some(id) => Some(
                 self.store
-                    .get_current_context(task_id)
+                    .get_context_revision(id)
                     .await
                     .map_err(|e| e.to_string())?,
             ),
             None => None,
         };
+        if context.as_ref().is_some_and(|c| c.task_id != task_id) {
+            return Err("context_revision_id does not belong to task_id".into());
+        }
         let long_term_memory = self
             .store
             .context_memories_page(
                 Some(task_id),
                 task.project_id,
                 Some(agent_id),
+                req.include_superseded,
                 req.page.limit,
                 req.page.offset,
             )
             .await
             .map_err(|e| e.to_string())?;
-        serde_json::to_string(&json!({
+        let mut result = json!({
             "task_id": task.id,
             "long_term_memory": long_term_memory.items, "next_offset": long_term_memory.next_offset,
-            "context": context,
-        }))
-        .map_err(|e| e.to_string())
+            "context": context, "current_context_revision_id": task.current_context_revision_id,
+            "context_is_current": revision_id == task.current_context_revision_id,
+            "include_superseded": req.include_superseded,
+        });
+        // Context revisions and durable memory evolve independently. Selecting an
+        // old context does not reconstruct memory at that time; history is explicit
+        // and each collection carries its own continuation offset and provenance.
+        if req.include_context_history {
+            result["context_history"] = serde_json::to_value(
+                self.store
+                    .context_revisions_page(task_id, req.page.limit, req.page.offset)
+                    .await
+                    .map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        Ok(result.to_string())
     }
 
     #[tool(
@@ -1706,7 +1764,7 @@ mod tests {
         let mcp = MorrowsMcp::new(store);
         let value: Value = serde_json::from_str(
             &mcp.memory_get(
-                Parameters(TaskPageRequest {
+                Parameters(MemoryRequest {
                     task_id: task.id.to_string(),
                     ..Default::default()
                 }),

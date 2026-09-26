@@ -2,14 +2,16 @@ use super::*;
 use morrows_core::{CreateMemoryEntry, MemoryEntry};
 
 impl Store {
-    /// Materialize current visible knowledge, retaining the caller's private
-    /// agent memory but never another agent's. Superseded entries remain in the
-    /// audit APIs; a private replacement cannot hide a still-visible shared fact.
+    /// Materialize visible knowledge, retaining the caller's private agent memory
+    /// but never another agent's. History mode includes superseded entries with
+    /// their original provenance; the default excludes only visible replacements,
+    /// so a private replacement cannot hide a still-visible shared fact.
     pub async fn context_memories_page(
         &self,
         task_id: Option<Id>,
         project_id: Option<Id>,
         agent_id: Option<Id>,
+        include_superseded: bool,
         limit: i64,
         offset: i64,
     ) -> Result<morrows_core::Page<MemoryEntry>, DomainError> {
@@ -21,15 +23,16 @@ impl Store {
                  OR (m.scope_type='project' AND m.project_id=?)
                  OR (m.scope_type='task' AND m.task_id=?)
              )) OR (m.scope_type='agent' AND m.agent_instance_id=?))
-             AND NOT EXISTS (SELECT 1 FROM memory_entries newer
+             AND (? OR NOT EXISTS (SELECT 1 FROM memory_entries newer
                  WHERE newer.supersedes_memory_id=m.id
                    AND (newer.visibility='shared'
-                        OR (newer.scope_type='agent' AND newer.agent_instance_id=?)))
+                        OR (newer.scope_type='agent' AND newer.agent_instance_id=?))))
              ORDER BY m.created_at DESC,m.id DESC LIMIT ? OFFSET ?",
         )
         .bind(project_id.map(|id| id.to_string()))
         .bind(task_id.map(|id| id.to_string()))
         .bind(agent_id.map(|id| id.to_string()))
+        .bind(include_superseded)
         .bind(agent_id.map(|id| id.to_string()))
         .bind(limit + 1)
         .bind(offset)

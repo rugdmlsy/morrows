@@ -325,6 +325,19 @@ async fn task_list_pages_are_bounded_and_do_not_duplicate_full_descriptions() {
         }
     }
     assert_eq!(seen.len(), 5);
+    let exhausted = value(
+        mcp.task_list(
+            request(json!({"scope":"all", "offset":5})),
+            caller(Some(agent.id)),
+        )
+        .await,
+    );
+    assert!(
+        exhausted["empty_reason"]
+            .as_str()
+            .unwrap()
+            .contains("offset=0")
+    );
     for args in [
         json!({"limit":0}),
         json!({"limit":101}),
@@ -439,6 +452,170 @@ async fn live_context_includes_background_and_current_visible_memory_without_his
     );
     assert_eq!(project_view["memory"]["items"].as_array().unwrap().len(), 1);
     assert_eq!(project_view["memory"]["items"][0]["id"], json!(current.id));
+
+    // A compact current view must not remove the employee's route to older
+    // evidence. History is paginated and still enforces private-memory isolation.
+    let newer_revision = store
+        .create_context_revision(
+            t.id,
+            serde_json::from_value(json!({
+                "goal":"Revised goal", "background":"Additional evidence"
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let mut seen_memories = std::collections::HashSet::new();
+    let mut seen_revisions = std::collections::HashSet::new();
+    let mut offset = 0;
+    loop {
+        let history = value(
+            mcp.memory_get(
+                request(json!({
+                    "task_id":t.id, "context_revision_id":revision.id,
+                    "include_superseded":true, "include_context_history":true,
+                    "limit":1, "offset":offset
+                })),
+                caller(Some(b.id)),
+            )
+            .await,
+        );
+        assert_eq!(history["context"]["id"], json!(revision.id));
+        assert_eq!(history["context"]["background"], "Why this task matters");
+        assert_eq!(
+            history["current_context_revision_id"],
+            json!(newer_revision.id)
+        );
+        assert_eq!(history["context_is_current"], false);
+        assert!(!history.to_string().contains("author secret"));
+        for memory in history["long_term_memory"].as_array().unwrap() {
+            assert!(seen_memories.insert(memory["id"].as_str().unwrap().to_string()));
+            if memory["id"] == json!(old.id) {
+                assert_eq!(memory["content"], "old");
+                assert_eq!(memory["source_kind"], "manual");
+            }
+        }
+        for context in history["context_history"]["items"].as_array().unwrap() {
+            assert!(seen_revisions.insert(context["id"].as_str().unwrap().to_string()));
+            assert!(context["background"].is_string());
+        }
+        let next = [
+            history["next_offset"].as_i64(),
+            history["context_history"]["next_offset"].as_i64(),
+        ]
+        .into_iter()
+        .flatten()
+        .max();
+        match next {
+            Some(next) => offset = next,
+            None => break,
+        }
+    }
+    assert_eq!(seen_memories.len(), 3);
+    assert!(seen_memories.contains(&old.id.to_string()));
+    assert_eq!(seen_revisions.len(), 2);
+    let other = task(&store, "Different task", None, TaskState::Ready).await;
+    assert!(
+        mcp.memory_get(
+            request(json!({
+                "task_id":other.id, "context_revision_id":revision.id
+            })),
+            caller(Some(b.id))
+        )
+        .await
+        .unwrap_err()
+        .contains("does not belong")
+    );
+    let project_history = value(
+        mcp.project_get(
+            request(json!({
+                "project_id":project.id, "include_superseded":true
+            })),
+            caller(Some(b.id)),
+        )
+        .await,
+    );
+    assert_eq!(
+        project_history["memory"]["items"].as_array().unwrap().len(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn project_previews_are_explicit_and_full_text_remains_readable() {
+    let store = Store::connect("sqlite::memory:").await.unwrap();
+    let agent = store.register_agent("project-reader", &[]).await.unwrap();
+    let description = "背景内容".repeat(100);
+    let project = store
+        .create_project(CreateProject {
+            name: "Long background".into(),
+            description: description.clone(),
+        })
+        .await
+        .unwrap();
+    let mcp = MorrowsMcp::new(store);
+    let page = value(
+        mcp.project_list(request(json!({})), caller(Some(agent.id)))
+            .await,
+    );
+    let preview = &page["items"][0];
+    assert_eq!(
+        preview["description_preview"]
+            .as_str()
+            .unwrap()
+            .chars()
+            .count(),
+        240
+    );
+    assert_eq!(preview["description_truncated"], true);
+    assert!(preview.get("description").is_none());
+    let full = value(
+        mcp.project_get(
+            request(json!({"project_id":project.id})),
+            caller(Some(agent.id)),
+        )
+        .await,
+    );
+    assert_eq!(full["project"]["description"], description);
+}
+
+#[tokio::test]
+async fn imported_freeze_gates_are_recognized_without_inventing_verified_results() {
+    let store = Store::connect("sqlite::memory:").await.unwrap();
+    let agent = store.register_agent("gate-reader", &[]).await.unwrap();
+    let t = task(&store, "Freeze audit", None, TaskState::Ready).await;
+    let gates = json!([
+        "audit_complete",
+        "all regressions explained",
+        "canary gates pass"
+    ]);
+    store
+        .create_context_revision(
+            t.id,
+            serde_json::from_value(json!({
+                "constraints":{"freeze_requires":gates, "acceptance_criteria":{}}
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let mcp = MorrowsMcp::new(store);
+    let context = value(
+        mcp.task_context(request(json!({"task_id":t.id})), caller(Some(agent.id)))
+            .await,
+    );
+    assert_eq!(
+        context["acceptance_criteria_paths"],
+        json!(["context.constraints.freeze_requires"])
+    );
+    assert!(
+        !context["missing_context"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("structured_acceptance_criteria"))
+    );
+    assert_eq!(context["context"]["constraints"]["freeze_requires"], gates);
+    assert!(context.get("verified_results").is_none());
 }
 
 #[tokio::test]

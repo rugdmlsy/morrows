@@ -1,5 +1,5 @@
 use super::*;
-use morrows_core::{Page, TaskQuery, TaskSummary};
+use morrows_core::{Page, ProjectSummary, TaskQuery, TaskSummary};
 
 pub(crate) fn validate_page(limit: i64, offset: i64) -> Result<(), DomainError> {
     if !(1..=100).contains(&limit) || !(0..=i64::MAX - 100).contains(&offset) {
@@ -128,10 +128,11 @@ impl Store {
         &self,
         limit: i64,
         offset: i64,
-    ) -> Result<Page<Project>, DomainError> {
+    ) -> Result<Page<ProjectSummary>, DomainError> {
         validate_page(limit, offset)?;
         let rows = sqlx::query(
-            "SELECT id,name,substr(description,1,240) AS description,status,created_at,updated_at
+            "SELECT id,name,substr(description,1,240) AS description_preview,
+                    length(description)>240 AS description_truncated,status,created_at,updated_at
              FROM projects ORDER BY status, name COLLATE NOCASE, id LIMIT ? OFFSET ?",
         )
         .bind(limit + 1)
@@ -141,7 +142,41 @@ impl Store {
         .map_err(storage)?;
         let items = rows
             .into_iter()
-            .map(row_to_project)
+            .map(|r| {
+                Ok(ProjectSummary {
+                    id: parse_id(r.try_get("id").map_err(storage)?)?,
+                    name: r.try_get("name").map_err(storage)?,
+                    description_preview: r.try_get("description_preview").map_err(storage)?,
+                    description_truncated: r.try_get("description_truncated").map_err(storage)?,
+                    status: r.try_get("status").map_err(storage)?,
+                    created_at: parse_dt(r.try_get("created_at").map_err(storage)?)?,
+                    updated_at: parse_dt(r.try_get("updated_at").map_err(storage)?)?,
+                })
+            })
+            .collect::<Result<Vec<_>, DomainError>>()?;
+        Ok(Page::from_extra_row(items, limit, offset))
+    }
+
+    pub async fn context_revisions_page(
+        &self,
+        task_id: Id,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Page<ContextRevision>, DomainError> {
+        validate_page(limit, offset)?;
+        self.get_task(task_id).await?;
+        let rows = sqlx::query(
+            "SELECT * FROM context_revisions WHERE task_id=? ORDER BY version DESC LIMIT ? OFFSET ?",
+        )
+        .bind(task_id.to_string())
+        .bind(limit + 1)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage)?;
+        let items = rows
+            .into_iter()
+            .map(row_to_context_revision)
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Page::from_extra_row(items, limit, offset))
     }
