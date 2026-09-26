@@ -3,7 +3,7 @@ use morrows_core::{
     CreateArtifact, CreateDecision, CreateHandoff, CreateMessage, CreateSessionSummaryRevision,
     CreateThread, SessionHistoryRequest, SessionReply,
 };
-use morrows_core::{CreateContextRevision, CreateTask, Id, TaskState};
+use morrows_core::{CreateContextRevision, CreateTask, Id, TaskQuery, TaskState};
 use morrows_store::Store;
 use rmcp::{
     ServerHandler,
@@ -30,7 +30,116 @@ impl MorrowsMcp {
         }
     }
 
-    async fn ensure_task_access(&self, task_id: Id, agent_id: Id) -> Result<(), String> {
+    async fn ensure_task_read_access(&self, task_id: Id, agent_id: Id) -> Result<(), String> {
+        self.store
+            .get_agent(agent_id)
+            .await
+            .map_err(|e| e.to_string())?;
+        self.store
+            .get_task(task_id)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Assemble a live reading view without persisting or acknowledging anything.
+    /// The full task/current revision is authoritative; historical collections are
+    /// bounded and carry offsets so missing context is never silently discarded.
+    /// Persisted packages remain separate immutable evidence and may be older.
+    async fn load_task_context(&self, task_id: Id, agent_id: Id) -> Result<String, String> {
+        let task = self
+            .store
+            .get_task(task_id)
+            .await
+            .map_err(|e| e.to_string())?;
+        let project = match task.project_id {
+            Some(id) => Some(
+                self.store
+                    .get_project(id)
+                    .await
+                    .map_err(|e| e.to_string())?,
+            ),
+            None => None,
+        };
+        let context = if task.current_context_revision_id.is_some() {
+            Some(
+                self.store
+                    .get_current_context(task_id)
+                    .await
+                    .map_err(|e| e.to_string())?,
+            )
+        } else {
+            None
+        };
+        let memory = self
+            .store
+            .context_memories_page(Some(task_id), task.project_id, Some(agent_id), 20, 0)
+            .await
+            .map_err(|e| e.to_string())?;
+        let instructions = self
+            .store
+            .task_launch_instructions_page(task_id, 20, 0)
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut collaboration = serde_json::Map::new();
+        for section in ["handoffs", "decisions", "artifacts", "dependencies"] {
+            let page = self
+                .store
+                .task_collaboration_page(task_id, Some(section), 5, 0)
+                .await
+                .map_err(|e| e.to_string())?;
+            collaboration.insert(section.into(), page[section].clone());
+        }
+        let mut missing = Vec::new();
+        if task.description.trim().is_empty() {
+            missing.push("task_description");
+        }
+        if project
+            .as_ref()
+            .is_none_or(|p| p.description.trim().is_empty())
+        {
+            missing.push("project_background");
+        }
+        if context
+            .as_ref()
+            .is_none_or(|c| c.background.trim().is_empty())
+        {
+            missing.push("context_background");
+        }
+        let acceptance = context
+            .as_ref()
+            .and_then(|c| c.constraints.get("acceptance_criteria"));
+        if acceptance.is_none_or(|v| {
+            v.is_null()
+                || v.as_str().is_some_and(|s| s.trim().is_empty())
+                || v.as_array().is_some_and(Vec::is_empty)
+        }) {
+            missing.push("structured_acceptance_criteria");
+        }
+        let latest_package = self
+            .store
+            .get_latest_context_package(task_id)
+            .await
+            .map_err(|e| e.to_string())?;
+        let execution = self
+            .store
+            .task_execution_page(task_id, agent_id, 5, 0)
+            .await
+            .map_err(|e| e.to_string())?;
+        let package_ref = latest_package.map(|p| json!({
+            "id": p.id, "created_at": p.created_at,
+            "context_snapshot_id": p.context_snapshot_id,
+            "context_matches_current": p.context_snapshot_id == task.current_context_revision_id,
+        }));
+        Ok(json!({
+            "task": task, "project": project, "context": context,
+            "memory": memory, "instructions": instructions, "collaboration": collaboration,
+            "missing_context": missing, "persisted_package": package_ref, "execution": execution,
+            "read_more": {"memory": "memory_get", "instructions": "instructions_get", "collaboration": "task_collaboration", "events": "task_events", "execution": "task_get"},
+        }).to_string())
+    }
+
+    async fn ensure_task_write_access(&self, task_id: Id, agent_id: Id) -> Result<(), String> {
         self.store
             .get_agent(agent_id)
             .await
@@ -72,6 +181,85 @@ impl MorrowsMcp {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct TaskIdRequest {
     pub task_id: String,
+}
+
+fn default_limit() -> i64 {
+    20
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PageRequest {
+    /// Page size, 1..100. Defaults to 20.
+    #[serde(default = "default_limit")]
+    pub limit: i64,
+    #[serde(default)]
+    pub offset: i64,
+}
+
+impl Default for PageRequest {
+    fn default() -> Self {
+        Self {
+            limit: default_limit(),
+            offset: 0,
+        }
+    }
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskListScope {
+    #[default]
+    Assigned,
+    All,
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct TaskListRequest {
+    /// Defaults to assigned; all explicitly searches every task.
+    #[serde(default)]
+    pub scope: TaskListScope,
+    /// In assigned scope, defaults to the authenticated agent.
+    pub agent_instance_id: Option<String>,
+    pub project_id: Option<String>,
+    /// backlog, ready, in_progress, review, blocked, done, or cancelled.
+    pub state: Option<String>,
+    /// Include done/cancelled tasks. An explicit state overrides this flag.
+    #[serde(default)]
+    pub include_completed: bool,
+    #[serde(flatten)]
+    pub page: PageRequest,
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct TaskPageRequest {
+    pub task_id: String,
+    #[serde(flatten)]
+    pub page: PageRequest,
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct CollaborationRequest {
+    pub task_id: String,
+    /// handoffs, artifacts, decisions, threads, messages, or dependencies; omitted returns all sections.
+    pub section: Option<String>,
+    #[serde(flatten)]
+    pub page: PageRequest,
+}
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct EventsRequest {
+    pub task_id: String,
+    pub event_type: Option<String>,
+    #[serde(flatten)]
+    pub page: PageRequest,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ProjectRequest {
+    pub project_id: String,
+    /// Pagination applies to project/organization memory, not the project description.
+    #[serde(flatten)]
+    pub page: PageRequest,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -196,7 +384,147 @@ pub struct ReviseSessionSummaryRequest {
 #[tool_router(router = tool_router)]
 impl MorrowsMcp {
     #[tool(
-        description = "List direct company sessions with queued human messages addressed to the authenticated employee. Returns summaries only; use session_get to load one history. Requires authenticated Agent identity."
+        description = "Identify the authenticated agent and the default discovery scope. Does not return credentials."
+    )]
+    async fn whoami(&self, Extension(parts): Extension<Parts>) -> Result<String, String> {
+        let agent = self
+            .store
+            .get_agent(authenticated_agent(&parts)?)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(json!({
+            "agent_instance_id": agent.id, "name": agent.name,
+            "display_name": agent.display_name, "status": agent.status,
+            "default_task_scope": "assigned", "can_query_other_tasks": true,
+            "start_here": "task_list; use scope=all to discover other tasks; then task_context"
+        })
+        .to_string())
+    }
+
+    #[tool(
+        description = "List compact task summaries. Defaults to unfinished tasks assigned to the caller, including expired leases. Use scope=all for all tasks, or agent_instance_id for another agent. Filter by project_id/state and follow next_offset."
+    )]
+    async fn task_list(
+        &self,
+        Parameters(req): Parameters<TaskListRequest>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<String, String> {
+        let caller = authenticated_agent(&parts)?;
+        self.store
+            .get_agent(caller)
+            .await
+            .map_err(|e| e.to_string())?;
+        let agent_id = match req.scope {
+            TaskListScope::Assigned => Some(
+                req.agent_instance_id
+                    .as_deref()
+                    .map(parse_id)
+                    .transpose()?
+                    .unwrap_or(caller),
+            ),
+            TaskListScope::All if req.agent_instance_id.is_some() => {
+                return Err("agent_instance_id requires scope=assigned".into());
+            }
+            TaskListScope::All => None,
+        };
+        let project_id = req.project_id.as_deref().map(parse_id).transpose()?;
+        let state = req
+            .state
+            .as_deref()
+            .map(str::parse::<TaskState>)
+            .transpose()
+            .map_err(|e| e.to_string())?;
+        let tasks = self
+            .store
+            .query_tasks(
+                &TaskQuery {
+                    agent_instance_id: agent_id,
+                    project_id,
+                    state,
+                    include_completed: req.include_completed,
+                },
+                req.page.limit,
+                req.page.offset,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(json!({
+            "caller_agent_instance_id": caller,
+            "filters": {"scope": if agent_id.is_some() { "assigned" } else { "all" }, "agent_instance_id": agent_id,
+                "project_id": project_id, "state": state, "include_completed": req.include_completed},
+            "items": tasks.items, "next_offset": tasks.next_offset,
+            "empty_reason": if tasks.items.is_empty() { Some("No tasks match these filters; this is not a permission restriction. Use scope=all or include_completed=true to broaden discovery.") } else { None },
+        }).to_string())
+    }
+
+    #[tool(
+        description = "List all project summaries, with description previews capped at 240 characters. Follow next_offset; project_get returns full background and current shared memory."
+    )]
+    async fn project_list(
+        &self,
+        Parameters(req): Parameters<PageRequest>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<String, String> {
+        self.store
+            .get_agent(authenticated_agent(&parts)?)
+            .await
+            .map_err(|e| e.to_string())?;
+        let page = self
+            .store
+            .projects_page(req.limit, req.offset)
+            .await
+            .map_err(|e| e.to_string())?;
+        serde_json::to_string(&page).map_err(|e| e.to_string())
+    }
+
+    #[tool(
+        description = "Read any project's full background and a page of current shared organization/project memory. Use task_list(scope=all, project_id=...) to discover its work."
+    )]
+    async fn project_get(
+        &self,
+        Parameters(req): Parameters<ProjectRequest>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<String, String> {
+        self.store
+            .get_agent(authenticated_agent(&parts)?)
+            .await
+            .map_err(|e| e.to_string())?;
+        let project_id = parse_id(&req.project_id)?;
+        let project = self
+            .store
+            .get_project(project_id)
+            .await
+            .map_err(|e| e.to_string())?;
+        let memory = self
+            .store
+            .context_memories_page(
+                None,
+                Some(project_id),
+                None,
+                req.page.limit,
+                req.page.offset,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(json!({"project": project, "memory": memory}).to_string())
+    }
+
+    #[tool(
+        description = "Start work here: read fresh task/project background, current context and memory, latest handoff, decisions, artifacts, dependencies and instructions. Reports missing background/structured acceptance criteria. Bounded sections include continuation offsets; no message/event history and no writes."
+    )]
+    async fn task_context(
+        &self,
+        Parameters(req): Parameters<TaskIdRequest>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<String, String> {
+        let task_id = parse_id(&req.task_id)?;
+        let agent_id = authenticated_agent(&parts)?;
+        self.ensure_task_read_access(task_id, agent_id).await?;
+        self.load_task_context(task_id, agent_id).await
+    }
+
+    #[tool(
+        description = "List direct company sessions with queued human messages addressed to the authenticated employee. Returns summaries only; use session_get to load one history."
     )]
     async fn session_inbox(&self, Extension(parts): Extension<Parts>) -> Result<String, String> {
         let value = self
@@ -208,7 +536,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Read one direct company session addressed to the authenticated employee. History is paged; before_message_id loads older messages and after_message_id loads newer messages. Requires authenticated Agent identity."
+        description = "Read one direct company session addressed to the authenticated employee. History is paged; before_message_id loads older messages and after_message_id loads newer messages."
     )]
     async fn session_get(
         &self,
@@ -236,7 +564,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Reply to a direct company session addressed to the authenticated employee. The reply marks queued human messages in that session delivered. Requires authenticated Agent identity."
+        description = "Reply to a direct company session addressed to the authenticated employee. The reply marks queued human messages in that session delivered."
     )]
     async fn session_reply(
         &self,
@@ -256,7 +584,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Read the latest structured summary revision for a direct company session addressed to the authenticated employee. Requires authenticated Agent identity."
+        description = "Read the latest structured summary revision for a direct company session addressed to the authenticated employee."
     )]
     async fn session_summary_get(
         &self,
@@ -282,7 +610,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Create a new structured summary revision for a direct company session addressed to the authenticated employee. Morrows automatically links the previous summary revision and covers the latest message currently in the session. Requires authenticated Agent identity."
+        description = "Create a new structured summary revision for a direct company session addressed to the authenticated employee. Morrows automatically links the previous summary revision and covers the latest message currently in the session."
     )]
     async fn session_summary_revise(
         &self,
@@ -335,7 +663,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "List durable Morrows deliveries queued for the authenticated employee. A delivery references an existing session message or launch instruction; process the referenced source and then call delivery_ack. Requires authenticated Agent identity."
+        description = "List durable Morrows deliveries queued for the authenticated employee. A delivery references an existing session message or launch instruction; process the referenced source and then call delivery_ack."
     )]
     async fn delivery_inbox(
         &self,
@@ -352,7 +680,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Acknowledge one durable Morrows delivery after the authenticated employee or its provider bridge has received it. A delivery can only be acknowledged by its target AgentInstance. Requires authenticated Agent identity."
+        description = "Acknowledge one durable Morrows delivery after the authenticated employee or its provider bridge has received it. A delivery can only be acknowledged by its target AgentInstance."
     )]
     async fn delivery_ack(
         &self,
@@ -373,24 +701,28 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Read management instructions for a work item owned by or assigned to the authenticated employee. Requires authenticated Agent identity."
+        description = "Read management instructions for any task. Only the caller's deliveries are acknowledged."
     )]
     async fn instructions_get(
         &self,
-        Parameters(req): Parameters<TaskIdRequest>,
+        Parameters(req): Parameters<TaskPageRequest>,
         Extension(parts): Extension<Parts>,
     ) -> Result<String, String> {
         let task_id = parse_id(&req.task_id)?;
         let agent_id = authenticated_agent(&parts)?;
-        self.ensure_task_access(task_id, agent_id).await?;
+        self.ensure_task_read_access(task_id, agent_id).await?;
         let value = self
             .store
-            .task_launch_instructions(task_id)
+            .task_launch_instructions_page(task_id, req.page.limit, req.page.offset)
             .await
             .map_err(|e| e.to_string())?;
         self.store
-            .acknowledge_instruction_deliveries_for_task(
-                task_id,
+            .acknowledge_instruction_deliveries_for_ids(
+                &value
+                    .items
+                    .iter()
+                    .map(|instruction| instruction.id)
+                    .collect::<Vec<_>>(),
                 agent_id,
                 &format!("instructions_get:{agent_id}"),
             )
@@ -400,7 +732,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Atomically accept a pending handoff with a live same-task target run owned by the caller. Requires authenticated Agent identity."
+        description = "Atomically accept a pending handoff with a live same-task target run owned by the caller."
     )]
     async fn handoff_accept(
         &self,
@@ -418,7 +750,7 @@ impl MorrowsMcp {
             .map_err(|e| e.to_string())?;
         serde_json::to_string(&value).map_err(|e| e.to_string())
     }
-    #[tool(description = "Create a durable artifact. Requires authenticated Agent identity.")]
+    #[tool(description = "Create a durable artifact.")]
 
     async fn artifact_create(
         &self,
@@ -427,7 +759,7 @@ impl MorrowsMcp {
     ) -> Result<String, String> {
         let task_id = parse_id(&req.task_id)?;
         let agent_id = authenticated_agent(&parts)?;
-        self.ensure_task_access(task_id, agent_id).await?;
+        self.ensure_task_write_access(task_id, agent_id).await?;
         let value = self
             .store
             .create_artifact(task_id, agent_id, req.input)
@@ -435,7 +767,7 @@ impl MorrowsMcp {
             .map_err(|e| e.to_string())?;
         serde_json::to_string(&value).map_err(|e| e.to_string())
     }
-    #[tool(description = "Create a durable decision. Requires authenticated Agent identity.")]
+    #[tool(description = "Create a durable decision.")]
     async fn decision_create(
         &self,
         Parameters(req): Parameters<CreateDecisionRequest>,
@@ -443,7 +775,7 @@ impl MorrowsMcp {
     ) -> Result<String, String> {
         let task_id = parse_id(&req.task_id)?;
         let agent_id = authenticated_agent(&parts)?;
-        self.ensure_task_access(task_id, agent_id).await?;
+        self.ensure_task_write_access(task_id, agent_id).await?;
         let value = self
             .store
             .create_decision(task_id, agent_id, req.input)
@@ -451,7 +783,7 @@ impl MorrowsMcp {
             .map_err(|e| e.to_string())?;
         serde_json::to_string(&value).map_err(|e| e.to_string())
     }
-    #[tool(description = "Create a durable thread. Requires authenticated Agent identity.")]
+    #[tool(description = "Create a durable thread.")]
     async fn thread_create(
         &self,
         Parameters(req): Parameters<CreateThreadRequest>,
@@ -459,7 +791,7 @@ impl MorrowsMcp {
     ) -> Result<String, String> {
         let task_id = parse_id(&req.task_id)?;
         let agent_id = authenticated_agent(&parts)?;
-        self.ensure_task_access(task_id, agent_id).await?;
+        self.ensure_task_write_access(task_id, agent_id).await?;
         let value = self
             .store
             .create_thread(task_id, agent_id, req.input)
@@ -467,7 +799,7 @@ impl MorrowsMcp {
             .map_err(|e| e.to_string())?;
         serde_json::to_string(&value).map_err(|e| e.to_string())
     }
-    #[tool(description = "Create a durable message. Requires authenticated Agent identity.")]
+    #[tool(description = "Create a durable message.")]
     async fn message_create(
         &self,
         Parameters(req): Parameters<CreateMessageRequest>,
@@ -476,7 +808,7 @@ impl MorrowsMcp {
         let task_id = parse_id(&req.task_id)?;
         let thread_id = parse_id(&req.thread_id)?;
         let agent_id = authenticated_agent(&parts)?;
-        self.ensure_task_access(task_id, agent_id).await?;
+        self.ensure_task_write_access(task_id, agent_id).await?;
         let threads = self
             .store
             .task_threads(task_id)
@@ -493,7 +825,7 @@ impl MorrowsMcp {
         serde_json::to_string(&value).map_err(|e| e.to_string())
     }
     #[tool(
-        description = "Create a durable handoff. Requires authenticated Agent identity. Atomically ends source runs and releases assignment; requires task context."
+        description = "Create a durable handoff. Atomically ends source runs and releases assignment; requires task context."
     )]
     async fn handoff_create(
         &self,
@@ -512,19 +844,24 @@ impl MorrowsMcp {
         serde_json::to_string(&value).map_err(|e| e.to_string())
     }
     #[tool(
-        description = "Read all handoffs, artifacts, decisions, message threads/messages and dependencies for a task."
+        description = "Read bounded collaboration pages for any task, newest first. Select a section and follow its next_offset to load more."
     )]
     async fn task_collaboration(
         &self,
-        Parameters(req): Parameters<TaskIdRequest>,
+        Parameters(req): Parameters<CollaborationRequest>,
         Extension(parts): Extension<Parts>,
     ) -> Result<String, String> {
         let task_id = parse_id(&req.task_id)?;
         let agent_id = authenticated_agent(&parts)?;
-        self.ensure_task_access(task_id, agent_id).await?;
+        self.ensure_task_read_access(task_id, agent_id).await?;
         let value = self
             .store
-            .task_collaboration(task_id)
+            .task_collaboration_page(
+                task_id,
+                req.section.as_deref(),
+                req.page.limit,
+                req.page.offset,
+            )
             .await
             .map_err(|e| e.to_string())?;
         serde_json::to_string(&value).map_err(|e| e.to_string())
@@ -543,32 +880,39 @@ impl MorrowsMcp {
             .get_handoff(parse_id(&req.handoff_id)?)
             .await
             .map_err(|e| e.to_string())?;
-        self.ensure_task_access(value.handoff.task_id, agent_id)
+        self.ensure_task_read_access(value.handoff.task_id, agent_id)
             .await?;
         serde_json::to_string(&value).map_err(|e| e.to_string())
     }
 
     #[tool(
-        description = "Read a work item owned by or assigned to the authenticated employee. Requires authenticated Agent identity."
+        description = "Read any task by ID with paged assignment metadata and the caller's executions/checkpoints. Use task_context for project background and working context."
     )]
     async fn task_get(
         &self,
-        Parameters(req): Parameters<TaskIdRequest>,
+        Parameters(req): Parameters<TaskPageRequest>,
         Extension(parts): Extension<Parts>,
     ) -> Result<String, String> {
         let task_id = parse_id(&req.task_id)?;
         let agent_id = authenticated_agent(&parts)?;
-        self.ensure_task_access(task_id, agent_id).await?;
+        self.ensure_task_read_access(task_id, agent_id).await?;
         let task = self
             .store
             .get_task(task_id)
             .await
             .map_err(|e| e.to_string())?;
-        serde_json::to_string(&task).map_err(|e| e.to_string())
+        let execution = self
+            .store
+            .task_execution_page(task_id, agent_id, req.page.limit, req.page.offset)
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut value = serde_json::to_value(&task).map_err(|e| e.to_string())?;
+        value["execution"] = execution;
+        Ok(value.to_string())
     }
 
     #[tool(
-        description = "Submit a work request to Morrows for company scheduling. The caller becomes the request owner; employees cannot set dispatch priority or claim the work themselves. Requires authenticated Agent identity."
+        description = "Submit a work request to Morrows for company scheduling. The caller becomes the request owner; employees cannot set dispatch priority or claim the work themselves."
     )]
     async fn work_request_submit(
         &self,
@@ -647,16 +991,16 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Pull the current durable working memory for a work item owned by, assigned to, or explicitly shared through an open Task Session with the authenticated employee. Requires authenticated Agent identity."
+        description = "Read current context and a page of current visible memories for any task. No message history; use task_collaboration separately."
     )]
     async fn memory_get(
         &self,
-        Parameters(req): Parameters<TaskIdRequest>,
+        Parameters(req): Parameters<TaskPageRequest>,
         Extension(parts): Extension<Parts>,
     ) -> Result<String, String> {
         let task_id = parse_id(&req.task_id)?;
         let agent_id = authenticated_agent(&parts)?;
-        self.ensure_task_access(task_id, agent_id).await?;
+        self.ensure_task_read_access(task_id, agent_id).await?;
         let task = self
             .store
             .get_task(task_id)
@@ -673,34 +1017,25 @@ impl MorrowsMcp {
         };
         let long_term_memory = self
             .store
-            .memories_for_task(task_id, agent_id)
+            .context_memories_page(
+                Some(task_id),
+                task.project_id,
+                Some(agent_id),
+                req.page.limit,
+                req.page.offset,
+            )
             .await
             .map_err(|e| e.to_string())?;
-        let collaboration = self
-            .store
-            .task_collaboration(task_id)
-            .await
-            .map_err(|e| e.to_string())?;
-        let my_runs = self
-            .store
-            .task_runs(task_id)
-            .await
-            .map_err(|e| e.to_string())?
-            .into_iter()
-            .filter(|run| run.agent_instance_id == agent_id)
-            .collect::<Vec<_>>();
         serde_json::to_string(&json!({
-            "task": task,
-            "long_term_memory": long_term_memory,
+            "task_id": task.id,
+            "long_term_memory": long_term_memory.items, "next_offset": long_term_memory.next_offset,
             "context": context,
-            "collaboration": collaboration,
-            "my_runs": my_runs,
         }))
         .map_err(|e| e.to_string())
     }
 
     #[tool(
-        description = "Write a new immutable working-memory revision for a work item owned by, assigned to, or explicitly shared through an open Task Session with the authenticated employee. Requires authenticated Agent identity."
+        description = "Write a new immutable working-memory revision for a work item owned by, assigned to, or explicitly shared through an open Task Session with the authenticated employee."
     )]
     async fn memory_revise(
         &self,
@@ -709,7 +1044,7 @@ impl MorrowsMcp {
     ) -> Result<String, String> {
         let task_id = parse_id(&req.task_id)?;
         let agent_id = authenticated_agent(&parts)?;
-        self.ensure_task_access(task_id, agent_id).await?;
+        self.ensure_task_write_access(task_id, agent_id).await?;
         let context = self
             .store
             .create_context_revision(
@@ -732,26 +1067,31 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Read the append-only event timeline for a work item owned by or assigned to the authenticated employee. Requires authenticated Agent identity."
+        description = "Read a page of task events, newest first. Optionally filter by event_type; follow next_offset."
     )]
     async fn task_events(
         &self,
-        Parameters(req): Parameters<TaskIdRequest>,
+        Parameters(req): Parameters<EventsRequest>,
         Extension(parts): Extension<Parts>,
     ) -> Result<String, String> {
         let task_id = parse_id(&req.task_id)?;
         let agent_id = authenticated_agent(&parts)?;
-        self.ensure_task_access(task_id, agent_id).await?;
+        self.ensure_task_read_access(task_id, agent_id).await?;
         let events = self
             .store
-            .task_events(task_id)
+            .task_events_page(
+                task_id,
+                req.event_type.as_deref(),
+                req.page.limit,
+                req.page.offset,
+            )
             .await
             .map_err(|e| e.to_string())?;
         serde_json::to_string(&events).map_err(|e| e.to_string())
     }
 
     #[tool(
-        description = "Read the assembled ContextPackage for a work item owned by or assigned to the authenticated employee, containing objective, pinned context snapshot, memory refs, decisions, artifacts, verification status, and next action. If not yet created, automatically assembles one from current durable state. Requires authenticated Agent identity."
+        description = "Read the latest persisted context package for any task; may be stale. If absent, returns null without writing. Start with task_context for fresh background."
     )]
     async fn context_package_get(
         &self,
@@ -760,25 +1100,17 @@ impl MorrowsMcp {
     ) -> Result<String, String> {
         let task_id = parse_id(&req.task_id)?;
         let agent_id = authenticated_agent(&parts)?;
-        self.ensure_task_access(task_id, agent_id).await?;
-        let package = match self
+        self.ensure_task_read_access(task_id, agent_id).await?;
+        let package = self
             .store
             .get_latest_context_package(task_id)
             .await
-            .map_err(|e| e.to_string())?
-        {
-            Some(pkg) => pkg,
-            None => self
-                .store
-                .assemble_context_package(task_id, None, Some(agent_id))
-                .await
-                .map_err(|e| e.to_string())?,
-        };
+            .map_err(|e| e.to_string())?;
         serde_json::to_string(&package).map_err(|e| e.to_string())
     }
 
     #[tool(
-        description = "Assemble and persist a fresh ContextPackage snapshot from current task state, decisions, artifacts, and handoffs. Requires authenticated Agent identity."
+        description = "Assemble and persist a fresh ContextPackage snapshot from current task state, decisions, artifacts, and handoffs."
     )]
     async fn context_package_assemble(
         &self,
@@ -787,7 +1119,7 @@ impl MorrowsMcp {
     ) -> Result<String, String> {
         let task_id = parse_id(&req.task_id)?;
         let agent_id = authenticated_agent(&parts)?;
-        self.ensure_task_access(task_id, agent_id).await?;
+        self.ensure_task_write_access(task_id, agent_id).await?;
         let package = self
             .store
             .assemble_context_package(task_id, None, Some(agent_id))
@@ -801,9 +1133,7 @@ impl MorrowsMcp {
 impl ServerHandler for MorrowsMcp {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
-            .with_instructions(
-                "Morrows employee interface. The company control plane owns registration, fleet state, dispatch, assignment, Run creation, launch, cancellation, and scheduling. Employees may read their durable delivery inbox and acknowledge deliveries, read/reply to direct company sessions, maintain structured summaries for sessions addressed to them, access work they own, have been assigned, or were explicitly shared through an open Task Session, pull/update working memory, receive instructions, collaborate, hand off work, renew an existing lease, and report progress or completion. Use the issued Bearer Agent credential; X-Agent-Instance-Id is an optional subject binding and must match when present. Loopback legacy mode may temporarily accept the identity header without a Bearer credential."
-            )
+            .with_instructions(include_str!("mcp_instructions.md"))
     }
 }
 
@@ -820,6 +1150,10 @@ fn authenticated_agent(parts: &Parts) -> Result<Id, String> {
         .map_err(|_| "invalid X-Agent-Instance-Id header".to_string())?;
     parse_id(raw)
 }
+
+#[cfg(test)]
+#[path = "mcp_discovery_tests.rs"]
+mod discovery_tests;
 
 #[cfg(test)]
 mod tests {
@@ -871,7 +1205,11 @@ mod tests {
             .unwrap();
         let mcp = MorrowsMcp::new(store.clone());
 
-        assert!(mcp.ensure_task_access(task.id, agent.id).await.is_err());
+        assert!(
+            mcp.ensure_task_write_access(task.id, agent.id)
+                .await
+                .is_err()
+        );
 
         let session = store
             .create_scoped_session(
@@ -884,7 +1222,11 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(mcp.ensure_task_access(task.id, agent.id).await.is_ok());
+        assert!(
+            mcp.ensure_task_write_access(task.id, agent.id)
+                .await
+                .is_ok()
+        );
 
         store
             .update_session_scope(
@@ -896,7 +1238,11 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(mcp.ensure_task_access(task.id, agent.id).await.is_err());
+        assert!(
+            mcp.ensure_task_write_access(task.id, agent.id)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -909,6 +1255,11 @@ mod tests {
             "session_reply",
             "work_request_submit",
             "task_get",
+            "whoami",
+            "task_list",
+            "project_list",
+            "project_get",
+            "task_context",
             "memory_get",
             "memory_revise",
             "instructions_get",
@@ -961,7 +1312,6 @@ mod tests {
             "external_launch_list",
             "external_launch_accept",
             "launch_instruction_send",
-            "task_list",
             "task_create",
             "task_claim",
             "run_start",
@@ -1231,11 +1581,52 @@ mod tests {
             1
         );
 
+        store
+            .send_launch_instruction(
+                morrows_core::SendLaunchInstruction {
+                    launch_attempt_id: attempt.id,
+                    body: "Second page".into(),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        let other = store.register_agent("other-reader", &[]).await.unwrap();
         let mcp = MorrowsMcp::new(store.clone());
+        // Inspecting someone else's task must not consume their deliveries.
+        mcp.instructions_get(
+            Parameters(TaskPageRequest {
+                task_id: task.id.to_string(),
+                ..Default::default()
+            }),
+            Extension(parts(Some(other.id))),
+        )
+        .await
+        .unwrap();
+        mcp.task_context(
+            Parameters(TaskIdRequest {
+                task_id: task.id.to_string(),
+            }),
+            Extension(parts(Some(agent.id))),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            store
+                .agent_delivery_inbox(agent.id, 20)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
         let instructions: Value = serde_json::from_str(
             &mcp.instructions_get(
-                Parameters(TaskIdRequest {
+                Parameters(TaskPageRequest {
                     task_id: task.id.to_string(),
+                    page: PageRequest {
+                        limit: 1,
+                        offset: 0,
+                    },
                 }),
                 Extension(parts(Some(agent.id))),
             )
@@ -1243,7 +1634,28 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        assert_eq!(instructions.as_array().unwrap().len(), 1);
+        assert_eq!(instructions["items"].as_array().unwrap().len(), 1);
+        assert_eq!(instructions["next_offset"], 1);
+        assert_eq!(
+            store
+                .agent_delivery_inbox(agent.id, 20)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        mcp.instructions_get(
+            Parameters(TaskPageRequest {
+                task_id: task.id.to_string(),
+                page: PageRequest {
+                    limit: 1,
+                    offset: 1,
+                },
+            }),
+            Extension(parts(Some(agent.id))),
+        )
+        .await
+        .unwrap();
         assert!(
             store
                 .agent_delivery_inbox(agent.id, 20)
@@ -1294,8 +1706,9 @@ mod tests {
         let mcp = MorrowsMcp::new(store);
         let value: Value = serde_json::from_str(
             &mcp.memory_get(
-                Parameters(TaskIdRequest {
+                Parameters(TaskPageRequest {
                     task_id: task.id.to_string(),
+                    ..Default::default()
                 }),
                 Extension(parts(Some(agent.id))),
             )
@@ -1479,8 +1892,9 @@ mod tests {
         assert_eq!(recovered["artifacts"][0]["id"], artifact["id"]);
         assert!(
             mcp.task_collaboration(
-                Parameters(TaskIdRequest {
-                    task_id: "bad-id".into()
+                Parameters(CollaborationRequest {
+                    task_id: "bad-id".into(),
+                    ..Default::default()
                 }),
                 Extension(parts(Some(a.id))),
             )
@@ -1524,8 +1938,8 @@ mod tests {
             .is_err()
         );
 
-        // Unassigned agent b -> error
-        assert!(
+        // Unassigned readers can inspect packages, but a read creates no snapshot.
+        assert_eq!(
             mcp.context_package_get(
                 Parameters(TaskIdRequest {
                     task_id: task.id.to_string(),
@@ -1533,12 +1947,30 @@ mod tests {
                 Extension(parts(Some(b.id))),
             )
             .await
+            .unwrap(),
+            "null"
+        );
+        assert!(
+            store
+                .get_latest_context_package(task.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            mcp.context_package_assemble(
+                Parameters(TaskIdRequest {
+                    task_id: task.id.to_string()
+                }),
+                Extension(parts(Some(b.id))),
+            )
+            .await
             .is_err()
         );
 
-        // Assigned agent a -> auto-assembles context package if not exists
+        // Only an explicit authorized assembly persists a package.
         let pkg_str = mcp
-            .context_package_get(
+            .context_package_assemble(
                 Parameters(TaskIdRequest {
                     task_id: task.id.to_string(),
                 }),
@@ -1565,5 +1997,17 @@ mod tests {
             .unwrap();
         let fresh_pkg: Value = serde_json::from_str(&fresh_str).unwrap();
         assert_eq!(fresh_pkg["work_item_id"], task.id.to_string());
+        let read_back: Value = serde_json::from_str(
+            &mcp.context_package_get(
+                Parameters(TaskIdRequest {
+                    task_id: task.id.to_string(),
+                }),
+                Extension(parts(Some(b.id))),
+            )
+            .await
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(read_back["id"], fresh_pkg["id"]);
     }
 }

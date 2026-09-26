@@ -1124,20 +1124,27 @@ impl Store {
         .fetch_all(&self.pool)
         .await
         .map_err(storage)?;
-        rows.into_iter()
-            .map(|row| {
-                Ok(LaunchInstruction {
-                    id: parse_id(row.try_get("id").map_err(storage)?)?,
-                    launch_attempt_id: parse_id(
-                        row.try_get("launch_attempt_id").map_err(storage)?,
-                    )?,
-                    actor_type: row.try_get("actor_type").map_err(storage)?,
-                    actor_id: row.try_get("actor_id").map_err(storage)?,
-                    body: row.try_get("body").map_err(storage)?,
-                    created_at: parse_dt(row.try_get("created_at").map_err(storage)?)?,
-                })
-            })
-            .collect()
+        rows.into_iter().map(row_to_instruction).collect()
+    }
+
+    pub async fn task_launch_instructions_page(
+        &self,
+        task_id: Id,
+        limit: i64,
+        offset: i64,
+    ) -> Result<morrows_core::Page<LaunchInstruction>, DomainError> {
+        super::discovery::validate_page(limit, offset)?;
+        self.get_task(task_id).await?;
+        let rows = sqlx::query(
+            "SELECT i.* FROM launch_instructions i JOIN launch_attempts a ON a.id=i.launch_attempt_id
+             WHERE a.task_id=? ORDER BY i.created_at DESC,i.id DESC LIMIT ? OFFSET ?",
+        ).bind(task_id.to_string()).bind(limit + 1).bind(offset)
+         .fetch_all(&self.pool).await.map_err(storage)?;
+        let items = rows
+            .into_iter()
+            .map(row_to_instruction)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(morrows_core::Page::from_extra_row(items, limit, offset))
     }
 
     /// Cancellation revokes the durable assignment first. A local launcher notices the
@@ -1452,4 +1459,15 @@ fn is_external_adapter(adapter: &str) -> bool {
         adapter,
         "lsm_external" | "antigravity_external" | "gemini_external" | "codebuddy_external"
     )
+}
+
+fn row_to_instruction(row: sqlx::sqlite::SqliteRow) -> Result<LaunchInstruction, DomainError> {
+    Ok(LaunchInstruction {
+        id: parse_id(row.try_get("id").map_err(storage)?)?,
+        launch_attempt_id: parse_id(row.try_get("launch_attempt_id").map_err(storage)?)?,
+        actor_type: row.try_get("actor_type").map_err(storage)?,
+        actor_id: row.try_get("actor_id").map_err(storage)?,
+        body: row.try_get("body").map_err(storage)?,
+        created_at: parse_dt(row.try_get("created_at").map_err(storage)?)?,
+    })
 }

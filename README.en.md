@@ -203,14 +203,18 @@ Employee MCP tools currently cover:
 
 - `session_inbox`, `session_get`, `session_reply`: receive and answer Agent Sessions addressed to the caller.
 - `work_request_submit`: submit a new work request without choosing priority, assignee, or launcher.
-- `task_get`: read work owned by or assigned to the caller.
-- `memory_get` / `memory_revise`: pull or revise durable task working memory. `memory_get` includes relevant organization/project/Agent/task long-term `MemoryEntry` records, current context, collaboration records, and the caller's Run history.
-- `instructions_get`: read management instructions attached to the caller's work.
+- `whoami`: identify the caller and default discovery scope.
+- `task_list`: default to the caller's assigned unfinished tasks; filter by agent, project, state, and page, or use `scope=all` to discover other work.
+- `project_list` / `project_get`: read project summaries, full background, and current shared memory.
+- `task_get`: read any task with paged assignments and the caller's executions/checkpoints.
+- `task_context`: start here for fresh task/project background, current context and memory, key collaboration and instructions, and explicit context gaps.
+- `memory_get` / `memory_revise`: page current effective memory/context, or revise it with task write access. Message history is read separately through paged `task_collaboration`.
+- `instructions_get`: page instructions for any task; acknowledge only returned instructions addressed to the caller.
 - `artifact_create`, `decision_create`, `thread_create`, `message_create`: record work products and collaboration.
 - `handoff_create`, `handoff_get`, `handoff_accept`, `task_collaboration`: continue work across employees without sharing provider chat history.
 - `assignment_renew`, `run_checkpoint`, `run_complete`, `task_events`: maintain an existing assignment and report progress/completion.
 
-Task-scoped MCP reads and collaboration writes verify that the caller owns the submitted request or has an Assignment history for that Task. MCP can report or collaborate on work, but it cannot create its own Assignment or Run.
+Authenticated agents may read any task or project. Default agent filtering is a discovery preference, not a read authorization boundary. Collaboration writes still require task ownership, assignment history, or an open task Session. Execution updates and private Sessions remain owner-scoped. MCP cannot create its own Assignment or Run. See the [employee discovery contract](docs/employee-discovery.md) for filtering, pagination, and response formats.
 
 A Session is an independent durable conversation object with an optional scope: a **general Session** is unbound, a **project Session** belongs to a Project, and a **task Session** belongs to a Task (its Project is derived from the Task). The WebUI loads only Session summaries at startup; selecting a Session loads the latest message page into an in-memory cache, older history is fetched explicitly, and only the selected Session polls for new messages.
 

@@ -2,6 +2,47 @@ use super::*;
 use morrows_core::{CreateMemoryEntry, MemoryEntry};
 
 impl Store {
+    /// Materialize current visible knowledge, retaining the caller's private
+    /// agent memory but never another agent's. Superseded entries remain in the
+    /// audit APIs; a private replacement cannot hide a still-visible shared fact.
+    pub async fn context_memories_page(
+        &self,
+        task_id: Option<Id>,
+        project_id: Option<Id>,
+        agent_id: Option<Id>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<morrows_core::Page<MemoryEntry>, DomainError> {
+        super::discovery::validate_page(limit, offset)?;
+        let rows = sqlx::query(
+            "SELECT m.* FROM memory_entries m
+             WHERE ((m.visibility='shared' AND (
+                 m.scope_type='organization'
+                 OR (m.scope_type='project' AND m.project_id=?)
+                 OR (m.scope_type='task' AND m.task_id=?)
+             )) OR (m.scope_type='agent' AND m.agent_instance_id=?))
+             AND NOT EXISTS (SELECT 1 FROM memory_entries newer
+                 WHERE newer.supersedes_memory_id=m.id
+                   AND (newer.visibility='shared'
+                        OR (newer.scope_type='agent' AND newer.agent_instance_id=?)))
+             ORDER BY m.created_at DESC,m.id DESC LIMIT ? OFFSET ?",
+        )
+        .bind(project_id.map(|id| id.to_string()))
+        .bind(task_id.map(|id| id.to_string()))
+        .bind(agent_id.map(|id| id.to_string()))
+        .bind(agent_id.map(|id| id.to_string()))
+        .bind(limit + 1)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage)?;
+        let items = rows
+            .into_iter()
+            .map(row_to_memory_entry)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(morrows_core::Page::from_extra_row(items, limit, offset))
+    }
+
     pub async fn create_memory_entry(
         &self,
         input: CreateMemoryEntry,

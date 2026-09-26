@@ -190,7 +190,7 @@ ContextPackage:
 ## 6. 标准 Agent 工作协议 (`morrows-work` Skill)
 
 所有接入 Morrows 的 Agent 实例均遵循标准化工作流程：
-1. **读取任务 (Read WorkItem)**：通过 `task_get` 获取工作项目标、边界与验收标准；
+1. **发现并读取任务 (Discover & Read WorkItem)**：先用 `whoami` 确认身份、`task_list` 查找分配给当前 Agent 的未完成工作；可按项目/其他 Agent 筛选，或用 `scope=all` 查询全部任务。通过 `task_context` 一次获取实时任务与项目背景、当前上下文和明确的缺失项；指定任务 ID 的读取不要求任务归属；
 2. **加载上下文快照 (Read ContextSnapshot)**：获取冻结的工作背景；
 3. **检索长期记忆与决策 (Read Memory & Decisions)**：获取项目规范与已确认决策；
 4. **获取管理指令 (Read Instructions)**：查看人类下达的阶段性补充要求；

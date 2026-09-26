@@ -201,14 +201,18 @@ SQLite 中只保存 hash，列表响应不会返回 token/hash 原文。WebUI �
 
 - `session_inbox`、`session_get`、`session_reply`：接收并回复发给当前 Agent 的 Session。
 - `work_request_submit`：提交新的工作请求，但不能自行选择优先级、负责人或 launcher。
-- `task_get`：读取当前 Agent 创建或被分配到的工作。
-- `memory_get` / `memory_revise`：读取或修订持久工作记忆。`memory_get` 同时包含相关 organization/project/Agent/task 长期 `MemoryEntry`、当前上下文、协作记录和当前 Agent 的 Run 历史。
-- `instructions_get`：读取管理层附加到当前工作的指令。
+- `whoami`：确认当前 Agent 身份与默认查询范围。
+- `task_list`：默认列出分配给当前 Agent 的未完成任务；支持指定 Agent、项目、状态、分页，或用 `scope=all` 查询其他任务。
+- `project_list` / `project_get`：获取项目摘要、完整背景和当前共享记忆。
+- `task_get`：读取任意任务及分页的分配记录、调用者自身的执行记录。
+- `task_context`：开工首选入口；实时组合任务、项目背景、当前上下文、记忆、关键协作和管理指令，显式标记缺失背景与结构化验收条件。
+- `memory_get` / `memory_revise`：分页读取当前有效记忆与上下文，或在具备任务写入权限时修订。消息历史通过 `task_collaboration` 单独分页读取。
+- `instructions_get`：分页读取任意任务的管理指令，只确认本页中发给调用者的投递。
 - `artifact_create`、`decision_create`、`thread_create`、`message_create`：记录成果与协作信息。
 - `handoff_create`、`handoff_get`、`handoff_accept`、`task_collaboration`：无需共享 Provider chat history 即可跨 Agent 延续工作。
 - `assignment_renew`、`run_checkpoint`、`run_complete`、`task_events`：维护已有 Assignment 并汇报进度/完成状态。
 
-Task-scoped MCP 的读取和协作写入会验证：调用者是否创建了该请求，或是否拥有该 Task 的 Assignment 历史。MCP 可以汇报与协作，但不能给自己创建 Assignment 或 Run。
+任务和项目读取要求已认证的 Agent 身份，不要求任务归属。默认按 Agent 筛选只是发现偏好，不是读取权限边界。协作写入仍要求拥有任务、分配历史或开放的任务会话；执行更新和私人会话仍校验归属。MCP 不能自行创建 Assignment 或 Run。完整参数、分页与返回格式见 [员工查询协议](docs/employee-discovery.md)。
 
 Session 是独立的持久对话对象，但可以选择作用域：**通用会话**不绑定工作，**项目会话**绑定 Project，**任务会话**绑定 Task（其 Project 自动由 Task 推导）。WebUI 启动时只加载 Session 摘要；选中某个 Session 后，才将最新消息页载入内存缓存；更老历史需要显式加载，并且只有当前选中的 Session 会轮询新消息。
 

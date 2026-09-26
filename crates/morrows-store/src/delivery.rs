@@ -417,6 +417,27 @@ impl Store {
         Ok(result.rows_affected())
     }
 
+    /// A paged read must acknowledge only the instruction rows actually returned,
+    /// and only deliveries addressed to the reading agent. Other pages stay queued.
+    pub async fn acknowledge_instruction_deliveries_for_ids(
+        &self,
+        instruction_ids: &[Id],
+        agent_id: Id,
+        delivered_by: &str,
+    ) -> Result<(), DomainError> {
+        let mut tx = self.pool.begin().await.map_err(storage)?;
+        let now = Utc::now().to_rfc3339();
+        for id in instruction_ids {
+            sqlx::query(
+                "UPDATE agent_deliveries SET status='delivered',delivered_by=?,delivered_at=?
+                 WHERE agent_instance_id=? AND kind='launch_instruction' AND source_id=? AND status='queued'",
+            ).bind(delivered_by).bind(&now).bind(agent_id.to_string()).bind(id.to_string())
+             .execute(&mut *tx).await.map_err(storage)?;
+        }
+        tx.commit().await.map_err(storage)?;
+        Ok(())
+    }
+
     pub async fn recover_agent_delivery_claims(&self) -> Result<u64, DomainError> {
         let result = sqlx::query(
             "UPDATE agent_deliveries

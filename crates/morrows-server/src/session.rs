@@ -600,7 +600,7 @@ fn build_session_runtime_prompt(
         });
     let scope = match (session.project_id, session.task_id) {
         (_, Some(task_id)) => format!(
-            "This Session is scoped to Task {task_id}. Read task_get and memory_get for that Task before substantive work. This direct Session runtime is not itself a Task Run, so do not create or complete Runs unless a separate assigned Run explicitly exists."
+            "This Session is scoped to Task {task_id}. Read task_context for that Task before substantive work. This direct Session runtime is not itself a Task Run, so do not create or complete Runs unless a separate assigned Run explicitly exists."
         ),
         (Some(project_id), None) => format!(
             "This Session is scoped to Project {project_id}. Treat the Project association and Session history as durable context; do not invent a Task unless work is formally submitted."

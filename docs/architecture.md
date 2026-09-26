@@ -200,7 +200,7 @@ provenance (`source_kind` / `source_ref`), visibility, and an optional
 `supersedes_memory_id` chain. It is distinct from mutable task progress and immutable
 ContextRevision snapshots. Employee `memory_get` materializes the shared organization,
 project, task, and caller-Agent memories relevant to the requested Task before returning
-the current task context/collaboration state.
+the current task context. It pages current visible entries and excludes superseded revisions; message/event history is requested separately.
 
 AgentInstance remains the worker identity referenced by M1/M2 work. M3 links each instance to an AgentProfile and optional independent Account and Machine identities, with append-only CapacitySnapshots.
 
@@ -352,9 +352,11 @@ credential/authentication system. M1 REST payload conventions remain compatible.
 The employee MCP exposes collaboration tools such as `artifact_create`, `decision_create`,
 `thread_create`, `message_create`, `handoff_create`, `handoff_get`, `handoff_accept`,
 and `task_collaboration`. It does not expose dependency graph administration, claiming,
-or Run creation. Task-scoped operations require `X-Agent-Instance-Id` and verify that the
-caller owns or has been assigned the Task. The Task Detail UI displays all collaboration
-entities.
+or Run creation. Authenticated agents may read any Task or Project. Task-scoped writes
+still require ownership, assignment history, or an open Task Session. `task_list` defaults
+to the caller's assigned unfinished work; `scope=all` broadens discovery. `task_context`
+provides a live bounded starting view; persisted context packages remain separate snapshots.
+See [employee discovery](employee-discovery.md).
 
 Continuation sequence:
 

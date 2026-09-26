@@ -106,7 +106,8 @@ impl Store {
         let handoffs = self.task_handoffs(work_item_id).await?;
         let mut blockers = Vec::new();
         let mut next_action = String::new();
-        if let Some(latest_handoff) = handoffs.first() {
+        // task_handoffs is chronological; continuation comes from the newest handoff.
+        if let Some(latest_handoff) = handoffs.last() {
             blockers = latest_handoff.content.blockers.clone();
             if let Some(first_remaining) = latest_handoff.content.remaining.first() {
                 next_action = first_remaining.clone();

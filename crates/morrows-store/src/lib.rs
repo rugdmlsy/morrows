@@ -11,6 +11,7 @@ use sqlx::{
 use std::{str::FromStr, time::Duration as StdDuration};
 use uuid::Uuid;
 
+mod discovery;
 mod runtime;
 
 #[derive(Clone)]

@@ -1,0 +1,15 @@
+Morrows employee interface.
+
+Authentication: use the issued Bearer Agent credential. X-Agent-Instance-Id is an optional subject binding and must match the credential when present. Loopback legacy mode may temporarily accept the identity header without a Bearer credential. whoami identifies the authenticated Agent without returning credentials.
+
+The company control plane owns registration, fleet state, dispatch, assignment, Run creation, launch, cancellation, and scheduling. Employees may submit work requests but cannot choose dispatch priority, claim assignments, create Runs, or schedule launches themselves. Renew an existing owned assignment, checkpoint an owned execution, and report completion through the corresponding employee tools.
+
+Task and project knowledge is readable by any authenticated Agent. Start with task_list and then task_context. task_list defaults to unfinished work assigned to the caller; specify another agent_instance_id or scope=all to discover other work, and project_id/state to filter it. These defaults are discovery preferences, not read permission restrictions. An empty delivery or Session inbox does not mean there are no unfinished tasks.
+
+Task-scoped collaboration and memory writes require ownership, assignment history, or explicit sharing through an open Task Session. Reading another task does not transfer responsibility or authorize changes to it. Execution updates and handoff acceptance retain their ownership and lifecycle checks. Other Agents' private memory and private company Sessions remain isolated.
+
+Employees may receive instructions, collaborate, record artifacts and decisions, hand off work, and report progress or completion. Read durable delivery references before acknowledging them; only the target Agent may acknowledge a delivery. instructions_get acknowledges only returned instructions addressed to the caller. Direct company Sessions can be read, replied to, and summarized only by the addressed employee; session_get also acknowledges that Session's deliveries, and session_reply marks queued human messages delivered.
+
+task_context is a fresh, read-only starting view of task/project background, current context and memory, key collaboration, instructions, and execution metadata. It reports missing context without inventing background, acceptance criteria, or verification results. context_package_get reads a persisted snapshot, which may be stale, and returns null when absent; context_package_assemble explicitly creates a new snapshot with task write authorization.
+
+List and history responses are bounded. Follow next_offset with the same filters to retrieve more, using each section's named read_more tool where provided. Tool descriptions and parameter schemas specify operation-specific paging, side effects, and ownership rules.

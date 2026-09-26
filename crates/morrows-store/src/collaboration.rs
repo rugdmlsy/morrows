@@ -11,6 +11,97 @@ fn required(value: &str, field: &str) -> Result<(), DomainError> {
 }
 
 impl Store {
+    /// Page each requested collection independently; messages are joined directly
+    /// to their task instead of loading every thread and its complete history.
+    pub async fn task_collaboration_page(
+        &self,
+        task_id: Id,
+        section: Option<&str>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Value, DomainError> {
+        super::discovery::validate_page(limit, offset)?;
+        self.get_task(task_id).await?;
+        if section.is_some_and(|s| {
+            ![
+                "handoffs",
+                "artifacts",
+                "decisions",
+                "threads",
+                "messages",
+                "dependencies",
+            ]
+            .contains(&s)
+        }) {
+            return Err(DomainError::InvalidInput(
+                "unknown collaboration section".into(),
+            ));
+        }
+        let mut result = serde_json::Map::new();
+        if section.is_none() || section == Some("handoffs") {
+            result.insert("handoffs".into(), self.task_records_page(
+                "SELECT * FROM handoffs WHERE task_id=? ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?",
+                task_id, limit, offset, row_to_handoff).await?);
+        }
+        if section.is_none() || section == Some("artifacts") {
+            result.insert("artifacts".into(), self.task_records_page(
+                "SELECT * FROM artifacts WHERE task_id=? ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?",
+                task_id, limit, offset, row_to_artifact).await?);
+        }
+        if section.is_none() || section == Some("decisions") {
+            result.insert("decisions".into(), self.task_records_page(
+                "SELECT * FROM decisions WHERE task_id=? ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?",
+                task_id, limit, offset, row_to_decision).await?);
+        }
+        if section.is_none() || section == Some("threads") {
+            result.insert("threads".into(), self.task_records_page(
+                "SELECT * FROM message_threads WHERE task_id=? ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?",
+                task_id, limit, offset, row_to_thread).await?);
+        }
+        if section.is_none() || section == Some("messages") {
+            result.insert(
+                "messages".into(),
+                self.task_records_page(
+                    "SELECT m.* FROM messages m JOIN message_threads t ON t.id=m.thread_id
+                 WHERE t.task_id=? ORDER BY m.created_at DESC,m.id DESC LIMIT ? OFFSET ?",
+                    task_id,
+                    limit,
+                    offset,
+                    row_to_message,
+                )
+                .await?,
+            );
+        }
+        if section.is_none() || section == Some("dependencies") {
+            result.insert("dependencies".into(), self.task_records_page(
+                "SELECT * FROM task_dependencies WHERE task_id=? ORDER BY created_at DESC,depends_on_task_id DESC LIMIT ? OFFSET ?",
+                task_id, limit, offset, row_to_dependency).await?);
+        }
+        Ok(Value::Object(result))
+    }
+
+    async fn task_records_page<T: serde::Serialize>(
+        &self,
+        sql: &str,
+        task_id: Id,
+        limit: i64,
+        offset: i64,
+        decode: fn(sqlx::sqlite::SqliteRow) -> Result<T, DomainError>,
+    ) -> Result<Value, DomainError> {
+        let rows = sqlx::query(sql)
+            .bind(task_id.to_string())
+            .bind(limit + 1)
+            .bind(offset)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(storage)?;
+        let items = rows
+            .into_iter()
+            .map(decode)
+            .collect::<Result<Vec<_>, _>>()?;
+        serde_json::to_value(Page::from_extra_row(items, limit, offset)).map_err(storage)
+    }
+
     pub async fn create_artifact(
         &self,
         task_id: Id,
@@ -55,22 +146,7 @@ impl Store {
             .fetch_all(&self.pool)
             .await
             .map_err(storage)?;
-        rows.into_iter()
-            .map(|r| {
-                Ok(Artifact {
-                    id: parse_id(r.try_get("id").map_err(storage)?)?,
-                    task_id,
-                    created_by: parse_id(r.try_get("created_by").map_err(storage)?)?,
-                    created_at: parse_dt(r.try_get("created_at").map_err(storage)?)?,
-                    content: CreateArtifact {
-                        title: r.try_get("title").map_err(storage)?,
-                        uri: r.try_get("uri").map_err(storage)?,
-                        description: r.try_get("description").map_err(storage)?,
-                        kind: r.try_get("kind").map_err(storage)?,
-                    },
-                })
-            })
-            .collect()
+        rows.into_iter().map(row_to_artifact).collect()
     }
     pub async fn create_decision(
         &self,
@@ -115,20 +191,7 @@ impl Store {
             .fetch_all(&self.pool)
             .await
             .map_err(storage)?;
-        rows.into_iter()
-            .map(|r| {
-                Ok(Decision {
-                    id: parse_id(r.try_get("id").map_err(storage)?)?,
-                    task_id,
-                    created_by: parse_id(r.try_get("created_by").map_err(storage)?)?,
-                    created_at: parse_dt(r.try_get("created_at").map_err(storage)?)?,
-                    content: CreateDecision {
-                        title: r.try_get("title").map_err(storage)?,
-                        rationale: r.try_get("rationale").map_err(storage)?,
-                    },
-                })
-            })
-            .collect()
+        rows.into_iter().map(row_to_decision).collect()
     }
     pub async fn create_thread(
         &self,
@@ -181,17 +244,7 @@ impl Store {
                 .fetch_all(&self.pool)
                 .await
                 .map_err(storage)?;
-        rows.into_iter()
-            .map(|r| {
-                Ok(MessageThread {
-                    id: parse_id(r.try_get("id").map_err(storage)?)?,
-                    task_id,
-                    created_by: parse_id(r.try_get("created_by").map_err(storage)?)?,
-                    created_at: parse_dt(r.try_get("created_at").map_err(storage)?)?,
-                    title: r.try_get("title").map_err(storage)?,
-                })
-            })
-            .collect()
+        rows.into_iter().map(row_to_thread).collect()
     }
     pub async fn create_message(
         &self,
@@ -305,26 +358,7 @@ impl Store {
             .fetch_all(&self.pool)
             .await
             .map_err(storage)?;
-        rows.into_iter()
-            .map(|r| {
-                Ok(Message {
-                    id: parse_id(r.try_get("id").map_err(storage)?)?,
-                    thread_id,
-                    created_by: parse_id(r.try_get("created_by").map_err(storage)?)?,
-                    body: r.try_get("body").map_err(storage)?,
-                    message_type: r.try_get("message_type").map_err(storage)?,
-                    recipient_agent_instance_id: r
-                        .try_get("recipient_agent_instance_id")
-                        .map_err(storage)?,
-                    recipient_role: r.try_get("recipient_role").map_err(storage)?,
-                    reply_to_message_id: r.try_get("reply_to_message_id").map_err(storage)?,
-                    correlation_id: r.try_get("correlation_id").map_err(storage)?,
-                    requires_response: r.try_get("requires_response").map_err(storage)?,
-                    status: r.try_get("status").map_err(storage)?,
-                    created_at: parse_dt(r.try_get("created_at").map_err(storage)?)?,
-                })
-            })
-            .collect()
+        rows.into_iter().map(row_to_message).collect()
     }
 
     /// Serialize graph edits before checking reachability, so concurrent reverse edges
@@ -411,18 +445,7 @@ impl Store {
     pub async fn task_dependencies(&self, task_id: Id) -> Result<Vec<TaskDependency>, DomainError> {
         self.get_task(task_id).await?;
         let rows=sqlx::query("SELECT * FROM task_dependencies WHERE task_id=? ORDER BY created_at,depends_on_task_id").bind(task_id.to_string()).fetch_all(&self.pool).await.map_err(storage)?;
-        rows.into_iter()
-            .map(|r| {
-                Ok(TaskDependency {
-                    task_id,
-                    depends_on_task_id: parse_id(
-                        r.try_get("depends_on_task_id").map_err(storage)?,
-                    )?,
-                    created_by: parse_id(r.try_get("created_by").map_err(storage)?)?,
-                    created_at: parse_dt(r.try_get("created_at").map_err(storage)?)?,
-                })
-            })
-            .collect()
+        rows.into_iter().map(row_to_dependency).collect()
     }
 
     /// Freeze a continuation against an immutable context revision and release the
@@ -700,6 +723,70 @@ fn row_to_handoff(r: sqlx::sqlite::SqliteRow) -> Result<Handoff, DomainError> {
         context_revision_id: parse_id(r.try_get("context_revision_id").map_err(storage)?)?,
         content: serde_json::from_str(&r.try_get::<String, _>("content_json").map_err(storage)?)
             .map_err(storage)?,
+        created_at: parse_dt(r.try_get("created_at").map_err(storage)?)?,
+    })
+}
+
+fn row_to_artifact(r: sqlx::sqlite::SqliteRow) -> Result<Artifact, DomainError> {
+    Ok(Artifact {
+        id: parse_id(r.try_get("id").map_err(storage)?)?,
+        task_id: parse_id(r.try_get("task_id").map_err(storage)?)?,
+        created_by: parse_id(r.try_get("created_by").map_err(storage)?)?,
+        created_at: parse_dt(r.try_get("created_at").map_err(storage)?)?,
+        content: CreateArtifact {
+            title: r.try_get("title").map_err(storage)?,
+            uri: r.try_get("uri").map_err(storage)?,
+            description: r.try_get("description").map_err(storage)?,
+            kind: r.try_get("kind").map_err(storage)?,
+        },
+    })
+}
+
+fn row_to_decision(r: sqlx::sqlite::SqliteRow) -> Result<Decision, DomainError> {
+    Ok(Decision {
+        id: parse_id(r.try_get("id").map_err(storage)?)?,
+        task_id: parse_id(r.try_get("task_id").map_err(storage)?)?,
+        created_by: parse_id(r.try_get("created_by").map_err(storage)?)?,
+        created_at: parse_dt(r.try_get("created_at").map_err(storage)?)?,
+        content: CreateDecision {
+            title: r.try_get("title").map_err(storage)?,
+            rationale: r.try_get("rationale").map_err(storage)?,
+        },
+    })
+}
+
+fn row_to_thread(r: sqlx::sqlite::SqliteRow) -> Result<MessageThread, DomainError> {
+    Ok(MessageThread {
+        id: parse_id(r.try_get("id").map_err(storage)?)?,
+        task_id: parse_id(r.try_get("task_id").map_err(storage)?)?,
+        created_by: parse_id(r.try_get("created_by").map_err(storage)?)?,
+        created_at: parse_dt(r.try_get("created_at").map_err(storage)?)?,
+        title: r.try_get("title").map_err(storage)?,
+    })
+}
+
+fn row_to_message(r: sqlx::sqlite::SqliteRow) -> Result<Message, DomainError> {
+    Ok(Message {
+        id: parse_id(r.try_get("id").map_err(storage)?)?,
+        thread_id: parse_id(r.try_get("thread_id").map_err(storage)?)?,
+        created_by: parse_id(r.try_get("created_by").map_err(storage)?)?,
+        body: r.try_get("body").map_err(storage)?,
+        message_type: r.try_get("message_type").map_err(storage)?,
+        recipient_agent_instance_id: r.try_get("recipient_agent_instance_id").map_err(storage)?,
+        recipient_role: r.try_get("recipient_role").map_err(storage)?,
+        reply_to_message_id: r.try_get("reply_to_message_id").map_err(storage)?,
+        correlation_id: r.try_get("correlation_id").map_err(storage)?,
+        requires_response: r.try_get("requires_response").map_err(storage)?,
+        status: r.try_get("status").map_err(storage)?,
+        created_at: parse_dt(r.try_get("created_at").map_err(storage)?)?,
+    })
+}
+
+fn row_to_dependency(r: sqlx::sqlite::SqliteRow) -> Result<TaskDependency, DomainError> {
+    Ok(TaskDependency {
+        task_id: parse_id(r.try_get("task_id").map_err(storage)?)?,
+        depends_on_task_id: parse_id(r.try_get("depends_on_task_id").map_err(storage)?)?,
+        created_by: parse_id(r.try_get("created_by").map_err(storage)?)?,
         created_at: parse_dt(r.try_get("created_at").map_err(storage)?)?,
     })
 }
