@@ -42,7 +42,7 @@ impl ControlRole {
 
 pub async fn authenticate_operator_requests(
     State(state): State<OperatorAuthState>,
-    request: Request<Body>,
+    mut request: Request<Body>,
     next: Next,
 ) -> Response {
     let method = request.method().clone();
@@ -51,6 +51,7 @@ pub async fn authenticate_operator_requests(
     if method == Method::OPTIONS
         || !path.starts_with("/api/")
         || path == "/api/health"
+        || is_operator_login_route(&method, &path)
         || crate::auth::is_agent_http_surface(&method, &path)
     {
         return next.run(request).await;
@@ -66,12 +67,17 @@ pub async fn authenticate_operator_requests(
         if state.require_operator_auth {
             return unauthorized("Bearer operator credential required");
         }
+        request.extensions_mut().insert(OperatorIdentity(
+            json!({"authenticated":false,"role":"local","auth_required":false}),
+        ));
         return next.run(request).await;
     };
     let Some(token) = authorization.strip_prefix("Bearer ") else {
         return unauthorized("Authorization must use Bearer credentials");
     };
 
+    let mut identity =
+        json!({"authenticated":true,"role":"admin","label":"bootstrap","expires_at":null});
     let role = if state.bootstrap_token.as_deref() == Some(token) {
         ControlRole::Admin
     } else if token.starts_with("mrw_operator_") {
@@ -82,6 +88,7 @@ pub async fn authenticate_operator_requests(
         let Some(role) = ControlRole::parse(&credential.role) else {
             return forbidden("operator credential has an unknown role");
         };
+        identity = json!({"authenticated":true,"role":credential.role,"label":credential.label,"expires_at":credential.expires_at});
         role
     } else if token.starts_with("mrw_agent_") {
         return forbidden("Agent credentials cannot access the control plane");
@@ -96,7 +103,18 @@ pub async fn authenticate_operator_requests(
             ControlRole::Admin => "admin role required",
         });
     }
+    request.extensions_mut().insert(OperatorIdentity(identity));
     next.run(request).await
+}
+
+#[derive(Clone)]
+struct OperatorIdentity(Value);
+
+fn is_operator_login_route(method: &Method, path: &str) -> bool {
+    // Neither endpoint approves anything. The random browser secret is required
+    // to poll, and approval is available only through the host-local CLI.
+    method == Method::POST
+        && (path == "/api/operator-login" || path == "/api/operator-login/status")
 }
 
 fn required_control_role(method: &Method, path: &str) -> ControlRole {
@@ -153,11 +171,53 @@ fn default_operator_ttl() -> i64 {
 
 pub fn routes() -> Router<AppState> {
     Router::new()
+        .route("/operator-session", get(operator_session))
+        .route("/operator-login", post(request_login))
+        .route("/operator-login/status", post(login_status))
         .route(
             "/operator-credentials",
             get(list_credentials).post(issue_credential),
         )
         .route("/operator-credentials/{id}/revoke", post(revoke_credential))
+}
+
+async fn operator_session(
+    axum::Extension(identity): axum::Extension<OperatorIdentity>,
+) -> Json<Value> {
+    Json(identity.0)
+}
+
+#[derive(Deserialize)]
+struct RequestLoginBody {
+    label: String,
+}
+
+async fn request_login(
+    State(state): State<AppState>,
+    Json(input): Json<RequestLoginBody>,
+) -> Result<Response, ApiError> {
+    let request = state.store.request_operator_login(&input.label).await?;
+    Ok(([("Cache-Control", "no-store")], Json(json!(request))).into_response())
+}
+
+#[derive(Deserialize)]
+struct LoginStatusBody {
+    id: Id,
+    token: String,
+}
+
+async fn login_status(
+    State(state): State<AppState>,
+    Json(input): Json<LoginStatusBody>,
+) -> Result<Response, ApiError> {
+    if input.token.len() > 256 {
+        return Err(DomainError::InvalidInput("invalid login secret".into()).into());
+    }
+    let status = state
+        .store
+        .operator_login_status(input.id, &input.token)
+        .await?;
+    Ok(([("Cache-Control", "no-store")], Json(status)).into_response())
 }
 
 async fn issue_credential(
@@ -215,6 +275,94 @@ mod tests {
             builder = builder.header(AUTHORIZATION, format!("Bearer {token}"));
         }
         builder.body(Body::empty()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn browser_login_is_public_but_approval_and_control_remain_protected() {
+        let store = Store::connect("sqlite::memory:").await.unwrap();
+        let app = Router::new()
+            .nest("/api", routes())
+            .with_state(AppState {
+                store: store.clone(),
+            })
+            .layer(axum::middleware::from_fn_with_state(
+                crate::auth::AgentAuthState::new(store.clone(), true),
+                crate::auth::authenticate_agent_requests,
+            ))
+            .layer(axum::middleware::from_fn_with_state(
+                OperatorAuthState::new(store.clone(), true, None),
+                authenticate_operator_requests,
+            ));
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/operator-login")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(r#"{"label":"Browser"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let login: morrows_core::OperatorLoginRequest = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            app.clone()
+                .oneshot(request(
+                    Method::GET,
+                    "/api/operator-session",
+                    Some(&login.token)
+                ))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            app.clone()
+                .oneshot(request(Method::POST, "/api/operator-login/approve", None))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        store
+            .approve_operator_login(&login.code, "operator", 600)
+            .await
+            .unwrap();
+        let response = app
+            .clone()
+            .oneshot(request(
+                Method::GET,
+                "/api/operator-session",
+                Some(&login.token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let identity: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(identity["authenticated"], true);
+        assert_eq!(identity["role"], "operator");
+        assert!(!String::from_utf8_lossy(&bytes).contains(&login.token));
+        assert_eq!(
+            app.oneshot(request(
+                Method::GET,
+                "/api/operator-credentials",
+                Some(&login.token)
+            ))
+            .await
+            .unwrap()
+            .status(),
+            StatusCode::FORBIDDEN
+        );
     }
 
     #[tokio::test]

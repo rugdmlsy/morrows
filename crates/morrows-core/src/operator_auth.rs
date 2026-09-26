@@ -18,3 +18,12 @@ pub struct IssuedOperatorCredential {
     /// Returned only at issuance. Morrows stores only the SHA-256 hash.
     pub token: String,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OperatorLoginRequest {
+    pub id: Id,
+    pub code: String,
+    /// Kept in the requesting browser; never printed in the approval command.
+    pub token: String,
+    pub expires_at: DateTime<Utc>,
+}

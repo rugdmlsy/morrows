@@ -279,3 +279,22 @@ M2.1 曾使用两个独立的 `codex-personal` CLI Session 和两个不同的 Ag
 Agent A 创建 typed artifact、decision、directed message 和 pending handoff；Handoff 创建后释放 A 的 Assignment，并将 A 的 Run 结束为 handed off。随后控制平面把工作分配给 Agent B 并创建它的 Run。Agent B **只通过员工 MCP** 重建状态、接受 Handoff、在原 thread 中回复、checkpoint 恢复后的状态并完成任务。
 
 整个过程中，A 与 B 之间没有共享任何 Codex Session/chat history。
+
+### 没有旧 token 时登录控制台
+
+点击 WebUI 顶栏「登录控制台」→「通过 SSH 批准登录」。浏览器显示一个 10 分钟有效的
+登录码。使用已有的服务器 SSH 访问权限，在 Morrows 服务目录执行：
+
+```sh
+morrows operator-approve --database data/morrows.db --code 页面显示的登录码
+```
+
+必须核对自己页面上的代码，不要批准陌生人发来的代码。命令默认授予 `operator`，有效期
+24 小时；可显式指定 `--role viewer|operator|admin` 和 `--ttl-seconds`。这是真正的本地
+管理操作，要求服务数据库的文件访问权限，没有公开的 HTTP 批准接口。重试同一个代码
+不会扩权、续期或重复签发。批准后原浏览器自动登录，命令和 URL 都不包含 token。
+
+登录请求本身不授予权限。数据库仅保存凭据摘要；批准只把浏览器持有秘密对应的摘要
+登记为凭据。已撤销/到期凭据仍被拒绝，Agent 凭据不能充当 Operator。原有粘贴 token
+登录保留，保存前会验证角色和有效性。默认仅在此标签页保存；勾选「记住登录」才存入
+浏览器持久存储。界面显示实际认证结果、角色和到期时间，不再把任意非空字符串视为登录。

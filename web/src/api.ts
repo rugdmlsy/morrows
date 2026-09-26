@@ -1,12 +1,18 @@
 export function getOperatorToken() {
-  return window.localStorage.getItem("morrows.operatorToken") || "";
+  return window.sessionStorage.getItem("morrows.operatorToken") || window.localStorage.getItem("morrows.operatorToken") || "";
 }
 
-export function setOperatorToken(token: string) {
+export function setOperatorToken(token: string, remember = false) {
   const value = token.trim();
-  if (value) window.localStorage.setItem("morrows.operatorToken", value);
-  else window.localStorage.removeItem("morrows.operatorToken");
+  window.localStorage.removeItem("morrows.operatorToken");
+  window.sessionStorage.removeItem("morrows.operatorToken");
+  if (value) (remember ? window.localStorage : window.sessionStorage).setItem("morrows.operatorToken", value);
   window.dispatchEvent(new CustomEvent("morrows-operator-token-changed"));
+}
+
+export class ApiError extends Error {
+  status: number;
+  constructor(status: number, message: string) { super(message); this.status = status; }
 }
 
 function publicPath(path: string) {
@@ -17,7 +23,8 @@ function publicPath(path: string) {
 }
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const operatorToken = path.startsWith("/api/") ? getOperatorToken() : "";
+  const publicLogin = path === "/api/operator-login" || path === "/api/operator-login/status";
+  const operatorToken = path.startsWith("/api/") && !publicLogin ? getOperatorToken() : "";
   const response = await fetch(publicPath(path), {
     ...init,
     headers: {
@@ -28,7 +35,12 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(text || `${response.status} ${response.statusText}`);
+    let message = text || `${response.status} ${response.statusText}`;
+    try { message = JSON.parse(text).error || message; } catch { /* Plain-text proxy errors remain readable. */ }
+    if (response.status === 401 && !new Headers(init?.headers).has("Authorization")) {
+      window.dispatchEvent(new CustomEvent("morrows-operator-auth-required"));
+    }
+    throw new ApiError(response.status, message);
   }
   return response.json();
 }

@@ -1402,3 +1402,15 @@ h3 { margin: 20px 0 8px; color: var(--ink-3); font: 700 calc(8px * var(--font-sc
 .assignment-request small { display: block; overflow-wrap: anywhere; }
 .assignment-request p { white-space: pre-wrap; overflow-wrap: anywhere; }
 .assignment-request textarea { width: 100%; min-height: 65px; margin-bottom: 8px; }
+
+.operator-overlay { position: fixed; inset: 0; z-index: 1000; background: #0007; display: grid; place-items: center; padding: 20px; }
+.operator-dialog { width: min(640px, 100%); max-height: 90vh; overflow: auto; padding: 28px; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); color: var(--ink); display: grid; gap: 16px; box-shadow: 0 12px 60px #0004; }
+.operator-dialog h2, .operator-dialog p { margin: 0; }
+.operator-dialog label { display: flex; gap: 8px; align-items: center; }
+.operator-dialog input[type="checkbox"] { width: auto; }
+.operator-dialog pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 12px; background: #8881; border-radius: 8px; }
+.operator-dialog details { display: grid; gap: 8px; }
+.operator-dialog details input { width: 100%; margin: 12px 0; }
+.operator-dialog-actions { display: flex; justify-content: flex-end; gap: 12px; }
+.operator-pairing { display: grid; gap: 10px; }
+.operator-signin-hint { max-width: 260px; font-size: 12px; text-align: left; }

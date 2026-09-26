@@ -12,6 +12,7 @@ path = "src/main.rs"
 anyhow.workspace = true
 clap.workspace = true
 morrows-core = { path = "../morrows-core" }
+morrows-store = { path = "../morrows-store" }
 rmcp = { workspace = true, features = ["client", "transport-streamable-http-client-reqwest"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 serde.workspace = true

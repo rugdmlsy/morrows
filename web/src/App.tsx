@@ -3,7 +3,8 @@ import type { FormEvent } from "react";
 import "./App.css";
 import SessionChat from "./SessionChat";
 import AssignmentRequests from "./AssignmentRequests";
-import { api, getOperatorToken, setOperatorToken } from "./api";
+import { api } from "./api";
+import OperatorLogin from "./OperatorLogin";
 import {
   formatAge,
   formatDateTime,
@@ -478,7 +479,6 @@ export default function App() {
   const [newAgentModel, setNewAgentModel] = useState("");
   const [agentCreateBusy, setAgentCreateBusy] = useState(false);
   const [agentCreateResult, setAgentCreateResult] = useState<ManagedCodexProvision | null>(null);
-  const [operatorTokenPresent, setOperatorTokenPresent] = useState(() => !!getOperatorToken());
   const [error, setError] = useState<string | null>(null);
 
   const orderedAgents = useMemo(
@@ -576,11 +576,6 @@ export default function App() {
     window.localStorage.setItem("morrows.projectSort", projectSort);
   }, [projectSort]);
 
-  useEffect(() => {
-    const sync = () => setOperatorTokenPresent(!!getOperatorToken());
-    window.addEventListener("morrows-operator-token-changed", sync);
-    return () => window.removeEventListener("morrows-operator-token-changed", sync);
-  }, []);
 
   const refreshHealth = useCallback(async () => {
     try {
@@ -1261,32 +1256,12 @@ export default function App() {
                 </div>
               )}
             </div>
-            <button
-              type="button"
-              className={`auth-button ${operatorTokenPresent ? "auth-configured" : ""}`}
-              title={locale === "zh-CN" ? "配置控制面 Operator Credential" : "Configure control-plane operator credential"}
-              onClick={() => {
-                const next = window.prompt(
-                  locale === "zh-CN"
-                    ? "输入 Operator Bearer Token；留空并确认可清除当前 Token。"
-                    : "Enter the Operator Bearer Token. Submit an empty value to clear it.",
-                  "",
-                );
-                if (next === null) return;
-                setOperatorToken(next);
-                setOperatorTokenPresent(!!next.trim());
-                void refreshFleet();
-                if (view === "queue") {
-                  void refreshQueueBase();
-                  void refreshDetail();
-                }
-              }}
-            >
-              <span className="auth-dot" />
-              {operatorTokenPresent
-                ? (locale === "zh-CN" ? "Operator 已配置" : "Operator token")
-                : (locale === "zh-CN" ? "Operator 未配置" : "No operator token")}
-            </button>
+            <OperatorLogin locale={locale} onLogin={() => {
+              void refreshFleet();
+              void refreshQueueBase();
+              void refreshSessionScopes();
+              if (selectedId) void refreshDetail();
+            }} />
             <button
               type="button"
               className="language-toggle"
