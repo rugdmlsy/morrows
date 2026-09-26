@@ -24,8 +24,7 @@ pub async fn authenticate_agent_requests(
     mut request: Request<Body>,
     next: Next,
 ) -> Response {
-    let requires_agent_auth =
-        is_agent_http_surface(request.method(), request.uri().path());
+    let requires_agent_auth = is_agent_http_surface(request.method(), request.uri().path());
     let authorization = request
         .headers()
         .get(AUTHORIZATION)
@@ -61,9 +60,7 @@ pub async fn authenticate_agent_requests(
             };
             request.headers_mut().insert("x-agent-instance-id", value);
             request.extensions_mut().insert(credential);
-        } else if state.require_agent_auth
-            && (requires_agent_auth || claimed_agent.is_some())
-        {
+        } else if state.require_agent_auth && (requires_agent_auth || claimed_agent.is_some()) {
             return unauthorized("Bearer Agent credential required");
         }
     } else if state.require_agent_auth && (requires_agent_auth || claimed_agent.is_some()) {

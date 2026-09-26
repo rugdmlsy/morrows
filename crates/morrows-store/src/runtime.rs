@@ -31,7 +31,7 @@ impl Store {
         let rows = sqlx::query(
             "SELECT r.id FROM runs r JOIN run_lsm_provisioning p ON p.run_id=r.id
              LEFT JOIN run_lsm_bindings b ON b.run_id=r.id
-             WHERE b.run_id IS NULL AND r.status IN ('interrupted','cancelling','cleanup_pending')",
+             WHERE b.run_id IS NULL AND r.status IN ('interrupted','cancelling','cleanup_pending','handed_off','completed')",
         )
         .fetch_all(&self.pool)
         .await
@@ -147,7 +147,12 @@ impl Store {
         let run = self.get_run(run_id).await?;
         if !matches!(
             run.status.as_str(),
-            "running" | "interrupted" | "cancelling" | "cleanup_pending"
+            "running"
+                | "interrupted"
+                | "cancelling"
+                | "cleanup_pending"
+                | "handed_off"
+                | "completed"
         ) {
             return Err(DomainError::Conflict(format!("run is {}", run.status)));
         }
@@ -448,7 +453,7 @@ impl Store {
     pub async fn completed_lsm_runs(&self) -> Result<Vec<Id>, DomainError> {
         let rows = sqlx::query(
             "SELECT r.id FROM runs r JOIN run_lsm_bindings b ON b.run_id=r.id
-                                WHERE r.status='completed' AND b.session_terminalized_at IS NULL",
+                                WHERE r.status IN ('completed','handed_off') AND b.session_terminalized_at IS NULL",
         )
         .fetch_all(&self.pool)
         .await

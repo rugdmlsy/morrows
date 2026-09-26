@@ -55,7 +55,7 @@ async fn handoff_continuation_survives_restart_with_all_collaboration_records() 
         .start_run(assignment.id, a.id, Some("private-a-chat".into()))
         .await
         .unwrap();
-    let sibling = store.start_run(assignment.id, a.id, None).await.unwrap();
+    assert!(store.start_run(assignment.id, a.id, None).await.is_err());
     store
         .checkpoint_run(run.id, a.id, json!({"completed":["parser"]}))
         .await
@@ -115,7 +115,7 @@ async fn handoff_continuation_survives_restart_with_all_collaboration_records() 
         "released"
     );
     assert_ne!(store.get_task(t.id).await.unwrap().state, TaskState::Done);
-    for id in [run.id, sibling.id] {
+    for id in [run.id] {
         assert_eq!(store.get_run(id).await.unwrap().status, "handed_off");
         assert!(store.complete_run(id, a.id, json!({})).await.is_err());
         assert!(store.checkpoint_run(id, a.id, json!({})).await.is_err());
@@ -538,7 +538,7 @@ async fn handoff_acceptance_validates_target_and_is_atomic_and_durable() {
     assert_eq!(h.accepted_by_run_id, None);
     let next = store.claim_task(t.id, b.id, "executor", 300).await.unwrap();
     let target = store.start_run(next.id, b.id, None).await.unwrap();
-    let sibling = store.start_run(next.id, b.id, None).await.unwrap();
+    assert!(store.start_run(next.id, b.id, None).await.is_err());
     let unrelated = task(&store, "unrelated").await;
     let wrong_assignment = store
         .claim_task(unrelated.id, a.id, "executor", 300)
@@ -596,7 +596,7 @@ async fn handoff_acceptance_validates_target_and_is_atomic_and_durable() {
     );
     let (first, second) = tokio::join!(
         store.accept_handoff(h.id, target.id, b.id),
-        store.accept_handoff(h.id, sibling.id, b.id)
+        store.accept_handoff(h.id, target.id, b.id)
     );
     assert_ne!(first.is_ok(), second.is_ok());
     let accepted = first.or(second).unwrap();

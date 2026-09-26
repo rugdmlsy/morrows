@@ -154,10 +154,16 @@ impl Store {
         }
         let token_hash = hash_agent_token(token);
         let row = sqlx::query(
-            "SELECT * FROM agent_credentials
-             WHERE token_hash=? AND revoked_at IS NULL AND expires_at>?",
+            "SELECT c.* FROM agent_credentials c
+             WHERE token_hash=? AND revoked_at IS NULL AND expires_at>?
+             AND (c.run_id IS NULL OR EXISTS (
+                 SELECT 1 FROM runs r JOIN assignments a ON a.id=r.assignment_id
+                 WHERE r.id=c.run_id AND r.agent_instance_id=c.agent_instance_id
+                 AND r.status IN ('running','paused') AND a.status='active' AND a.expires_at>?
+             ))",
         )
         .bind(token_hash)
+        .bind(Utc::now().to_rfc3339())
         .bind(Utc::now().to_rfc3339())
         .fetch_optional(&self.pool)
         .await

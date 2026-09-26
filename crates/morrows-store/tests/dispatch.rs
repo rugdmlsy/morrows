@@ -260,7 +260,11 @@ async fn scheduled_dispatch_is_persistent_and_does_not_spam_no_candidate_decisio
     assert_eq!(configured.interval_seconds, 1);
     assert!(!configured.auto_launch);
     assert_eq!(
-        store.list_dispatch_scheduler_settings().await.unwrap().len(),
+        store
+            .list_dispatch_scheduler_settings()
+            .await
+            .unwrap()
+            .len(),
         1
     );
 
@@ -425,4 +429,173 @@ async fn dispatch_decisions_are_append_only_in_sqlite() {
     drop(store);
     let _ = std::fs::remove_file(path);
     assert_eq!(outcome.assignment.unwrap().agent_instance_id, agent.id);
+}
+
+#[tokio::test]
+async fn continuation_chain_is_ordered_single_owner_and_recovers_checkpoints() {
+    let store = Store::connect("sqlite::memory:").await.unwrap();
+    let a = worker(&store, "chain-a", &["code"], 1, 1).await;
+    let b = worker(&store, "chain-b", &["code"], 1, 1).await;
+    let c = worker(&store, "chain-c", &["code"], 1, 1).await;
+    let outsider = worker(&store, "outsider", &["code"], 9, 9).await;
+    let task = store
+        .create_task(input(json!({"title":"one task three executions"})))
+        .await
+        .unwrap();
+    let context = store
+        .create_context_revision(
+            task.id,
+            input(json!({
+                "goal":"continue", "background":"durable source", "constraints":{},
+                "current_summary":"initial", "created_by_actor_id":"human:test"
+            })),
+        )
+        .await
+        .unwrap();
+    policy(&store, task.id, &["code"]).await;
+    store
+        .set_task_continuation_policy(
+            task.id,
+            TaskContinuationPolicy {
+                enabled: true,
+                agent_ids: vec![a.id, b.id, c.id],
+            },
+        )
+        .await
+        .unwrap();
+    let mut previous = None;
+    for agent in [a.id, b.id, c.id] {
+        // Racing schedulers must create exactly one assignment at each transition.
+        let (one, two) = tokio::join!(
+            store.dispatch_task(task.id, "executor"),
+            store.dispatch_task(task.id, "executor")
+        );
+        let assignments: Vec<_> = [one.unwrap().assignment, two.unwrap().assignment]
+            .into_iter()
+            .flatten()
+            .collect();
+        assert_eq!(assignments.len(), 1);
+        let assignment = &assignments[0];
+        assert_eq!(assignment.agent_instance_id, agent);
+        assert_eq!(assignment.task_id, task.id);
+        let (one, two) = tokio::join!(
+            store.start_run(assignment.id, agent, None),
+            store.start_run(assignment.id, agent, None)
+        );
+        assert_eq!(usize::from(one.is_ok()) + usize::from(two.is_ok()), 1);
+        let run = one.or(two).unwrap();
+        assert_eq!(run.task_id, task.id);
+        if let Some((old_run, old_agent, handoff)) = previous {
+            let recovery = store.task_recovery_context(task.id, agent).await.unwrap();
+            assert_eq!(recovery["source_run_id"], json!(old_run));
+            assert_eq!(
+                recovery["checkpoint"],
+                json!({"next":"continue","agent":old_agent})
+            );
+            assert_eq!(recovery["context_revision_id"], json!(context.id));
+            assert!(recovery["checkpoint_at"].is_string());
+            assert_eq!(recovery["handoff_id"], json!(handoff));
+            store.accept_handoff(handoff, run.id, agent).await.unwrap();
+            assert!(
+                store
+                    .checkpoint_run(old_run, old_agent, json!({"stale":true}))
+                    .await
+                    .is_err()
+            );
+            assert!(
+                store
+                    .complete_run(old_run, old_agent, json!({}))
+                    .await
+                    .is_err()
+            );
+        }
+        assert_eq!(
+            store
+                .task_recovery_context(task.id, outsider.id)
+                .await
+                .unwrap()["available"],
+            false
+        );
+        store
+            .checkpoint_run(run.id, agent, json!({"next":"continue","agent":agent}))
+            .await
+            .unwrap();
+        let credential = store
+            .issue_runtime_credential(agent, run.id, "chain test", 600)
+            .await
+            .unwrap();
+        store.verify_agent_token(&credential.token).await.unwrap();
+        let handoff = store.create_handoff(run.id,agent,input(json!({"summary":"provider budget exhausted","completed":[],"remaining":["continue"],"blockers":[],"artifact_ids":[],"decision_ids":[]}))).await.unwrap();
+        assert!(store.verify_agent_token(&credential.token).await.is_err());
+        previous = Some((run.id, agent, handoff.id));
+    }
+    // Exhaustion waits even though all workers report spare capacity.
+    let preview = store.dispatch_preview(task.id, "executor").await.unwrap();
+    assert!(preview.selected_agent_instance_id.is_none());
+    assert!(
+        store
+            .dispatch_task(task.id, "executor")
+            .await
+            .unwrap()
+            .assignment
+            .is_none()
+    );
+    assert_ne!(
+        store.get_task(task.id).await.unwrap().state,
+        TaskState::Done
+    );
+}
+
+#[tokio::test]
+async fn continuation_waits_for_unavailable_candidates_and_validates_policy() {
+    let store = Store::connect("sqlite::memory:").await.unwrap();
+    let agent = worker(&store, "unavailable", &["code"], 0, 1).await;
+    let task = store
+        .create_task(input(json!({"title":"wait"})))
+        .await
+        .unwrap();
+    policy(&store, task.id, &["code"]).await;
+    for ids in [vec![], vec![agent.id, agent.id], vec![uuid::Uuid::new_v4()]] {
+        assert!(
+            store
+                .set_task_continuation_policy(
+                    task.id,
+                    TaskContinuationPolicy {
+                        enabled: true,
+                        agent_ids: ids
+                    }
+                )
+                .await
+                .is_err()
+        );
+    }
+    store
+        .set_task_continuation_policy(
+            task.id,
+            TaskContinuationPolicy {
+                enabled: true,
+                agent_ids: vec![agent.id],
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        store
+            .dispatch_task(task.id, "executor")
+            .await
+            .unwrap()
+            .assignment
+            .is_none()
+    );
+    store.agent_heartbeat(agent.id,agent.id,input(json!({"status":"online","capacity":{"status":"available","available_slots":1,"active_assignments":0,"active_runs":0,"max_concurrency":1,"quota_state":"available"}}))).await.unwrap();
+    assert_eq!(
+        store
+            .dispatch_task(task.id, "executor")
+            .await
+            .unwrap()
+            .assignment
+            .unwrap()
+            .agent_instance_id,
+        agent.id
+    );
 }

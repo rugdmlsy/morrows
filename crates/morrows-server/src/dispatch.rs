@@ -9,11 +9,32 @@ pub fn routes() -> Router<AppState> {
             get(scheduler_get).post(scheduler_set),
         )
         .route("/tasks/{id}/dispatch-policy", post(policy_set))
+        .route(
+            "/tasks/{id}/continuation-policy",
+            get(continuation_get).post(continuation_set),
+        )
         .route("/tasks/{id}/dispatch-policy/{role}", get(policy_get))
         .route("/tasks/{id}/dispatch-preview/{role}", get(preview))
         .route("/tasks/{id}/dispatch/{role}", post(dispatch_task))
         .route("/tasks/{id}/dispatch-decisions", get(decisions))
         .route("/dispatch/next/{role}", post(dispatch_next))
+}
+
+async fn continuation_get(
+    State(s): State<AppState>,
+    Path(id): Path<Id>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(json!(s.store.task_continuation_policy(id).await?)))
+}
+
+async fn continuation_set(
+    State(s): State<AppState>,
+    Path(id): Path<Id>,
+    Json(input): Json<TaskContinuationPolicy>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(json!(
+        s.store.set_task_continuation_policy(id, input).await?
+    )))
 }
 
 async fn policy_list(State(s): State<AppState>) -> Result<Json<Value>, ApiError> {

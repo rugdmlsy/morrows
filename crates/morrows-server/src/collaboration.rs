@@ -430,10 +430,13 @@ mod tests {
         let store = Store::connect("sqlite::memory:").await.unwrap();
         let agent = store.register_agent("package-agent", &[]).await.unwrap();
         let task = store
-            .create_task(serde_json::from_value(json!({
-                "title": "Migrate database",
-                "description": "Run phase 1 migrations cleanly"
-            })).unwrap())
+            .create_task(
+                serde_json::from_value(json!({
+                    "title": "Migrate database",
+                    "description": "Run phase 1 migrations cleanly"
+                }))
+                .unwrap(),
+            )
             .await
             .unwrap();
 

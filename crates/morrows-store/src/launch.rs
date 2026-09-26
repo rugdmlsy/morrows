@@ -1242,15 +1242,16 @@ impl Store {
     }
 
     pub async fn launch_stop_requested(&self, id: Id) -> Result<bool, DomainError> {
-        let status: String = sqlx::query_scalar(
-            "SELECT CASE WHEN r.status='cancelling' THEN 'cancelled' ELSE a.status END
-             FROM launch_attempts a LEFT JOIN runs r ON r.id=a.run_id WHERE a.id=?",
+        let stop: bool = sqlx::query_scalar(
+            "SELECT a.status='cancelled' OR COALESCE(r.status IN ('cancelling','handed_off'),0) OR s.status!='active' OR s.expires_at<=?
+             FROM launch_attempts a JOIN assignments s ON s.id=a.assignment_id LEFT JOIN runs r ON r.id=a.run_id WHERE a.id=?",
         )
+        .bind(Utc::now().to_rfc3339())
         .bind(id.to_string())
         .fetch_one(&self.pool)
         .await
         .map_err(storage)?;
-        Ok(status == "cancelled")
+        Ok(stop)
     }
 
     /// External agents complete their Runs through MCP. Reconcile that durable Run state

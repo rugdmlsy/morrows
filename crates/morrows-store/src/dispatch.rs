@@ -494,6 +494,9 @@ async fn evaluate_dispatch_conn(
         .ok_or_else(|| DomainError::NotFound(format!("task {task_id}")))?;
     let state: String = row.try_get("state").map_err(storage)?;
     let mut task_reasons = Vec::new();
+    if crate::continuation::predecessor_runtime_active(conn, task_id).await? {
+        task_reasons.push("previous_execution_still_stopping".into());
+    }
     if state != "ready" && state != "in_progress" {
         task_reasons.push(format!("task_state:{state}"));
     }
@@ -662,9 +665,42 @@ async fn evaluate_dispatch_conn(
         });
     }
 
+    let continuation = if policy.role == "executor" {
+        crate::continuation::load_policy(conn, task_id)
+            .await?
+            .filter(|p| p.enabled)
+    } else {
+        None
+    };
+    if let Some(chain) = &continuation {
+        let attempted: Vec<String> = sqlx::query_scalar("SELECT DISTINCT agent_instance_id FROM assignments WHERE task_id=? AND role='executor'")
+            .bind(task_id.to_string()).fetch_all(&mut *conn).await.map_err(storage)?;
+        for candidate in &mut candidates {
+            if !chain
+                .agent_ids
+                .contains(&candidate.public.agent_instance_id)
+            {
+                candidate
+                    .public
+                    .reasons
+                    .push("outside_continuation_candidates".into());
+            } else if attempted.contains(&candidate.public.agent_instance_id.to_string()) {
+                candidate
+                    .public
+                    .reasons
+                    .push("already_attempted_this_task".into());
+            }
+            candidate.public.eligible = candidate.public.reasons.is_empty();
+        }
+    }
     candidates.sort_by(|a, b| match (a.public.eligible, b.public.eligible) {
         (true, false) => Ordering::Less,
         (false, true) => Ordering::Greater,
+        _ if continuation.is_some() => {
+            let ids = &continuation.as_ref().unwrap().agent_ids;
+            let position = |id| ids.iter().position(|v| *v == id).unwrap_or(usize::MAX);
+            position(a.public.agent_instance_id).cmp(&position(b.public.agent_instance_id))
+        }
         _ => b
             .public
             .effective_slots

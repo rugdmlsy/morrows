@@ -46,6 +46,8 @@ impl Store {
         Ok(json!({
             "assignments": Page::from_extra_row(assignments, limit, offset),
             "my_runs": Page::from_extra_row(runs, limit, offset),
+            "continuation_policy": self.task_continuation_policy(task_id).await?,
+            "recovery": self.task_recovery_context(task_id, agent_id).await?,
         }))
     }
 

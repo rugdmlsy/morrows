@@ -571,3 +571,133 @@ async fn queued_delivery_makes_interrupted_codex_run_eligible_for_automatic_resu
     assert_eq!(resumed.resume_from_attempt_id, Some(first.id));
     assert!(store.delivery_resume_candidates().await.unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn handoff_waits_for_child_exit_and_lsm_terminalization() {
+    let (store, assignment_id, profile_id) = prepared().await;
+    let assignment = store.get_assignment(assignment_id).await.unwrap();
+    store.create_context_revision(assignment.task_id,input(json!({"goal":"handoff","background":"test","constraints":{},"current_summary":"work remains","created_by_actor_id":"human:test"}))).await.unwrap();
+    let attempt = store
+        .enqueue_launch(input(
+            json!({"assignment_id":assignment_id,"launch_profile_id":profile_id}),
+        ))
+        .await
+        .unwrap();
+    assert!(!store.launch_stop_requested(attempt.id).await.unwrap());
+    store.claim_launch_job().await.unwrap().unwrap();
+    let execution = store.begin_launch_attempt(attempt.id).await.unwrap();
+    store
+        .bind_run_lsm(execution.run.id, "s_handoff")
+        .await
+        .unwrap();
+    store
+        .checkpoint_run(
+            execution.run.id,
+            assignment.agent_instance_id,
+            json!({"files":["uncommitted.rs"]}),
+        )
+        .await
+        .unwrap();
+    store.create_handoff(execution.run.id,assignment.agent_instance_id,input(json!({"summary":"quota exhausted","remaining":["finish"],"completed":[],"blockers":[],"artifact_ids":[],"decision_ids":[]}))).await.unwrap();
+    assert!(store.launch_stop_requested(attempt.id).await.unwrap());
+    let successor = store.register_agent("successor", &[]).await.unwrap();
+    assert!(
+        store
+            .claim_task(assignment.task_id, successor.id, "executor", 600)
+            .await
+            .is_err()
+    );
+    store
+        .finish_launch_attempt(attempt.id, None, None, Some("run_cancel_requested".into()))
+        .await
+        .unwrap();
+    assert_eq!(
+        store.get_run(execution.run.id).await.unwrap().status,
+        "handed_off"
+    );
+    assert!(
+        store
+            .completed_lsm_runs()
+            .await
+            .unwrap()
+            .contains(&execution.run.id)
+    );
+    assert!(
+        store
+            .claim_task(assignment.task_id, successor.id, "executor", 600)
+            .await
+            .is_err()
+    );
+    store.mark_lsm_terminalized(execution.run.id).await.unwrap();
+    let next = store
+        .claim_task(assignment.task_id, successor.id, "executor", 600)
+        .await
+        .unwrap();
+    assert_eq!(next.task_id, assignment.task_id);
+    let recovered = store
+        .task_recovery_context(next.task_id, successor.id)
+        .await
+        .unwrap();
+    assert_eq!(recovered["checkpoint"], json!({"files":["uncommitted.rs"]}));
+}
+
+#[tokio::test]
+async fn abrupt_failure_retains_checkpoint_for_successor() {
+    let (store, assignment_id, profile_id) = prepared().await;
+    let assignment = store.get_assignment(assignment_id).await.unwrap();
+    let attempt = store
+        .enqueue_launch(input(
+            json!({"assignment_id":assignment_id,"launch_profile_id":profile_id}),
+        ))
+        .await
+        .unwrap();
+    store.claim_launch_job().await.unwrap().unwrap();
+    let execution = store.begin_launch_attempt(attempt.id).await.unwrap();
+    store
+        .checkpoint_run(
+            execution.run.id,
+            assignment.agent_instance_id,
+            json!({"last_durable":"before quota failure"}),
+        )
+        .await
+        .unwrap();
+    store
+        .finish_launch_attempt(
+            attempt.id,
+            Some(1),
+            None,
+            Some("account usage limit".into()),
+        )
+        .await
+        .unwrap();
+    let successor = store.register_agent("recovery", &[]).await.unwrap();
+    let next = store
+        .claim_task(assignment.task_id, successor.id, "executor", 600)
+        .await
+        .unwrap();
+    let recovery = store
+        .task_execution_page(next.task_id, successor.id, 20, 0)
+        .await
+        .unwrap();
+    assert_eq!(
+        recovery["recovery"]["source_run_id"],
+        json!(execution.run.id)
+    );
+    assert_eq!(
+        recovery["recovery"]["checkpoint"]["last_durable"],
+        "before quota failure"
+    );
+    assert_eq!(recovery["recovery"]["stop_reason"], "account usage limit");
+    assert!(
+        store
+            .checkpoint_run(execution.run.id, assignment.agent_instance_id, json!({}))
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .complete_run(execution.run.id, assignment.agent_instance_id, json!({}))
+            .await
+            .is_err()
+    );
+}

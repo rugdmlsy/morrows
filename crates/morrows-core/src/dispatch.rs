@@ -2,6 +2,14 @@ use super::*;
 use schemars::JsonSchema;
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TaskContinuationPolicy {
+    pub enabled: bool,
+    /// Ordered, authorized candidates. Each is automatically assigned at most once per task.
+    #[schemars(with = "Vec<String>")]
+    pub agent_ids: Vec<Id>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SetDispatchPolicy {
     #[serde(default = "executor_role")]
     pub role: String,

@@ -11,6 +11,7 @@ use sqlx::{
 use std::{str::FromStr, time::Duration as StdDuration};
 use uuid::Uuid;
 
+mod continuation;
 mod discovery;
 mod runtime;
 
@@ -305,13 +306,17 @@ impl Store {
 
     pub async fn expire_stale_assignments(&self) -> Result<u64, DomainError> {
         let now = Utc::now();
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(storage)?;
         let rows=sqlx::query("SELECT id,task_id,agent_instance_id FROM assignments WHERE status='active' AND expires_at<=?
             AND NOT EXISTS(SELECT 1 FROM runs WHERE runs.assignment_id=assignments.id AND runs.status IN ('interrupted','cleanup_pending','cancelling'))")
-            .bind(now.to_rfc3339()).fetch_all(&self.pool).await.map_err(storage)?;
+            .bind(now.to_rfc3339()).fetch_all(&mut *tx).await.map_err(storage)?;
         if rows.is_empty() {
             return Ok(0);
         }
-        let mut tx = self.pool.begin().await.map_err(storage)?;
         let mut count = 0u64;
         for row in rows {
             let id = parse_id(row.try_get("id").map_err(storage)?)?;
@@ -377,6 +382,15 @@ impl Store {
         if agent_id != actor_agent_id {
             return Err(DomainError::Conflict(
                 "assignment belongs to another agent instance".into(),
+            ));
+        }
+        // Serialize direct Run creation with launcher Run creation. An assignment
+        // grants one execution, not permission to start competing live Runs.
+        let live: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM runs WHERE assignment_id=? AND status IN ('running','paused','interrupted','cleanup_pending','cancelling'))")
+            .bind(assignment_id.to_string()).fetch_one(&mut *tx).await.map_err(storage)?;
+        if live {
+            return Err(DomainError::Conflict(
+                "assignment already has an active run".into(),
             ));
         }
         let id = Uuid::new_v4();
@@ -924,6 +938,11 @@ async fn claim_task_tx(
     lease_seconds: i64,
 ) -> Result<Assignment, DomainError> {
     let now = Utc::now();
+    if continuation::predecessor_runtime_active(&mut *tx, task_id).await? {
+        return Err(DomainError::Conflict(
+            "previous execution is still stopping or cleaning up".into(),
+        ));
+    }
     let expires = now + Duration::seconds(lease_seconds.max(30));
     let id = Uuid::new_v4();
     if role.trim().is_empty() {
