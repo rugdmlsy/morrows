@@ -153,7 +153,7 @@ impl MorrowsMcp {
             "missing_context": missing, "persisted_package": package_ref, "execution": execution,
             "acceptance_criteria_paths": acceptance_paths,
             "assignment_requests": requests,
-            "workflow": {"request_assignment":"task_request_assignment", "request_status":"assignment_request_list", "publish_project_knowledge":"project_memory_publish", "completion_preflight":"run_completion_check", "structured_completion_required_for_executor":context.as_ref().is_some_and(|c| !morrows_core::completion_criteria(&c.constraints).is_empty())},
+            "workflow": {"request_assignment":"task_request_assignment", "request_status":"assignment_request_list", "publish_project_knowledge":"project_memory_publish", "completion_preflight":"run_completion_check", "structured_completion_required_for_executor":context.as_ref().is_some_and(|c| !morrows_core::completion_criteria(&c.constraints).is_empty()), "project_memory_disposition_required_for_executor":task.project_id.is_some()},
             "read_more": {"memory": "memory_get", "instructions": "instructions_get", "collaboration": "task_collaboration", "events": "task_events", "execution": "task_get"},
         }).to_string())
     }
@@ -302,25 +302,43 @@ pub struct CompleteRunRequest {
     pub result: Value,
     /// Required for executor tasks with acceptance_criteria/freeze_requires. Obtain the template from run_completion_check.
     pub completion: Option<morrows_core::CompletionReport>,
+    /// Required for executor tasks attached to a project. Publish/update reusable project knowledge or explicitly use not_applicable with a rationale.
+    pub memory_disposition: Option<morrows_core::MemoryDisposition>,
 }
 
 impl CompleteRunRequest {
     fn result_with_completion(&self) -> Result<Value, String> {
         let mut result = self.result.clone();
-        if let Some(completion) = &self.completion {
+        if self.completion.is_some() || self.memory_disposition.is_some() {
             if result.is_null() {
                 result = json!({});
             }
-            let object = result
-                .as_object_mut()
-                .ok_or("result must be an object when completion is supplied")?;
-            if object.contains_key("completion") {
-                return Err("supply completion either at top level or in result, not both".into());
+            let object = result.as_object_mut().ok_or(
+                "result must be an object when completion or memory_disposition is supplied",
+            )?;
+            if let Some(completion) = &self.completion {
+                if object.contains_key("completion") {
+                    return Err(
+                        "supply completion either at top level or in result, not both".into(),
+                    );
+                }
+                object.insert(
+                    "completion".into(),
+                    serde_json::to_value(completion).map_err(|e| e.to_string())?,
+                );
             }
-            object.insert(
-                "completion".into(),
-                serde_json::to_value(completion).map_err(|e| e.to_string())?,
-            );
+            if let Some(disposition) = &self.memory_disposition {
+                if object.contains_key("memory_disposition") {
+                    return Err(
+                        "supply memory_disposition either at top level or in result, not both"
+                            .into(),
+                    );
+                }
+                object.insert(
+                    "memory_disposition".into(),
+                    serde_json::to_value(disposition).map_err(|e| e.to_string())?,
+                );
+            }
         }
         Ok(result)
     }
@@ -1039,7 +1057,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Complete an owned run. Executor tasks with acceptance_criteria/freeze_requires require a current-context completion report with every criterion passed, rationale and same-task artifact references. Use run_completion_check first. Validation is atomic; failure leaves state unchanged. Evidence contents remain the author's responsibility."
+        description = "Complete an owned run. Project-backed executor tasks must explicitly supply memory_disposition: published/updated with same-task project MemoryEntry IDs, or not_applicable with a rationale. Executor tasks with acceptance_criteria/freeze_requires also require a current-context completion report with every criterion passed, rationale and same-task artifact references. Use run_completion_check first. Validation is atomic; failure leaves state unchanged."
     )]
     async fn run_complete(
         &self,
@@ -1057,7 +1075,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Read-only completion preflight for an owned run. Omit result/completion to discover exact saved criteria, a report template and blockers. Supply a proposed report to validate it. Does not complete, claim, acknowledge or verify artifact contents; run_complete repeats validation atomically."
+        description = "Read-only completion preflight for an owned run. Omit result/completion/memory_disposition to discover exact saved criteria, completion_template, memory_disposition_template and blockers. Project-backed executor tasks must explicitly publish/update durable project knowledge or justify not_applicable. Supply a proposed report/disposition to validate it. Does not complete, claim, acknowledge or verify content truth; run_complete repeats validation atomically."
     )]
     async fn run_completion_check(
         &self,

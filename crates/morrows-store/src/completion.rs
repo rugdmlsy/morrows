@@ -1,5 +1,8 @@
 use super::*;
-use morrows_core::{CompletionReadiness, CompletionReport, completion_criteria};
+use morrows_core::{
+    CompletionReadiness, CompletionReport, MemoryDisposition, PublishProjectMemory,
+    completion_criteria,
+};
 use std::collections::HashSet;
 
 impl Store {
@@ -23,7 +26,7 @@ impl Store {
                 "run belongs to another agent instance".into(),
             ));
         }
-        completion_check_conn(&mut tx, &run, result).await
+        completion_check_conn(self, &mut tx, &run, result).await
     }
 }
 
@@ -31,6 +34,7 @@ impl Store {
 /// writer transaction so changed criteria, evidence or dependencies cannot slip
 /// between validation and the state transition. A preview never reserves state.
 pub(super) async fn completion_check_conn(
+    store: &Store,
     conn: &mut sqlx::SqliteConnection,
     run: &Run,
     result: &Value,
@@ -64,6 +68,7 @@ pub(super) async fn completion_check_conn(
         .map(|c| completion_criteria(&c.constraints))
         .unwrap_or_default();
     let required = assignment.role == "executor" && !criteria.is_empty();
+    let memory_disposition_required = assignment.role == "executor" && task.project_id.is_some();
     let mut blockers = Vec::new();
     if !matches!(run.status.as_str(), "running" | "paused") {
         blockers.push(format!("run is {}", run.status));
@@ -89,6 +94,146 @@ pub(super) async fn completion_check_conn(
         blockers.push(
             "result explicitly reports failure; checkpoint or hand off incomplete work".into(),
         );
+    }
+
+    if memory_disposition_required {
+        match result.get("memory_disposition") {
+            None => blockers.push(
+                "result.memory_disposition is required for executor tasks with a project; publish/update reusable project knowledge or use not_applicable with a rationale".into(),
+            ),
+            Some(value) => match serde_json::from_value::<MemoryDisposition>(value.clone()) {
+                Err(error) => blockers.push(format!(
+                    "invalid result.memory_disposition: {error}"
+                )),
+                Ok(disposition) => {
+                    let rationale = disposition.rationale.trim();
+                    match disposition.status.as_str() {
+                        "not_applicable" => {
+                            if rationale.is_empty() {
+                                blockers.push(
+                                    "memory_disposition not_applicable requires a rationale".into(),
+                                );
+                            }
+                            if !disposition.memory_entry_ids.is_empty() {
+                                blockers.push(
+                                    "memory_disposition not_applicable must not include memory_entry_ids".into(),
+                                );
+                            }
+                        }
+                        "published" | "updated" => {
+                            if rationale.is_empty() {
+                                blockers.push(format!(
+                                    "memory_disposition {} requires a rationale",
+                                    disposition.status
+                                ));
+                            }
+                            if disposition.memory_entry_ids.is_empty() {
+                                blockers.push(format!(
+                                    "memory_disposition {} requires memory_entry_ids",
+                                    disposition.status
+                                ));
+                            }
+                            let project_id = task.project_id.expect(
+                                "memory_disposition_required implies a project-backed task",
+                            );
+                            let git_backend =
+                                Store::git_backend(conn, &project_id.to_string()).await?;
+                            if git_backend {
+                                // Also proves the SQL projection still exactly matches the
+                                // authoritative Git ref before accepting cited publications.
+                                store.project_memory_head_conn(conn, project_id).await?;
+                            }
+                            let mut seen_memory = HashSet::new();
+                            for memory_id in &disposition.memory_entry_ids {
+                                if !seen_memory.insert(memory_id.as_str()) {
+                                    blockers.push(format!(
+                                        "duplicate memory_entry_id {memory_id}"
+                                    ));
+                                    continue;
+                                }
+                                let id = match Id::parse_str(memory_id) {
+                                    Ok(id) => id,
+                                    Err(_) => {
+                                        blockers.push(format!(
+                                            "memory_entry_id {memory_id} is not a UUID"
+                                        ));
+                                        continue;
+                                    }
+                                };
+                                let row = sqlx::query(
+                                    "SELECT m.project_id,m.visibility,m.supersedes_memory_id,                                     p.agent_instance_id,p.idempotency_key,p.input_json                                      FROM memory_entries m                                      JOIN memory_publications p ON p.memory_id=m.id                                      WHERE m.id=?",
+                                )
+                                .bind(id.to_string())
+                                .fetch_optional(&mut *conn)
+                                .await
+                                .map_err(storage)?;
+                                let Some(row) = row else {
+                                    blockers.push(format!(
+                                        "memory_entry_id {memory_id} is not a project_memory_publish receipt"
+                                    ));
+                                    continue;
+                                };
+                                let row_project: Option<String> =
+                                    row.try_get("project_id").map_err(storage)?;
+                                let visibility: String =
+                                    row.try_get("visibility").map_err(storage)?;
+                                let supersedes: Option<String> =
+                                    row.try_get("supersedes_memory_id").map_err(storage)?;
+                                let actor: String =
+                                    row.try_get("agent_instance_id").map_err(storage)?;
+                                let retry_key: String =
+                                    row.try_get("idempotency_key").map_err(storage)?;
+                                let input_json: String =
+                                    row.try_get("input_json").map_err(storage)?;
+                                let input: PublishProjectMemory =
+                                    serde_json::from_str(&input_json).map_err(storage)?;
+                                if row_project.as_deref() != Some(&project_id.to_string())
+                                    || visibility != "shared"
+                                    || input.task_id != task.id
+                                {
+                                    blockers.push(format!(
+                                        "memory_entry_id {memory_id} was not published by this task into its current project"
+                                    ));
+                                    continue;
+                                }
+                                if disposition.status == "updated" && supersedes.is_none() {
+                                    blockers.push(format!(
+                                        "memory_entry_id {memory_id} does not supersede an existing project memory"
+                                    ));
+                                }
+                                if git_backend {
+                                    let operation_state: Option<String> = sqlx::query_scalar(
+                                        "SELECT state FROM memory_git_operations                                          WHERE domain=? AND kind='publication' AND actor_id=?                                          AND retry_key=? ORDER BY created_at DESC LIMIT 1",
+                                    )
+                                    .bind(project_id.to_string())
+                                    .bind(actor)
+                                    .bind(retry_key)
+                                    .fetch_optional(&mut *conn)
+                                    .await
+                                    .map_err(storage)?;
+                                    // Publications made before Git cutover legitimately have no
+                                    // Git operation row; project_memory_head_conn above proves
+                                    // that the mirrored entry is present in the authoritative
+                                    // Git snapshot. Once an operation row exists, only indexed
+                                    // is an acceptable terminal state.
+                                    if operation_state
+                                        .as_deref()
+                                        .is_some_and(|state| state != "indexed")
+                                    {
+                                        blockers.push(format!(
+                                            "memory_entry_id {memory_id} has a non-indexed Git publication operation"
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                        other => blockers.push(format!(
+                            "memory_disposition.status must be published, updated, or not_applicable; got {other}"
+                        )),
+                    }
+                }
+            },
+        }
     }
     match result.get("completion") {
         None if required => blockers.push(
@@ -154,10 +299,16 @@ pub(super) async fn completion_check_conn(
     }
     let template = json!({"context_revision_id":task.current_context_revision_id,
         "checks":criteria.iter().map(|c| json!({"criterion_path":c.path,"status":"pending","rationale":"","artifact_ids":[]})).collect::<Vec<_>>()});
+    let memory_disposition_template = if memory_disposition_required {
+        json!({"status":"pending","rationale":"","memory_entry_ids":[]})
+    } else {
+        Value::Null
+    };
     Ok(CompletionReadiness {
         run_id:run.id, task_id:task.id, context_revision_id:task.current_context_revision_id,
-        criteria, completion_required:required, ready:blockers.is_empty(), blockers,
-        completion_template:template,
-        verification_limit:"Validates report structure, current context, task evidence references and lifecycle; does not execute tests or independently verify artifact contents or scientific claims.".into(),
+        criteria, completion_required:required, memory_disposition_required,
+        ready:blockers.is_empty(), blockers,
+        completion_template:template, memory_disposition_template,
+        verification_limit:"Validates report structure, current context, task evidence references, explicit project-memory disposition and lifecycle; cited project memories must be source-task/project publications; Git-backed projects must have a consistent authoritative projection and any matching Git publication operation must be indexed. It does not execute tests or independently verify artifact or memory contents.".into(),
     })
 }

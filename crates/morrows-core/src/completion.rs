@@ -20,6 +20,18 @@ pub struct CompletionEvidence {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct MemoryDisposition {
+    /// published, updated, or not_applicable.
+    pub status: String,
+    /// Required for every disposition so skipping publication is an explicit decision.
+    #[serde(default)]
+    pub rationale: String,
+    /// Durable project MemoryEntry IDs created by project_memory_publish.
+    #[serde(default)]
+    pub memory_entry_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct CompletionReport {
     pub context_revision_id: String,
     pub checks: Vec<CompletionEvidence>,
@@ -32,9 +44,11 @@ pub struct CompletionReadiness {
     pub context_revision_id: Option<Id>,
     pub criteria: Vec<CompletionCriterion>,
     pub completion_required: bool,
+    pub memory_disposition_required: bool,
     pub ready: bool,
     pub blockers: Vec<String>,
     pub completion_template: Value,
+    pub memory_disposition_template: Value,
     pub verification_limit: String,
 }
 

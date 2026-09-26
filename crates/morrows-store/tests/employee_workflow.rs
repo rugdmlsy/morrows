@@ -377,7 +377,15 @@ async fn valid_completion(store: &Store, run: Id, agent: Id, task: Id) -> Value 
         check["rationale"] = json!("Fixture assertion passed; simulation only");
         check["artifact_ids"] = json!([artifact.id]);
     }
-    json!({"completion":completion,"simulation_only":true})
+    json!({
+        "completion":completion,
+        "memory_disposition":{
+            "status":"not_applicable",
+            "rationale":"Fixture changes only exercise lifecycle validation; no reusable project knowledge was produced.",
+            "memory_entry_ids":[]
+        },
+        "simulation_only":true
+    })
 }
 
 #[tokio::test]
@@ -433,6 +441,234 @@ async fn completion_blocks_failed_missing_duplicate_and_foreign_evidence_without
     );
     store.complete_run(run.id, agent, valid).await.unwrap();
     assert_eq!(store.get_task(task).await.unwrap().state, TaskState::Done);
+}
+
+#[tokio::test]
+async fn completion_requires_explicit_project_memory_disposition() {
+    let store = Store::connect("sqlite::memory:").await.unwrap();
+    let (agent, _, task, _) = fixture(&store).await;
+    let assignment = store
+        .claim_task(task, agent, "executor", 300)
+        .await
+        .unwrap();
+    let run = store.start_run(assignment.id, agent, None).await.unwrap();
+
+    let preview = store
+        .run_completion_check(run.id, agent, &json!({}))
+        .await
+        .unwrap();
+    assert!(preview.memory_disposition_required);
+    assert_eq!(
+        preview.memory_disposition_template,
+        json!({"status":"pending","rationale":"","memory_entry_ids":[]})
+    );
+    assert!(
+        preview
+            .blockers
+            .iter()
+            .any(|blocker| blocker.contains("memory_disposition"))
+    );
+
+    let mut invalid = valid_completion(&store, run.id, agent, task).await;
+    invalid["memory_disposition"] = json!({
+        "status":"not_applicable",
+        "rationale":"",
+        "memory_entry_ids":[]
+    });
+    assert!(
+        !store
+            .run_completion_check(run.id, agent, &invalid)
+            .await
+            .unwrap()
+            .ready
+    );
+
+    let valid = valid_completion(&store, run.id, agent, task).await;
+    assert!(
+        store
+            .run_completion_check(run.id, agent, &valid)
+            .await
+            .unwrap()
+            .ready
+    );
+}
+
+#[tokio::test]
+async fn completion_memory_disposition_requires_same_task_project_publication_and_real_update() {
+    let store = Store::connect("sqlite::memory:").await.unwrap();
+    let (agent, project, task, context) = fixture(&store).await;
+    let assignment = store
+        .claim_task(task, agent, "executor", 300)
+        .await
+        .unwrap();
+    let run = store.start_run(assignment.id, agent, None).await.unwrap();
+
+    let other_task = store
+        .create_task(
+            serde_json::from_value(json!({"title":"Other", "project_id":project, "state":"ready"}))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let other_context = store
+        .create_context_revision(
+            other_task.id,
+            serde_json::from_value(json!({
+                "goal":"Other",
+                "background":"Other source",
+                "current_summary":"Other result",
+                "constraints":{}
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    store
+        .claim_task(other_task.id, agent, "executor", 300)
+        .await
+        .unwrap();
+    let foreign = store
+        .publish_project_memory(
+            agent,
+            publication(other_task.id, other_context.id, "foreign-completion-memory"),
+        )
+        .await
+        .unwrap();
+
+    let mut wrong = valid_completion(&store, run.id, agent, task).await;
+    wrong["memory_disposition"] = json!({
+        "status":"published",
+        "rationale":"Wrong source task should be rejected.",
+        "memory_entry_ids":[foreign.id]
+    });
+    let preview = store
+        .run_completion_check(run.id, agent, &wrong)
+        .await
+        .unwrap();
+    assert!(!preview.ready);
+    assert!(
+        preview
+            .blockers
+            .iter()
+            .any(|b| b.contains("not published by this task"))
+    );
+
+    let first = store
+        .publish_project_memory(agent, publication(task, context, "completion-memory"))
+        .await
+        .unwrap();
+    let mut published = valid_completion(&store, run.id, agent, task).await;
+    published["memory_disposition"] = json!({
+        "status":"published",
+        "rationale":"A reusable project finding was published from this task.",
+        "memory_entry_ids":[first.id]
+    });
+    assert!(
+        store
+            .run_completion_check(run.id, agent, &published)
+            .await
+            .unwrap()
+            .ready
+    );
+
+    let mut fake_update = published.clone();
+    fake_update["memory_disposition"]["status"] = json!("updated");
+    let preview = store
+        .run_completion_check(run.id, agent, &fake_update)
+        .await
+        .unwrap();
+    assert!(!preview.ready);
+    assert!(
+        preview
+            .blockers
+            .iter()
+            .any(|b| b.contains("does not supersede"))
+    );
+
+    let mut revision = publication(task, context, "completion-memory-revision");
+    revision.title = "Reusable observation revised".into();
+    revision.supersedes_memory_id = Some(first.id);
+    let revised = store.publish_project_memory(agent, revision).await.unwrap();
+    let mut updated = valid_completion(&store, run.id, agent, task).await;
+    updated["memory_disposition"] = json!({
+        "status":"updated",
+        "rationale":"The prior project finding was superseded with the durable final state.",
+        "memory_entry_ids":[revised.id]
+    });
+    assert!(
+        store
+            .run_completion_check(run.id, agent, &updated)
+            .await
+            .unwrap()
+            .ready
+    );
+}
+
+#[tokio::test]
+async fn completion_accepts_pre_cutover_publication_from_verified_git_mirror() {
+    let store = Store::connect("sqlite::memory:").await.unwrap();
+    let (agent, project, task, context) = fixture(&store).await;
+    let assignment = store
+        .claim_task(task, agent, "executor", 300)
+        .await
+        .unwrap();
+    let run = store.start_run(assignment.id, agent, None).await.unwrap();
+
+    let memory = store
+        .publish_project_memory(agent, publication(task, context, "pre-cutover-memory"))
+        .await
+        .unwrap();
+    let verified = store.mirror_project_memory(project).await.unwrap();
+    store
+        .cutover_project_memory(project, &verified)
+        .await
+        .unwrap();
+
+    let mut valid = valid_completion(&store, run.id, agent, task).await;
+    valid["memory_disposition"] = json!({
+        "status":"published",
+        "rationale":"The task publication predates cutover but is present in the verified authoritative Git mirror.",
+        "memory_entry_ids":[memory.id]
+    });
+    let preview = store
+        .run_completion_check(run.id, agent, &valid)
+        .await
+        .unwrap();
+    assert!(preview.ready, "{:?}", preview.blockers);
+}
+
+#[tokio::test]
+async fn completion_accepts_indexed_git_project_memory_publication() {
+    let store = Store::connect("sqlite::memory:").await.unwrap();
+    let (agent, project, task, context) = fixture(&store).await;
+    let assignment = store
+        .claim_task(task, agent, "executor", 300)
+        .await
+        .unwrap();
+    let run = store.start_run(assignment.id, agent, None).await.unwrap();
+
+    let verified = store.mirror_project_memory(project).await.unwrap();
+    store
+        .cutover_project_memory(project, &verified)
+        .await
+        .unwrap();
+    let head = store.project_memory_head(project).await.unwrap().unwrap();
+
+    let mut input = publication(task, context, "git-completion-memory");
+    input.base_commit = Some(head);
+    let memory = store.publish_project_memory(agent, input).await.unwrap();
+
+    let mut valid = valid_completion(&store, run.id, agent, task).await;
+    valid["memory_disposition"] = json!({
+        "status":"published",
+        "rationale":"The reusable result was durably published through the Git-authoritative backend.",
+        "memory_entry_ids":[memory.id]
+    });
+    let preview = store
+        .run_completion_check(run.id, agent, &valid)
+        .await
+        .unwrap();
+    assert!(preview.ready, "{:?}", preview.blockers);
 }
 
 #[tokio::test]

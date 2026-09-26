@@ -550,7 +550,7 @@ impl Store {
         if !active {
             return Err(DomainError::Conflict("assignment is not active".into()));
         }
-        let readiness = completion::completion_check_conn(&mut tx, &run, &result).await?;
+        let readiness = completion::completion_check_conn(self, &mut tx, &run, &result).await?;
         if !readiness.ready {
             return Err(DomainError::Conflict(format!(
                 "completion blocked: {}",

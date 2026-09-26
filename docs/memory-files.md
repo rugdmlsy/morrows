@@ -131,5 +131,14 @@ Git 后端禁用共享项目的通用 SQL-only create 路径。读 projection �
 核对其 indexed_commit 和完整记录均与实际 Git head 一致；损坏或未完成索引时拒绝读取，
 不会把竞争的 SQL 内容当成事实。恢复与切换是显式操作，不删除历史。
 
+项目任务的 executor 在完成 Run 前还必须显式提交长期记忆处置。run_completion_check
+返回 memory_disposition_template：有可复用知识时先调用 project_memory_publish，再以
+published 或 updated 引用本任务实际产生的 MemoryEntry；updated 引用的记录必须
+真实 supersede 旧项目记忆。确实没有可复用内容时使用 not_applicable 并说明原因。
+更新 Task Context 本身不能代替项目长期记忆。Git 后端完成校验会确认当前 ref / projection
+一致；如果该 publication 有 Git operation，则必须已经 indexed。切换前发布、随后经
+完整 mirror 导入 Git 的旧 publication 没有 operation 行，仍可凭已验证的 authoritative
+snapshot 通过，避免把迁移历史误判成未发布。
+
 `POST /api/projects/<UUID>/memory/rebuild` 可以从已知权威 head 重建缺失或损坏的索引记录。
 意外 head 移动或额外 SQL 记录必须先调查；rebuild 不认可未知 commit，也不删除额外证据。
