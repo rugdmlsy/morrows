@@ -8,6 +8,7 @@ mod launch;
 mod lsm;
 mod mcp;
 mod memory;
+mod memory_search;
 mod operator_auth;
 mod session;
 
@@ -21,6 +22,7 @@ use axum::{
     routing::{get, post},
 };
 use mcp::MorrowsMcp;
+use memory_search::MemorySearch;
 use morrows_core::{CreateContextRevision, CreateProject, CreateTask, DomainError, Id};
 use morrows_store::Store;
 use rmcp::transport::{
@@ -208,6 +210,11 @@ async fn main() -> anyhow::Result<()> {
             "returned abandoned Agent delivery claims to the queue"
         );
     }
+    let managed_memory_search = MemorySearch::managed();
+    tracing::info!(
+        enabled = managed_memory_search.is_some(),
+        "configured MemSearch project-memory retrieval"
+    );
     let state = AppState {
         store: store.clone(),
     };
@@ -251,7 +258,12 @@ async fn main() -> anyhow::Result<()> {
     let mcp_store = store.clone();
     let mcp_service: StreamableHttpService<MorrowsMcp, LocalSessionManager> =
         StreamableHttpService::new(
-            move || Ok(MorrowsMcp::new(mcp_store.clone())),
+            move || {
+                Ok(MorrowsMcp::new_with_memory_search(
+                    mcp_store.clone(),
+                    managed_memory_search.clone(),
+                ))
+            },
             Default::default(),
             StreamableHttpServerConfig::default()
                 .with_json_response(true)
@@ -398,7 +410,12 @@ async fn health() -> Json<Value> {
     Json(json!({
         "ok": true,
         "service": "morrows",
-        "mcp": {"ready": true, "path": "/mcp"}
+        "mcp": {"ready": true, "path": "/mcp"},
+        "memory_search": {
+            "enabled": MemorySearch::managed().is_some(),
+            "engine": "memsearch",
+            "index_role": "rebuildable_shadow"
+        }
     }))
 }
 

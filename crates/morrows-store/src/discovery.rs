@@ -43,14 +43,15 @@ impl Store {
         .into_iter()
         .map(row_to_run)
         .collect::<Result<Vec<_>, _>>()?;
+        // Milestones are task execution history, not private Agent memory.
+        // Any Agent that may read the task can inspect them immediately; project
+        // memory publication is a separate knowledge-curation operation.
         let milestones = sqlx::query(
             "SELECT m.* FROM run_milestones m
-             JOIN runs r ON r.id=m.run_id
-             WHERE m.task_id=? AND r.agent_instance_id=?
+             WHERE m.task_id=?
              ORDER BY m.created_at DESC,m.sequence DESC LIMIT ? OFFSET ?",
         )
         .bind(task_id.to_string())
-        .bind(agent_id.to_string())
         .bind(limit + 1)
         .bind(offset)
         .fetch_all(&self.pool)
@@ -62,7 +63,7 @@ impl Store {
         Ok(json!({
             "assignments": Page::from_extra_row(assignments, limit, offset),
             "my_runs": Page::from_extra_row(runs, limit, offset),
-            "my_milestones": Page::from_extra_row(milestones, limit, offset),
+            "milestones": Page::from_extra_row(milestones, limit, offset),
             "continuation_policy": self.task_continuation_policy(task_id).await?,
             "recovery": self.task_recovery_context(task_id, agent_id).await?,
         }))

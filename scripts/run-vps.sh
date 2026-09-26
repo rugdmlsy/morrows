@@ -6,6 +6,7 @@ readonly server_bin="${MORROWS_SERVER_BIN:-${root}/target/release/morrows-server
 readonly lsm_env="${MORROWS_LSM_SOURCE_ENV:-/home/morrow/.config/local-shell-mcp/service.env}"
 readonly guard_file="${MORROWS_DEPLOY_GUARD_FILE:-/home/morrow/.config/morrows/DEPLOYED_RELEASE}"
 readonly installed_unit="${MORROWS_SYSTEMD_UNIT:-/etc/systemd/system/morrows.service}"
+readonly memsearch_python="${MORROWS_MEMSEARCH_PYTHON:-$HOME/.local/share/morrows-memsearch/venv/bin/python}"
 
 deployment_guard_error() {
   echo "ERROR: refusing to start an unmanaged Morrows production deployment." >&2
@@ -31,7 +32,10 @@ test -x "${server_bin}" || deployment_guard_error
 cmp -s "${server_bin}" "${artifacts}/server" || deployment_guard_error
 diff -qr "${root}/web/dist" "${artifacts}/web" >/dev/null || deployment_guard_error
 cmp -s "${root}/scripts/run-vps.sh" "${artifacts}/launcher" || deployment_guard_error
+cmp -s "${root}/scripts/memory_search_bridge.py" "${artifacts}/memory_search_bridge.py" || deployment_guard_error
 cmp -s "${installed_unit}" "${artifacts}/unit" || deployment_guard_error
+test -x "${memsearch_python}" || deployment_guard_error
+export MORROWS_MEMSEARCH_PYTHON="${memsearch_python}"
 if [[ -r "${lsm_env}" ]]; then
   lsm_control_key="$(
     set +u
