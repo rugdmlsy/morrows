@@ -23,6 +23,11 @@ impl Store {
     ) -> Result<RunMilestone, DomainError> {
         required(&input.summary, "summary")?;
         required(&input.next_step, "next_step")?;
+        if input.next_plan.is_empty() {
+            return Err(DomainError::InvalidInput(
+                "next_plan must contain at least one ordered recovery step".into(),
+            ));
+        }
         if !matches!(
             input.kind.as_str(),
             "milestone" | "budget_pressure" | "handoff_preparation" | "manual"
@@ -38,6 +43,7 @@ impl Store {
             .chain(&input.verified)
             .chain(&input.remaining)
             .chain(&input.blockers)
+            .chain(&input.next_plan)
             .chain(&input.execution_locations)
         {
             required(item, "milestone item")?;
@@ -174,6 +180,7 @@ impl Store {
             "remaining": input.remaining,
             "blockers": input.blockers,
             "next_step": input.next_step,
+            "next_plan": input.next_plan,
             "execution_locations": input.execution_locations,
             "artifact_ids": input.artifact_ids,
             "decision_ids": input.decision_ids,

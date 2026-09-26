@@ -117,6 +117,10 @@ pub struct CreateRunMilestone {
     #[serde(default)]
     pub blockers: Vec<String>,
     pub next_step: String,
+    /// Ordered recovery plan after next_step. Old persisted milestones may omit it,
+    /// but all new milestone writes must contain at least one non-empty item.
+    #[serde(default)]
+    pub next_plan: Vec<String>,
     #[serde(default)]
     pub execution_locations: Vec<String>,
     #[serde(default)]

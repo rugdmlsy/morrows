@@ -1046,7 +1046,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Persist an immutable Run milestone and atomically refresh the Run's latest checkpoint. Use after a substantive subgoal, before a long/risky operation, when provider/token budget is under pressure, and immediately before handoff. Include exact next_step, execution_locations, and relevant same-task evidence IDs."
+        description = "Persist an immutable Run milestone and atomically refresh the Run's latest checkpoint. Use after a substantive subgoal, before a long/risky operation, when provider/token budget is under pressure, and immediately before handoff. Include exact next_step, ordered next_plan, execution_locations, and relevant same-task evidence IDs."
     )]
     async fn run_milestone(
         &self,
@@ -1985,6 +1985,296 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn e2e_agent_a_milestone_completion_and_agent_b_exact_memory_continuation() {
+        let store = Store::connect("sqlite::memory:").await.unwrap();
+        let agent_a = store.register_agent("memory-writer-a", &[]).await.unwrap();
+        let agent_b = store.register_agent("memory-reader-b", &[]).await.unwrap();
+        let project = store
+            .create_project(
+                serde_json::from_value(json!({
+                    "name":"E2E durable memory",
+                    "description":"Verify exact cross-agent continuation without chat history"
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Exercise the same Git-authoritative backend used in production.
+        let initial_head = store.mirror_project_memory(project.id).await.unwrap();
+        store
+            .cutover_project_memory(project.id, &initial_head)
+            .await
+            .unwrap();
+
+        let task_a = store
+            .create_task(
+                serde_json::from_value(json!({
+                    "project_id":project.id,
+                    "title":"Discover protocol",
+                    "description":"Agent A discovers and persists an exact reusable result",
+                    "state":"ready"
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let context_a = store
+            .create_context_revision(
+                task_a.id,
+                serde_json::from_value(json!({
+                    "goal":"Find the exact recovery protocol",
+                    "background":"No Session/chat history is created in this E2E",
+                    "current_summary":"Investigating sentinel protocol",
+                    "constraints":{},
+                    "created_by_actor_id":"human:e2e"
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let assignment_a = store
+            .claim_task(task_a.id, agent_a.id, "executor", 300)
+            .await
+            .unwrap();
+        let run_a = store
+            .start_run(assignment_a.id, agent_a.id, None)
+            .await
+            .unwrap();
+        let mcp = MorrowsMcp::new(store.clone());
+
+        let exact_plan = vec![
+            "Open /workspace/protocol.md and confirm marker ALPHA-17".to_string(),
+            "Run probe --mode safe and require result=PASS".to_string(),
+            "Only then continue with protocol-v2".to_string(),
+        ];
+        let artifact: Value = serde_json::from_str(
+            &mcp.artifact_create(
+                Parameters(CreateArtifactRequest {
+                    task_id: task_a.id.to_string(),
+                    input: CreateArtifact {
+                        title: "ALPHA-17 probe receipt".into(),
+                        uri: "file:///workspace/evidence/alpha-17.json".into(),
+                        kind: "test_result".into(),
+                        description: "result=PASS; protocol=protocol-v2".into(),
+                    },
+                }),
+                Extension(parts(Some(agent_a.id))),
+            )
+            .await
+            .unwrap(),
+        )
+        .unwrap();
+        let artifact_id = artifact["id"].as_str().unwrap().to_string();
+        let milestone: Value = serde_json::from_str(
+            &mcp.run_milestone(
+                Parameters(MilestoneRunRequest {
+                    run_id: run_a.id.to_string(),
+                    input: morrows_core::CreateRunMilestone {
+                        kind: "milestone".into(),
+                        summary: "ALPHA-17 probe passed; protocol-v2 is the verified continuation"
+                            .into(),
+                        completed: vec!["identified protocol-v2".into()],
+                        verified: vec!["probe ALPHA-17 returned PASS".into()],
+                        remaining: vec!["future tasks should follow the ordered plan".into()],
+                        blockers: vec![],
+                        next_step: exact_plan[0].clone(),
+                        next_plan: exact_plan.clone(),
+                        execution_locations: vec![
+                            "/workspace/protocol.md".into(),
+                            "probe:ALPHA-17".into(),
+                        ],
+                        artifact_ids: vec![artifact_id.clone()],
+                        decision_ids: vec![],
+                    },
+                }),
+                Extension(parts(Some(agent_a.id))),
+            )
+            .await
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(milestone["next_plan"], json!(exact_plan));
+
+        let task_b = store
+            .create_task(
+                serde_json::from_value(json!({
+                    "project_id":project.id,
+                    "title":"Continue protocol",
+                    "description":"Agent B must recover the exact prior reusable result from Morrows",
+                    "state":"ready"
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        store
+            .create_context_revision(
+                task_b.id,
+                serde_json::from_value(json!({
+                    "goal":"Continue from project knowledge",
+                    "background":"Do not consult Agent A chat; use Morrows durable state only",
+                    "current_summary":"Need prior protocol result",
+                    "constraints":{},
+                    "created_by_actor_id":"human:e2e"
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let assignment_b = store
+            .claim_task(task_b.id, agent_b.id, "executor", 300)
+            .await
+            .unwrap();
+        let run_b = store
+            .start_run(assignment_b.id, agent_b.id, None)
+            .await
+            .unwrap();
+
+        // Negative control: a milestone alone is not promoted to project memory.
+        let before: Value = serde_json::from_str(
+            &mcp.task_context(
+                Parameters(TaskIdRequest {
+                    task_id: task_b.id.to_string(),
+                }),
+                Extension(parts(Some(agent_b.id))),
+            )
+            .await
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(before["memory"]["items"].as_array().unwrap().is_empty());
+
+        let memory_payload = json!({
+            "sentinel":"MORROWS-E2E-ALPHA-17",
+            "decision":"protocol-v2",
+            "verified_fact":"probe ALPHA-17 returned PASS",
+            "next_step":exact_plan[0],
+            "next_plan":exact_plan,
+            "source_milestone_id":milestone["id"],
+            "execution_locations":["/workspace/protocol.md","probe:ALPHA-17"]
+        });
+        let head = store
+            .project_memory_head(project.id)
+            .await
+            .unwrap()
+            .unwrap();
+        let published: Value = serde_json::from_str(
+            &mcp.project_memory_publish(
+                Parameters(morrows_core::PublishProjectMemory {
+                    task_id: task_a.id,
+                    idempotency_key: "e2e-alpha-17".into(),
+                    new_memory_id: None,
+                    expected_project_id: Some(project.id),
+                    base_commit: Some(head),
+                    title: "Verified ALPHA-17 continuation protocol".into(),
+                    content: memory_payload.clone(),
+                    verification_status: "verified".into(),
+                    basis: "Agent A milestone recorded the exact probe result and ordered recovery plan."
+                        .into(),
+                    context_revision_id: context_a.id,
+                    artifact_ids: vec![artifact_id.clone()],
+                    decision_ids: vec![],
+                    supersedes_memory_id: None,
+                }),
+                Extension(parts(Some(agent_a.id))),
+            )
+            .await
+            .unwrap(),
+        )
+        .unwrap();
+        let memory_id = published["id"].as_str().unwrap().to_string();
+
+        mcp.run_complete(
+            Parameters(CompleteRunRequest {
+                run_id: run_a.id.to_string(),
+                result: json!({
+                    "ok":true,
+                    "summary":"protocol-v2 recorded and project memory published"
+                }),
+                completion: None,
+                memory_disposition: Some(morrows_core::MemoryDisposition {
+                    status: "published".into(),
+                    rationale:
+                        "The verified protocol and ordered recovery plan are reusable by later project tasks."
+                            .into(),
+                    memory_entry_ids: vec![memory_id.clone()],
+                }),
+            }),
+            Extension(parts(Some(agent_a.id))),
+        )
+        .await
+        .unwrap();
+
+        // Agent B reads only through the normal task_context surface.
+        let after: Value = serde_json::from_str(
+            &mcp.task_context(
+                Parameters(TaskIdRequest {
+                    task_id: task_b.id.to_string(),
+                }),
+                Extension(parts(Some(agent_b.id))),
+            )
+            .await
+            .unwrap(),
+        )
+        .unwrap();
+        let items = after["memory"]["items"].as_array().unwrap();
+        let recovered = items
+            .iter()
+            .find(|entry| entry["id"] == memory_id)
+            .expect("Agent B should receive Agent A's project memory");
+        assert_eq!(recovered["content"], memory_payload);
+        assert_eq!(recovered["content"]["sentinel"], "MORROWS-E2E-ALPHA-17");
+        assert_eq!(recovered["content"]["next_plan"], json!(exact_plan));
+        assert_eq!(
+            after["project"]["memory_head"],
+            json!(store.project_memory_head(project.id).await.unwrap())
+        );
+
+        // Agent B actually continues from the recovered durable plan, rather than
+        // merely observing that memory existed.
+        let recovered_plan: Vec<String> =
+            serde_json::from_value(recovered["content"]["next_plan"].clone()).unwrap();
+        let recovered_next = recovered["content"]["next_step"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let continued: Value = serde_json::from_str(
+            &mcp.run_milestone(
+                Parameters(MilestoneRunRequest {
+                    run_id: run_b.id.to_string(),
+                    input: morrows_core::CreateRunMilestone {
+                        kind: "milestone".into(),
+                        summary: "Agent B resumed from Agent A's durable project memory".into(),
+                        completed: vec![],
+                        verified: vec!["recovered MORROWS-E2E-ALPHA-17 exactly".into()],
+                        remaining: vec!["execute recovered protocol-v2 plan".into()],
+                        blockers: vec![],
+                        next_step: recovered_next.clone(),
+                        next_plan: recovered_plan.clone(),
+                        execution_locations: vec![
+                            "/workspace/protocol.md".into(),
+                            "probe:ALPHA-17".into(),
+                        ],
+                        artifact_ids: vec![],
+                        decision_ids: vec![],
+                    },
+                }),
+                Extension(parts(Some(agent_b.id))),
+            )
+            .await
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(continued["next_step"], recovered_next);
+        assert_eq!(continued["next_plan"], json!(recovered_plan));
+
+        // No Session was used: cross-agent continuation came from milestone/project memory,
+        // not copied conversation history.
+        assert!(store.list_sessions(None).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn work_request_submit_uses_employee_identity_without_priority_control() {
         let store = Store::connect("sqlite::memory:").await.unwrap();
         let employee = store.register_agent("employee", &[]).await.unwrap();
@@ -2090,6 +2380,10 @@ mod tests {
                         remaining: vec!["test".into()],
                         blockers: vec![],
                         next_step: "run tests".into(),
+                        next_plan: vec![
+                            "run tests".into(),
+                            "record result before further edits".into(),
+                        ],
                         execution_locations: vec!["file:///patch".into()],
                         artifact_ids: vec![artifact["id"].as_str().unwrap().into()],
                         decision_ids: vec![],

@@ -602,6 +602,7 @@ async fn handoff_waits_for_child_exit_and_lsm_terminalization() {
                 "remaining":["finish"],
                 "blockers":["provider quota exhausted"],
                 "next_step":"resume from uncommitted.rs after predecessor runtime is terminal",
+                "next_plan":["wait for predecessor runtime terminalization","re-open uncommitted.rs","verify live environment before continuing"],
                 "execution_locations":["uncommitted.rs","lsm:s_handoff"],
                 "artifact_ids":[],
                 "decision_ids":[]

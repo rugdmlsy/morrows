@@ -528,6 +528,7 @@ async fn continuation_chain_is_ordered_single_owner_and_recovers_checkpoints() {
                     "remaining":["continue"],
                     "blockers":["provider budget exhausted"],
                     "next_step":"continue",
+                    "next_plan":["continue","verify recovered environment before new effects"],
                     "execution_locations":["morrows:test:continuation-chain"],
                     "artifact_ids":[],
                     "decision_ids":[]

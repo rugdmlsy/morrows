@@ -46,6 +46,10 @@ async fn milestone(
                 remaining: vec!["tests".into()],
                 blockers: vec![],
                 next_step: "Run tests".into(),
+                next_plan: vec![
+                    "Run tests".into(),
+                    "inspect failures or hand off cleanly".into(),
+                ],
                 execution_locations: vec!["/work".into()],
                 artifact_ids,
                 decision_ids,

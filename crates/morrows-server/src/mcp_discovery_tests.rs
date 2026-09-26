@@ -99,6 +99,7 @@ async fn live_and_persisted_context_use_the_newest_handoff() {
                     "remaining":[next],
                     "blockers":[next],
                     "next_step":next,
+                    "next_plan":[next],
                     "execution_locations":[],
                     "artifact_ids":[],
                     "decision_ids":[]

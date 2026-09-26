@@ -337,6 +337,7 @@ mod tests {
                     "remaining":["test"],
                     "blockers":[],
                     "next_step":"test",
+                    "next_plan":["test","persist result"],
                     "execution_locations":["file:///patch"],
                     "artifact_ids":[artifact["id"]],
                     "decision_ids":[decision["id"]]

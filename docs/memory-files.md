@@ -148,7 +148,7 @@ snapshot 通过，避免把迁移历史误判成未发布。
 
 run_checkpoint 仍用于低成本的最新运行快照；run_milestone 用于不可变的阶段边界。
 Milestone 在同一事务中写入历史记录并刷新 Run 的 latest checkpoint，记录
-completed、verified、remaining、blockers、next_step、execution_locations 以及关联的
+completed、verified、remaining、blockers、next_step、next_plan、execution_locations 以及关联的
 Artifact / Decision，同时固定创建时的 Task ContextRevision。
 
 新的 handoff 必须引用 source Run 的最新 milestone。若之后又更新了 Task Context、

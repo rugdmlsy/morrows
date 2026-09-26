@@ -49,6 +49,7 @@ fn milestone_input(artifact_ids: Vec<String>, decision_ids: Vec<String>) -> Crea
         remaining: vec!["phase two".into()],
         blockers: vec![],
         next_step: "start phase two".into(),
+        next_plan: vec!["start phase two".into(), "verify phase two".into()],
         execution_locations: vec!["/workspace/project".into()],
         artifact_ids,
         decision_ids,
@@ -65,6 +66,26 @@ fn handoff_input(milestone: Id, artifact_ids: Vec<String>) -> CreateHandoff {
         artifact_ids,
         decision_ids: vec![],
     }
+}
+
+#[tokio::test]
+async fn new_milestones_require_a_nonempty_ordered_next_plan() {
+    let (store, agent, _, _, _, run) = setup().await;
+    let mut input = milestone_input(vec![], vec![]);
+    input.next_plan.clear();
+    let error = store
+        .create_run_milestone(run.id, agent.id, input)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("next_plan"));
+
+    let mut input = milestone_input(vec![], vec![]);
+    input.next_plan = vec![" ".into()];
+    let error = store
+        .create_run_milestone(run.id, agent.id, input)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("milestone item"));
 }
 
 #[tokio::test]
