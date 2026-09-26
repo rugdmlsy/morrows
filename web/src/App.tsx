@@ -364,8 +364,12 @@ function agentKindDisplayName(kind: string, locale: Locale) {
 
 function cleanAgentDisplayName(entry: FleetEntry, locale: Locale) {
   const { instance, profile, machine, reported_identity } = entry;
-  if (reported_identity?.agent_name?.trim()) return reported_identity.agent_name.trim();
-  if (instance.display_name?.trim()) return instance.display_name.trim();
+  const displayName = instance.display_name?.trim();
+  const reportedName = reported_identity?.agent_name?.trim();
+  const generatedOauthName = profile.provider === "lsm" && /^lsm-oauth-client-\d+$/i.test(displayName || "");
+  if (displayName && !generatedOauthName) return displayName;
+  if (reportedName) return reportedName;
+  if (displayName) return displayName;
   if (profile.kind === "legacy" || profile.provider === "legacy") {
     const raw = instance.name.toLowerCase();
     if (raw.startsWith("codex-personal-handoff-")) {
@@ -2214,6 +2218,7 @@ export default function App() {
 
                     <dl className="fleet-identity">
                       <div><dt>{t("agentType")}</dt><dd>{profile.name} · {agentKindDisplayName(profile.kind, locale)}</dd></div>
+                      <div><dt>{t("agentName")}</dt><dd>{entry.reported_identity?.agent_name?.trim() || (locale === "zh-CN" ? "未上报" : "Not reported")}</dd></div>
                       <div><dt>{t("identity")}</dt><dd>{accountDisplayName(entry, locale)}</dd></div>
                       <div><dt>{t("runtimeLocation")}</dt><dd>{machineDisplayName(entry, locale)}</dd></div>
                     </dl>
