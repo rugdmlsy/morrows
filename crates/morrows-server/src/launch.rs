@@ -1198,8 +1198,10 @@ Run ID: {run_id}\n\
 Morrows Session ID: {session_id}\n\
 \nUse the configured Morrows MCP server as the durable source of truth. The Assignment and Run already exist; do not claim the task or start another Run. This execution is attached to the durable Morrows Session shown above; use session_get for its conversation history, session_reply for human-facing replies, and session_summary_revise after materially advancing it. Before substantial work, read task_context for Task ID {task_id}. Read instructions_get for management updates. Checkpoint meaningful progress to Run ID {run_id}. If the task is fully complete, call run_complete for Run ID {run_id}. If blocked or incomplete, checkpoint the blocker/progress and exit without calling run_complete.\n\
 \nTask title:\n{title}\n\
+\nContext preparation and source handling:\n{context_capture}\n\
 \nTask description:\n{description}\n\
 \nContext goal:\n{goal}\n\
+\nContext background (bounded; read task_context for the full original):\n{background}\n\
 \nContext summary:\n{summary}\n\
 \nContext constraints (JSON, bounded):\n{constraints}\n\
 \nInstructions received before launch:\n{instructions}\n",
@@ -1213,8 +1215,12 @@ Morrows Session ID: {session_id}\n\
             .map(|value| value.to_string())
             .unwrap_or_else(|| "(legacy-unbound)".into()),
         title = clip(&execution.task.title, 2000),
+        context_capture = include_str!("context_capture_instructions.md"),
         description = clip(&execution.task.description, 6000),
         goal = context.map(|v| clip(&v.goal, 4000)).unwrap_or_default(),
+        background = context
+            .map(|v| clip(&v.background, 6000))
+            .unwrap_or_default(),
         summary = context
             .map(|v| clip(&v.current_summary, 6000))
             .unwrap_or_default(),
@@ -1816,7 +1822,10 @@ mod tests {
             .unwrap();
 
         store.claim_launch_job().await.unwrap().unwrap();
-        let execution = store.begin_launch_attempt(attempt.id).await.unwrap();
+        let mut execution = store.begin_launch_attempt(attempt.id).await.unwrap();
+        execution.context = Some(store.create_context_revision(execution.task.id, serde_json::from_value(json!({
+            "background":"Machine: test-node; checkout: /srv/work/audit; original report: work/report.json"
+        })).unwrap()).await.unwrap());
         let deliveries = store.agent_delivery_inbox(agent.id, 80).await.unwrap();
         let delivery_prompt = build_delivery_prompt(&execution, &deliveries);
         assert!(delivery_prompt.contains("answer this direct message"));
@@ -1825,6 +1834,13 @@ mod tests {
         assert!(
             build_prompt(&execution).contains("instruction already loaded by launch execution")
         );
+        let prompt = build_prompt(&execution);
+        assert!(prompt.contains("checkout: /srv/work/audit; original report: work/report.json"));
+        assert_eq!(
+            prompt.matches("Context preparation and capture:").count(),
+            1
+        );
+        assert!(prompt.contains("observation time, verification status"));
     }
 
     #[tokio::test]

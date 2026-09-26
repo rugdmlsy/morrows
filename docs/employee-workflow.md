@@ -16,6 +16,22 @@ required environment, and current jobs. Check the timestamps and provenance of
 imported knowledge. Missing artifact links cannot be inferred from a task title or
 old statement that no jobs were running.
 
+The shared capture instructions in
+`crates/morrows-server/src/context_capture_instructions.md` are reused by MCP
+initialization, executor launch prompts and direct Session prompts. They require
+authorized imports to retain execution locations, source/evidence references,
+observation times and unresolved inputs. A source summary can be older than its
+latest activity; historical command metadata alone does not verify output content
+or current filesystem state. An external Session ID does not grant access.
+
+The launch prompt includes a bounded background excerpt and points to the full
+`task_context`. A persisted ContextPackage retains the pinned full task context,
+project background and all current shared memory IDs, as well as evidence IDs.
+Without a handoff, its continuation text uses the author's current summary verbatim
+and labels that source. Packages never include an employee's private memory or
+manufacture verified results. These builders preserve stored information; they do
+not automatically fetch private sources or reconstruct facts never saved to Morrows.
+
 ## What to save and when
 
 | Record | When to use it | What it does not do |

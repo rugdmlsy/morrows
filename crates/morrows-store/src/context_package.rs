@@ -18,7 +18,7 @@ impl Store {
                 changed_files_json,verified_results_json,blockers_json,
                 unresolved_questions_json,next_action,source_run_id,
                 source_agent_id,created_at
-             ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+             ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         )
         .bind(id.to_string())
         .bind(input.work_item_id.to_string())
@@ -104,22 +104,61 @@ impl Store {
         let artifact_refs: Vec<Id> = artifacts.into_iter().map(|a| a.id).collect();
 
         let handoffs = self.task_handoffs(work_item_id).await?;
+        let context = match task.current_context_revision_id {
+            Some(id) => Some(self.get_context_revision(id).await?),
+            None => None,
+        };
+        let project = match task.project_id {
+            Some(id) => Some(self.get_project(id).await?),
+            None => None,
+        };
+        // Packages are readable as shared task knowledge. Capture only shared
+        // memory IDs, never the source employee's private memory. Traverse every
+        // page rather than silently losing references beyond the first page.
+        let mut memory_refs = Vec::new();
+        let mut offset = 0;
+        loop {
+            let page = self
+                .context_memories_page(
+                    Some(work_item_id),
+                    task.project_id,
+                    None,
+                    false,
+                    100,
+                    offset,
+                )
+                .await?;
+            memory_refs.extend(page.items.into_iter().map(|m| m.id.to_string()));
+            match page.next_offset {
+                Some(next) => offset = next,
+                None => break,
+            }
+        }
         let mut blockers = Vec::new();
         let mut next_action = String::new();
+        let mut next_action_source = None;
         // task_handoffs is chronological; continuation comes from the newest handoff.
         if let Some(latest_handoff) = handoffs.last() {
             blockers = latest_handoff.content.blockers.clone();
             if let Some(first_remaining) = latest_handoff.content.remaining.first() {
                 next_action = first_remaining.clone();
+                next_action_source = Some("latest_handoff.remaining[0]");
+            }
+        } else if let Some(current) = &context {
+            // Preserve the author's current working plan verbatim when no
+            // handoff exists; label its source instead of inventing a new action.
+            next_action = current.current_summary.clone();
+            if !next_action.is_empty() {
+                next_action_source = Some("context.current_summary");
             }
         }
 
         self.create_context_package(CreateContextPackage {
             work_item_id,
             objective,
-            summary: None,
+            summary: Some(json!({"context":context, "project":project, "next_action_source":next_action_source})),
             context_snapshot_id: task.current_context_revision_id,
-            memory_refs: vec![],
+            memory_refs,
             decision_refs,
             artifact_refs,
             changed_files: vec![],
@@ -142,18 +181,14 @@ fn row_to_context_package(row: sqlx::sqlite::SqliteRow) -> Result<ContextPackage
     let changed_files: String = row.try_get("changed_files_json").map_err(storage)?;
     let verified_results: String = row.try_get("verified_results_json").map_err(storage)?;
     let blockers: String = row.try_get("blockers_json").map_err(storage)?;
-    let unresolved_questions: String = row
-        .try_get("unresolved_questions_json")
-        .map_err(storage)?;
+    let unresolved_questions: String = row.try_get("unresolved_questions_json").map_err(storage)?;
 
     Ok(ContextPackage {
         id: parse_id(row.try_get("id").map_err(storage)?)?,
         work_item_id: parse_id(row.try_get("work_item_id").map_err(storage)?)?,
         objective: row.try_get("objective").map_err(storage)?,
         summary: summary.map(parse_json).transpose()?,
-        context_snapshot_id: parse_opt_id(
-            row.try_get("context_snapshot_id").map_err(storage)?,
-        )?,
+        context_snapshot_id: parse_opt_id(row.try_get("context_snapshot_id").map_err(storage)?)?,
         memory_refs: serde_json::from_str(&memory_refs).unwrap_or_default(),
         decision_refs: serde_json::from_str(&decision_refs).unwrap_or_default(),
         artifact_refs: serde_json::from_str(&artifact_refs).unwrap_or_default(),

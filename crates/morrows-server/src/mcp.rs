@@ -1191,8 +1191,13 @@ impl MorrowsMcp {
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for MorrowsMcp {
     fn get_info(&self) -> ServerConfig {
-        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
-            .with_instructions(include_str!("mcp_instructions.md"))
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
+            format!(
+                "{}\n\n{}",
+                include_str!("mcp_instructions.md"),
+                include_str!("context_capture_instructions.md")
+            ),
+        )
     }
 }
 

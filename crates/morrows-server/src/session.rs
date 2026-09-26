@@ -618,7 +618,8 @@ fn build_session_runtime_prompt(
         } else {
             messages
         },
-    )
+    ) + "\n\n"
+        + include_str!("context_capture_instructions.md")
 }
 
 fn render_session_recovery_summary(summary: &SessionSummaryRevision) -> String {
@@ -1031,6 +1032,11 @@ echo '{{"type":"thread.started","thread_id":"fake-session-thread-123"}}'
         assert!(prompt.contains("summary_fact"));
         assert!(prompt.contains("session_summary_get"));
         assert!(prompt.contains("session_get"));
+        assert_eq!(
+            prompt.matches("Context preparation and capture:").count(),
+            1
+        );
+        assert!(prompt.contains("An external Session ID is not authorization"));
         assert_eq!(finished.model.as_deref(), Some("gpt-5.6-sol"));
         assert_eq!(finished.reasoning_effort.as_deref(), Some("high"));
         let args = std::fs::read_to_string(&args_path).unwrap();
