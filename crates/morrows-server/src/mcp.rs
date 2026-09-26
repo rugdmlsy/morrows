@@ -142,51 +142,27 @@ impl MorrowsMcp {
             "context_snapshot_id": p.context_snapshot_id,
             "context_matches_current": p.context_snapshot_id == task.current_context_revision_id,
         }));
+        let requests = self
+            .store
+            .assignment_requests_page(Some(task_id), Some(agent_id), true, 5, 0)
+            .await
+            .map_err(|e| e.to_string())?;
         Ok(json!({
             "task": task, "project": project, "context": context,
             "memory": memory, "instructions": instructions, "collaboration": collaboration,
             "missing_context": missing, "persisted_package": package_ref, "execution": execution,
             "acceptance_criteria_paths": acceptance_paths,
+            "assignment_requests": requests,
+            "workflow": {"request_assignment":"task_request_assignment", "request_status":"assignment_request_list", "publish_project_knowledge":"project_memory_publish", "completion_preflight":"run_completion_check", "structured_completion_required_for_executor":context.as_ref().is_some_and(|c| !morrows_core::completion_criteria(&c.constraints).is_empty())},
             "read_more": {"memory": "memory_get", "instructions": "instructions_get", "collaboration": "task_collaboration", "events": "task_events", "execution": "task_get"},
         }).to_string())
     }
 
     async fn ensure_task_write_access(&self, task_id: Id, agent_id: Id) -> Result<(), String> {
         self.store
-            .get_agent(agent_id)
+            .ensure_task_write_access(task_id, agent_id)
             .await
-            .map_err(|e| e.to_string())?;
-        let task = self
-            .store
-            .get_task(task_id)
-            .await
-            .map_err(|e| e.to_string())?;
-        if task.owner_actor_id == format!("agent:{agent_id}") {
-            return Ok(());
-        }
-        let assignments = self
-            .store
-            .task_assignments(task_id)
-            .await
-            .map_err(|e| e.to_string())?;
-        if assignments
-            .iter()
-            .any(|assignment| assignment.agent_instance_id == agent_id)
-        {
-            return Ok(());
-        }
-        if self
-            .store
-            .agent_has_open_task_session(task_id, agent_id)
-            .await
-            .map_err(|e| e.to_string())?
-        {
-            return Ok(());
-        }
-        Err(
-            "task is not owned by, assigned to, or shared through an open Task Session with the authenticated agent instance"
-                .into(),
-        )
+            .map_err(|e| e.to_string())
     }
 }
 
@@ -324,6 +300,52 @@ pub struct CompleteRunRequest {
     #[serde(default)]
     #[schemars(with = "std::collections::BTreeMap<String, Value>")]
     pub result: Value,
+    /// Required for executor tasks with acceptance_criteria/freeze_requires. Obtain the template from run_completion_check.
+    pub completion: Option<morrows_core::CompletionReport>,
+}
+
+impl CompleteRunRequest {
+    fn result_with_completion(&self) -> Result<Value, String> {
+        let mut result = self.result.clone();
+        if let Some(completion) = &self.completion {
+            if result.is_null() {
+                result = json!({});
+            }
+            let object = result
+                .as_object_mut()
+                .ok_or("result must be an object when completion is supplied")?;
+            if object.contains_key("completion") {
+                return Err("supply completion either at top level or in result, not both".into());
+            }
+            object.insert(
+                "completion".into(),
+                serde_json::to_value(completion).map_err(|e| e.to_string())?,
+            );
+        }
+        Ok(result)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct AssignmentRequestInput {
+    pub task_id: String,
+    pub role: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct AssignmentRequestList {
+    pub task_id: Option<String>,
+    #[serde(default)]
+    pub include_resolved: bool,
+    #[serde(flatten)]
+    pub page: PageRequest,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct WithdrawAssignmentRequest {
+    pub request_id: String,
+    pub reason: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1008,7 +1030,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Complete a run owned by the authenticated agent instance. M1 marks the task done when its executor run completes."
+        description = "Complete an owned run. Executor tasks with acceptance_criteria/freeze_requires require a current-context completion report with every criterion passed, rationale and same-task artifact references. Use run_completion_check first. Validation is atomic; failure leaves state unchanged. Evidence contents remain the author's responsibility."
     )]
     async fn run_complete(
         &self,
@@ -1016,12 +1038,125 @@ impl MorrowsMcp {
         Extension(parts): Extension<Parts>,
     ) -> Result<String, String> {
         let agent_id = authenticated_agent(&parts)?;
+        let result = req.result_with_completion()?;
         let run = self
             .store
-            .complete_run(parse_id(&req.run_id)?, agent_id, req.result)
+            .complete_run(parse_id(&req.run_id)?, agent_id, result)
             .await
             .map_err(|e| e.to_string())?;
         serde_json::to_string(&run).map_err(|e| e.to_string())
+    }
+
+    #[tool(
+        description = "Read-only completion preflight for an owned run. Omit result/completion to discover exact saved criteria, a report template and blockers. Supply a proposed report to validate it. Does not complete, claim, acknowledge or verify artifact contents; run_complete repeats validation atomically."
+    )]
+    async fn run_completion_check(
+        &self,
+        Parameters(req): Parameters<CompleteRunRequest>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<String, String> {
+        let result = req.result_with_completion()?;
+        serde_json::to_string(
+            &self
+                .store
+                .run_completion_check(
+                    parse_id(&req.run_id)?,
+                    authenticated_agent(&parts)?,
+                    &result,
+                )
+                .await
+                .map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())
+    }
+
+    #[tool(
+        description = "Publish durable knowledge directly to the source task's project. Requires task ownership, assignment history or an open Task Session. Project/author are server-bound; context revision and evidence references are checked. Preserve verification limits in basis/content. Revisions retain the old entry; stale supersession is rejected. Retry with the same idempotency_key and payload."
+    )]
+    async fn project_memory_publish(
+        &self,
+        Parameters(req): Parameters<morrows_core::PublishProjectMemory>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<String, String> {
+        serde_json::to_string(
+            &self
+                .store
+                .publish_project_memory(authenticated_agent(&parts)?, req)
+                .await
+                .map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())
+    }
+
+    #[tool(
+        description = "Request a role on an existing task without creating a duplicate task or claiming it. Persists a pending request visible in the control-plane queue; approval creates/reuses an assignment but does not start a Run. Exact pending retries reuse the request. Query assignment_request_list for resolution; execution still requires control-plane Run creation."
+    )]
+    async fn task_request_assignment(
+        &self,
+        Parameters(req): Parameters<AssignmentRequestInput>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<String, String> {
+        serde_json::to_string(
+            &self
+                .store
+                .request_assignment(
+                    parse_id(&req.task_id)?,
+                    authenticated_agent(&parts)?,
+                    &req.role,
+                    &req.reason,
+                )
+                .await
+                .map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())
+    }
+
+    #[tool(
+        description = "Page the caller's assignment requests, optionally filtered by task. Defaults to pending; include_resolved returns approvals, rejection reasons, withdrawn history and assignment IDs. Read-only; no automatic dispatch or acknowledgement."
+    )]
+    async fn assignment_request_list(
+        &self,
+        Parameters(req): Parameters<AssignmentRequestList>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<String, String> {
+        serde_json::to_string(
+            &self
+                .store
+                .assignment_requests_page(
+                    req.task_id.as_deref().map(parse_id).transpose()?,
+                    Some(authenticated_agent(&parts)?),
+                    req.include_resolved,
+                    req.page.limit,
+                    req.page.offset,
+                )
+                .await
+                .map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())
+    }
+
+    #[tool(
+        description = "Withdraw the caller's own pending assignment request with a reason. Preserves history, does not release assignments, and cannot undo an approval or withdraw another Agent's request."
+    )]
+    async fn assignment_request_withdraw(
+        &self,
+        Parameters(req): Parameters<WithdrawAssignmentRequest>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<String, String> {
+        serde_json::to_string(
+            &self
+                .store
+                .resolve_assignment_request(
+                    parse_id(&req.request_id)?,
+                    Some(authenticated_agent(&parts)?),
+                    "withdraw",
+                    &req.reason,
+                    900,
+                )
+                .await
+                .map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())
     }
 
     #[tool(
@@ -1193,9 +1328,10 @@ impl ServerHandler for MorrowsMcp {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
             format!(
-                "{}\n\n{}",
+                "{}\n\n{}\n\n{}",
                 include_str!("mcp_instructions.md"),
-                include_str!("context_capture_instructions.md")
+                include_str!("context_capture_instructions.md"),
+                include_str!("execution_workflow_instructions.md")
             ),
         )
     }
@@ -1338,6 +1474,11 @@ mod tests {
             "assignment_renew",
             "run_checkpoint",
             "run_complete",
+            "run_completion_check",
+            "project_memory_publish",
+            "task_request_assignment",
+            "assignment_request_list",
+            "assignment_request_withdraw",
             "task_events",
             "session_summary_get",
             "session_summary_revise",

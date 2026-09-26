@@ -1196,9 +1196,9 @@ Task ID: {task_id}\n\
 Assignment ID: {assignment_id}\n\
 Run ID: {run_id}\n\
 Morrows Session ID: {session_id}\n\
-\nUse the configured Morrows MCP server as the durable source of truth. The Assignment and Run already exist; do not claim the task or start another Run. This execution is attached to the durable Morrows Session shown above; use session_get for its conversation history, session_reply for human-facing replies, and session_summary_revise after materially advancing it. Before substantial work, read task_context for Task ID {task_id}. Read instructions_get for management updates. Checkpoint meaningful progress to Run ID {run_id}. If the task is fully complete, call run_complete for Run ID {run_id}. If blocked or incomplete, checkpoint the blocker/progress and exit without calling run_complete.\n\
+\nUse the configured Morrows MCP server as the durable source of truth. The Assignment and Run already exist; do not claim the task or start another Run. This execution is attached to the durable Morrows Session shown above; use session_get for its conversation history, session_reply for human-facing replies, and session_summary_revise after materially advancing it. Before substantial work, read task_context for Task ID {task_id}. Read instructions_get for management updates. Checkpoint meaningful progress to Run ID {run_id}. If the task is fully complete, use run_completion_check and call run_complete for Run ID {run_id}. If blocked or incomplete, checkpoint the blocker/progress and exit without calling run_complete.\n\
 \nTask title:\n{title}\n\
-\nContext preparation and source handling:\n{context_capture}\n\
+\nContext preparation and source handling:\n{context_capture}\n{execution_workflow}\n\
 \nTask description:\n{description}\n\
 \nContext goal:\n{goal}\n\
 \nContext background (bounded; read task_context for the full original):\n{background}\n\
@@ -1216,6 +1216,7 @@ Morrows Session ID: {session_id}\n\
             .unwrap_or_else(|| "(legacy-unbound)".into()),
         title = clip(&execution.task.title, 2000),
         context_capture = include_str!("context_capture_instructions.md"),
+        execution_workflow = include_str!("execution_workflow_instructions.md"),
         description = clip(&execution.task.description, 6000),
         goal = context.map(|v| clip(&v.goal, 4000)).unwrap_or_default(),
         background = context
@@ -1841,6 +1842,14 @@ mod tests {
             1
         );
         assert!(prompt.contains("observation time, verification status"));
+        assert_eq!(
+            prompt
+                .matches("Execution persistence and completion:")
+                .count(),
+            1
+        );
+        assert!(prompt.contains("project_memory_publish"));
+        assert!(prompt.contains("run_completion_check"));
     }
 
     #[tokio::test]

@@ -620,6 +620,8 @@ fn build_session_runtime_prompt(
         },
     ) + "\n\n"
         + include_str!("context_capture_instructions.md")
+        + "\n\n"
+        + include_str!("execution_workflow_instructions.md")
 }
 
 fn render_session_recovery_summary(summary: &SessionSummaryRevision) -> String {
@@ -1036,6 +1038,13 @@ echo '{{"type":"thread.started","thread_id":"fake-session-thread-123"}}'
             prompt.matches("Context preparation and capture:").count(),
             1
         );
+        assert_eq!(
+            prompt
+                .matches("Execution persistence and completion:")
+                .count(),
+            1
+        );
+        assert!(prompt.contains("task_request_assignment"));
         assert!(prompt.contains("An external Session ID is not authorization"));
         assert_eq!(finished.model.as_deref(), Some("gpt-5.6-sol"));
         assert_eq!(finished.reasoning_effort.as_deref(), Some("high"));

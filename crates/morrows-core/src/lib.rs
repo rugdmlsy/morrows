@@ -249,3 +249,8 @@ pub use operator_auth::*;
 
 mod memory;
 pub use memory::*;
+
+mod completion;
+pub use completion::*;
+mod assignment_request;
+pub use assignment_request::*;

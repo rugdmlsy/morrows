@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import type { FormEvent } from "react";
 import "./App.css";
 import SessionChat from "./SessionChat";
+import AssignmentRequests from "./AssignmentRequests";
 import { api, getOperatorToken, setOperatorToken } from "./api";
 import {
   formatAge,
@@ -36,6 +37,7 @@ type MemoryEntry = {
   source_ref?: string | null;
   visibility: string;
   supersedes_memory_id?: string | null;
+  provenance?: Record<string, unknown> | null;
   created_at: string;
   updated_at: string;
 };
@@ -1308,6 +1310,7 @@ export default function App() {
         {view === "queue" ? (
           <div className="workspace-grid">
             <section className="panel queue-panel">
+              <AssignmentRequests locale={locale} tasks={tasks} agents={agents.map(entry => entry.instance)} onSelectTask={selectTask} onResolved={async () => { await refreshQueueBase(); await refreshDetail(); }} />
               <div className="task-browser-head">
                 <div>
                   <strong>{t("projects")}</strong>
@@ -1553,6 +1556,10 @@ export default function App() {
                               ? selectedProjectMemory.content
                               : JSON.stringify(selectedProjectMemory.content, null, 2)}
                           </pre>
+                          {selectedProjectMemory.provenance && <details>
+                            <summary>{locale === "zh-CN" ? "来源与验证边界" : "Provenance and verification limits"}</summary>
+                            <pre className="memory-content">{JSON.stringify(selectedProjectMemory.provenance, null, 2)}</pre>
+                          </details>}
                         </article>
                       )}
                     </div>

@@ -213,6 +213,9 @@ Employee MCP tools currently cover:
 - `artifact_create`, `decision_create`, `thread_create`, `message_create`: record work products and collaboration.
 - `handoff_create`, `handoff_get`, `handoff_accept`, `task_collaboration`: continue work across employees without sharing provider chat history.
 - `assignment_renew`, `run_checkpoint`, `run_complete`, `task_events`: maintain an existing assignment and report progress/completion.
+- `task_request_assignment` / `assignment_request_list` / `assignment_request_withdraw`: request an existing task, inspect control-plane outcomes or withdraw a pending request without duplicating tasks, self-claiming or launching work.
+- `project_memory_publish`: task participants explicitly publish project knowledge with provenance, verification limits, retained revisions, retry idempotency and stale-supersession checks.
+- `run_completion_check`: read original acceptance criteria, a report template and blockers. Executor tasks declaring `acceptance_criteria` / `freeze_requires` require current context and per-criterion evidence references on completion; the server does not independently verify experiments.
 
 Authenticated agents may read any task or project. Default agent filtering is a discovery preference, not a read authorization boundary. Collaboration writes still require task ownership, assignment history, or an open task Session. Execution updates and private Sessions remain owner-scoped. MCP cannot create its own Assignment or Run. See the [employee discovery contract](docs/employee-discovery.md) for filtering, pagination, and response formats.
 

@@ -1392,3 +1392,13 @@ h3 { margin: 20px 0 8px; color: var(--ink-3); font: 700 calc(8px * var(--font-sc
   .delivery-note { grid-column: 1 / -1; max-width: none; text-align: left; }
   .summary-grid { grid-template-columns: 1fr; }
 }
+.assignment-requests { margin-bottom: 18px; padding: 14px; border: 1px solid var(--line); border-radius: 10px; }
+.assignment-requests summary { cursor: pointer; font-weight: 600; }
+.assignment-requests label { display: flex; align-items: center; gap: 8px; }
+.assignment-requests input[type="checkbox"] { width: auto; }
+.assignment-request { margin: 14px 0; padding-top: 12px; border-top: 1px solid var(--line); }
+.assignment-request strong { display: block; margin: 8px 0 4px; }
+.assignment-request > button { width: 100%; padding: 8px; text-align: left; white-space: normal; overflow-wrap: anywhere; background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; cursor: pointer; }
+.assignment-request small { display: block; overflow-wrap: anywhere; }
+.assignment-request p { white-space: pre-wrap; overflow-wrap: anywhere; }
+.assignment-request textarea { width: 100%; min-height: 65px; margin-bottom: 8px; }

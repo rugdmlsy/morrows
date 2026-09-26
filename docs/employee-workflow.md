@@ -6,8 +6,21 @@ Read `task_context`, then follow its continuation offsets. Confirm task goal,
 project constraints, acceptance criteria, current context version, instructions,
 handoffs, evidence and your assignment/Run. Discovery/read access is not an
 assignment: the company control plane must assign the existing task and create a
-Run before employee execution tools can be used. Do not create a duplicate work
-request merely to obtain execution rights to an existing task.
+Run before employee execution tools can be used. Use `task_request_assignment`
+with the existing task ID, role and reason. It creates a durable request, not a
+duplicate task or assignment. Track it with `assignment_request_list`; use
+`include_resolved=true` for decisions and resulting assignment IDs. Exact pending
+retries reuse the request. A changed reason requires withdrawing the pending
+request, preserving both records. Only its author may withdraw it.
+
+The company web task queue exposes pending requests, reasons, authors and history.
+Its approve action creates/reuses an assignment atomically with request resolution;
+it does not steal another worker's active role or start a Run. Operators can also
+use `GET /api/assignment-requests` and
+`POST /api/assignment-requests/{id}/resolve` with action `approve` or `reject`,
+a `resolution` reason, and optional `lease_seconds`. An approved assignment then
+uses the existing control-plane Run/launch workflow. A rejected request retains
+the explanation. Pending requests grant no task-write rights.
 
 A context can explain the background while still lack executable inputs. For an
 audit task, locate the authoritative checkout and current Git/dirty state, source
@@ -40,21 +53,58 @@ not automatically fetch private sources or reconstruct facts never saved to Morr
 | `memory_revise` | Shared progress, blockers, next action, or changed goals/constraints; update before handoff | Does not extract facts from chat, validate research conclusions, or promote project memory |
 | `artifact_create` | Immutable reports, receipts and other evidence with a resolvable URI | Does not verify the referenced content |
 | `decision_create` | A chosen course and its rationale, including a candidate reusable finding linked to evidence | Does not automatically create long-term project knowledge |
+| `project_memory_publish` | Explicitly publish reusable task findings to its project, with source context, basis, verification limits and evidence | Does not infer truth, publish organization memory, or erase a superseded entry |
 | `handoff_create` | Work that another execution should continue; include completed/remaining/blockers and evidence IDs | Ends the source execution and releases its assignment; is not a completion claim |
 | `run_complete` | Actual acceptance criteria are satisfied and evidence/context are saved | Does not evaluate the meaning of task constraints or independently verify evidence |
 
 These persistence steps are employee workflow guidance. The server does not impose
 a memory-update cadence or automatically infer missing updates. Run ownership,
 lifecycle, active leases, write authorization and unfinished dependencies **are**
-server-enforced. Completing an executor Run marks the task done even if a supplied
-result says an acceptance criterion failed; the employee must not use it to stop
-incomplete work. Use checkpoint/context/handoff instead.
+server-enforced. Completion additionally validates structured acceptance reports
+as described below. Use checkpoint/context/handoff to stop incomplete work.
 
-Project and organization long-term knowledge have a control-plane write API, but
-no direct employee MCP write tool. Record a candidate finding with source evidence
-in task artifacts/decisions and request promotion through an authorized company
-workflow. This is not automatic promotion or a built-in review queue. Store durable
-facts, decisions and constraints, not raw logs or unsupported conclusions.
+Project knowledge can be published directly by the task owner, any previously
+assigned Agent, or the employee of an open Task Session. `project_memory_publish`
+derives the destination project and author from the source task/authentication;
+it cannot target another project or organization scope. Supply the current
+`context_revision_id`, `verification_status` (reported, verified, hypothesis or
+unverified), `basis`, and any source `artifact_ids`/`decision_ids`. All evidence
+references must belong to the task; a verified claim requires at least one.
+The server records provenance but does not certify the claim.
+
+Use a stable `idempotency_key` per publication. An identical retry returns the
+original entry; reuse with different content is rejected. A new revision uses a
+new key plus `supersedes_memory_id` pointing to current shared knowledge in the
+same project. Concurrent revisions cannot silently fork that entry. The original
+content and provenance remain available with `project_get(include_superseded=true)`.
+Organization knowledge remains control-plane managed. Store durable facts,
+decisions and constraints; preserve uncertainty and source references.
+
+## Completion contract
+
+`run_completion_check` is a read-only preflight for an owned Run. Its
+`completion_template`, exact original criteria and blockers provide the next
+action without guessing a schema. For executor tasks with `acceptance_criteria`
+or `freeze_requires` in the current context constraints, completion requires:
+
+- The current context revision ID and a nonempty saved shared summary.
+- Exactly one check for every criterion pointer, with status `passed`, rationale
+  and at least one artifact ID belonging to this task and carrying a nonempty URI.
+- Normal ownership, lease, lifecycle and unfinished-dependency checks.
+
+Pass the report as `completion` to the MCP tool, or as `result.completion` (also
+supported by the REST/CLI path). Extra result fields remain intact. Explicit
+`result.ok=false` or `all_acceptance_criteria_met=false` blocks completion even
+without structured criteria. A stale report, missing/duplicate/unknown criterion,
+or foreign evidence prevents all state changes. `run_complete` repeats validation
+under its writer transaction, so a successful preview cannot bypass newer context.
+
+The server checks structure and reference ownership, not artifact contents or
+scientific validity. Do not weaken constraints or label unknown checks passed.
+Ungated tasks retain legacy completion behavior except explicit failure rejection.
+These execution/persistence instructions are stored once in
+`crates/morrows-server/src/execution_workflow_instructions.md` and reused by MCP
+initialization, executor startup and direct Session prompts.
 
 ## Safe task-memory updates
 

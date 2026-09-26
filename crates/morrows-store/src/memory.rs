@@ -2,6 +2,130 @@ use super::*;
 use morrows_core::{CreateMemoryEntry, MemoryEntry};
 
 impl Store {
+    pub async fn ensure_task_write_access(
+        &self,
+        task_id: Id,
+        agent_id: Id,
+    ) -> Result<(), DomainError> {
+        let mut conn = self.pool.acquire().await.map_err(storage)?;
+        task_writer_conn(&mut conn, task_id, agent_id)
+            .await
+            .map(|_| ())
+    }
+
+    /// Bind project and author to the authorized source task inside the writer
+    /// transaction. Retries return the original publication; revisions append a
+    /// new entry and reject stale supersession rather than forking shared truth.
+    pub async fn publish_project_memory(
+        &self,
+        agent_id: Id,
+        input: morrows_core::PublishProjectMemory,
+    ) -> Result<MemoryEntry, DomainError> {
+        if input.idempotency_key.trim().is_empty() || input.idempotency_key.len() > 128 {
+            return Err(DomainError::InvalidInput(
+                "idempotency_key must contain 1..128 bytes".into(),
+            ));
+        }
+        if input.basis.trim().is_empty()
+            || input.content.is_null()
+            || !matches!(
+                input.verification_status.as_str(),
+                "reported" | "verified" | "hypothesis" | "unverified"
+            )
+        {
+            return Err(DomainError::InvalidInput("provide content, basis and verification_status (reported/verified/hypothesis/unverified)".into()));
+        }
+        if input.verification_status == "verified"
+            && input.artifact_ids.is_empty()
+            && input.decision_ids.is_empty()
+        {
+            return Err(DomainError::InvalidInput(
+                "verified findings require task artifact or decision references".into(),
+            ));
+        }
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(storage)?;
+        let task = task_writer_conn(&mut tx, input.task_id, agent_id).await?;
+        let input_json = serde_json::to_string(&input).map_err(storage)?;
+        if let Some(row) = sqlx::query("SELECT memory_id,input_json FROM memory_publications WHERE agent_instance_id=? AND idempotency_key=?")
+            .bind(agent_id.to_string()).bind(&input.idempotency_key).fetch_optional(&mut *tx).await.map_err(storage)? {
+            let saved: String = row.try_get("input_json").map_err(storage)?;
+            if saved != input_json { return Err(DomainError::Conflict("idempotency_key already used with different content".into())); }
+            let id = parse_id(row.try_get("memory_id").map_err(storage)?)?;
+            tx.commit().await.map_err(storage)?;
+            return self.get_memory_entry(id).await;
+        }
+        let project_id = task.project_id.ok_or_else(|| {
+            DomainError::Conflict(
+                "task has no project; control plane must set its project first".into(),
+            )
+        })?;
+        if task.current_context_revision_id != Some(input.context_revision_id) {
+            return Err(DomainError::Conflict(
+                "context changed; read task_context before publishing project knowledge".into(),
+            ));
+        }
+        for (table, ids) in [
+            ("artifacts", &input.artifact_ids),
+            ("decisions", &input.decision_ids),
+        ] {
+            for id in ids {
+                let valid: bool = sqlx::query_scalar(&format!(
+                    "SELECT EXISTS(SELECT 1 FROM {table} WHERE id=? AND task_id=?)"
+                ))
+                .bind(id)
+                .bind(task.id.to_string())
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(storage)?;
+                if !valid {
+                    return Err(DomainError::InvalidInput(format!(
+                        "{table} reference {id} does not belong to the source task"
+                    )));
+                }
+            }
+        }
+        if let Some(previous) = input.supersedes_memory_id {
+            let valid: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM memory_entries m WHERE id=? AND scope_type='project' AND project_id=? AND visibility='shared' AND NOT EXISTS(SELECT 1 FROM memory_entries n WHERE n.supersedes_memory_id=m.id AND n.visibility='shared'))")
+                .bind(previous.to_string()).bind(project_id.to_string()).fetch_one(&mut *tx).await.map_err(storage)?;
+            if !valid {
+                return Err(DomainError::Conflict("supersedes_memory_id must be current shared memory in the source task's project; read project_get to reconcile".into()));
+            }
+        }
+        let entry = CreateMemoryEntry {
+            scope_type: "project".into(),
+            project_id: Some(project_id),
+            agent_instance_id: None,
+            task_id: None,
+            title: input.title,
+            content: input.content,
+            source_kind: "agent_task".into(),
+            source_ref: Some(format!("morrows:task:{}", task.id)),
+            visibility: "shared".into(),
+            supersedes_memory_id: input.supersedes_memory_id,
+        };
+        validate_memory_input(&entry)?;
+        let id = insert_memory_entry_conn(&mut tx, &entry).await?;
+        let provenance = json!({"agent_instance_id":agent_id,"task_id":task.id,"context_revision_id":input.context_revision_id,
+            "artifact_ids":input.artifact_ids,"decision_ids":input.decision_ids,"basis":input.basis,
+            "verification_status":input.verification_status,"recorded_at":Utc::now(),"server_verified":false});
+        sqlx::query("UPDATE memory_entries SET provenance_json=? WHERE id=?")
+            .bind(provenance.to_string())
+            .bind(id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?;
+        sqlx::query("INSERT INTO memory_publications(agent_instance_id,idempotency_key,input_json,memory_id) VALUES(?,?,?,?)")
+            .bind(agent_id.to_string()).bind(&input.idempotency_key).bind(input_json).bind(id.to_string()).execute(&mut *tx).await.map_err(storage)?;
+        append_event_tx(&mut tx,"agent_instance",&agent_id.to_string(),"task",task.id,"memory.project_published",
+            json!({"memory_id":id,"project_id":project_id,"supersedes_memory_id":entry.supersedes_memory_id}),None).await?;
+        tx.commit().await.map_err(storage)?;
+        self.get_memory_entry(id).await
+    }
+
     /// Materialize visible knowledge, retaining the caller's private agent memory
     /// but never another agent's. History mode includes superseded entries with
     /// their original provenance; the default excludes only visible replacements,
@@ -82,33 +206,13 @@ impl Store {
             }
         }
 
-        let id = Uuid::new_v4();
-        let now = Utc::now();
-        sqlx::query(
-            "INSERT INTO memory_entries(
-                id,scope_type,project_id,agent_instance_id,task_id,title,content_json,
-                source_kind,source_ref,visibility,supersedes_memory_id,created_at,updated_at
-             ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        )
-        .bind(id.to_string())
-        .bind(&input.scope_type)
-        .bind(input.project_id.map(|value| value.to_string()))
-        .bind(input.agent_instance_id.map(|value| value.to_string()))
-        .bind(input.task_id.map(|value| value.to_string()))
-        .bind(input.title.trim())
-        .bind(
-            serde_json::to_string(&input.content)
-                .map_err(|e| DomainError::Storage(e.to_string()))?,
-        )
-        .bind(input.source_kind.trim())
-        .bind(input.source_ref.as_deref())
-        .bind(&input.visibility)
-        .bind(input.supersedes_memory_id.map(|value| value.to_string()))
-        .bind(now.to_rfc3339())
-        .bind(now.to_rfc3339())
-        .execute(&self.pool)
-        .await
-        .map_err(storage)?;
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(storage)?;
+        let id = insert_memory_entry_conn(&mut tx, &input).await?;
+        tx.commit().await.map_err(storage)?;
         self.get_memory_entry(id).await
     }
 
@@ -196,6 +300,29 @@ impl Store {
     }
 }
 
+pub(super) async fn task_writer_conn(
+    conn: &mut sqlx::SqliteConnection,
+    task_id: Id,
+    agent_id: Id,
+) -> Result<Task, DomainError> {
+    let task = row_to_task(
+        sqlx::query("SELECT * FROM tasks WHERE id=?")
+            .bind(task_id.to_string())
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(storage)?
+            .ok_or_else(|| DomainError::NotFound(format!("task {task_id}")))?,
+    )?;
+    let allowed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM agent_instances WHERE id=? AND (? OR EXISTS(SELECT 1 FROM assignments WHERE task_id=? AND agent_instance_id=?) OR EXISTS(SELECT 1 FROM sessions WHERE task_id=? AND agent_instance_id=? AND status='open')))")
+        .bind(agent_id.to_string()).bind(task.owner_actor_id == format!("agent:{agent_id}"))
+        .bind(task_id.to_string()).bind(agent_id.to_string()).bind(task_id.to_string()).bind(agent_id.to_string())
+        .fetch_one(&mut *conn).await.map_err(storage)?;
+    if !allowed {
+        return Err(DomainError::Conflict("task is not owned by, assigned to, or shared through an open Task Session with the authenticated agent instance".into()));
+    }
+    Ok(task)
+}
+
 fn validate_memory_input(input: &CreateMemoryEntry) -> Result<(), DomainError> {
     let title = input.title.trim();
     if title.is_empty() || title.chars().count() > 200 {
@@ -261,5 +388,38 @@ fn row_to_memory_entry(row: sqlx::sqlite::SqliteRow) -> Result<MemoryEntry, Doma
         supersedes_memory_id: parse_opt_id(row.try_get("supersedes_memory_id").map_err(storage)?)?,
         created_at: parse_dt(row.try_get("created_at").map_err(storage)?)?,
         updated_at: parse_dt(row.try_get("updated_at").map_err(storage)?)?,
+        provenance: parse_opt_json(row.try_get("provenance_json").map_err(storage)?)?,
     })
+}
+
+async fn insert_memory_entry_conn(
+    conn: &mut sqlx::SqliteConnection,
+    input: &CreateMemoryEntry,
+) -> Result<Id, DomainError> {
+    let id = Uuid::new_v4();
+    let now = Utc::now();
+    sqlx::query(
+        "INSERT INTO memory_entries(
+                id,scope_type,project_id,agent_instance_id,task_id,title,content_json,
+                source_kind,source_ref,visibility,supersedes_memory_id,created_at,updated_at
+             ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+    )
+    .bind(id.to_string())
+    .bind(&input.scope_type)
+    .bind(input.project_id.map(|value| value.to_string()))
+    .bind(input.agent_instance_id.map(|value| value.to_string()))
+    .bind(input.task_id.map(|value| value.to_string()))
+    .bind(input.title.trim())
+    .bind(serde_json::to_string(&input.content).map_err(|e| DomainError::Storage(e.to_string()))?)
+    .bind(input.source_kind.trim())
+    .bind(input.source_ref.as_deref())
+    .bind(&input.visibility)
+    .bind(input.supersedes_memory_id.map(|value| value.to_string()))
+    .bind(now.to_rfc3339())
+    .bind(now.to_rfc3339())
+    .execute(&mut *conn)
+    .await
+    .map_err(storage)?;
+
+    Ok(id)
 }

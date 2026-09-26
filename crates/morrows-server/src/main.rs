@@ -1,3 +1,4 @@
+mod assignment_request;
 mod auth;
 mod collaboration;
 mod delivery;
@@ -193,6 +194,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/runs/{id}/complete", post(complete_run))
         .merge(auth::routes())
         .merge(memory::routes())
+        .merge(assignment_request::routes())
         .merge(operator_auth::routes())
         .merge(collaboration::routes())
         .merge(session::routes())

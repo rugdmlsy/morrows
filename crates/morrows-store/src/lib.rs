@@ -199,99 +199,14 @@ impl Store {
         lease_seconds: i64,
     ) -> Result<Assignment, DomainError> {
         self.get_agent(agent_id).await?;
-        let now = Utc::now();
-        let expires = now + Duration::seconds(lease_seconds.max(30));
-        let id = Uuid::new_v4();
         let mut tx = self
             .pool
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(storage)?;
-        if role.trim().is_empty() {
-            return Err(DomainError::InvalidInput("role cannot be empty".into()));
-        }
-        if role == "executor" {
-            let blocked: bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM task_dependencies d JOIN tasks t ON t.id=d.depends_on_task_id WHERE d.task_id=? AND t.state!='done')").bind(task_id.to_string()).fetch_one(&mut *tx).await.map_err(storage)?;
-            if blocked {
-                return Err(DomainError::Conflict(
-                    "task has unfinished dependencies".into(),
-                ));
-            }
-        }
-        let cleanup_blocked: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM runs WHERE task_id=? AND status IN ('interrupted','cleanup_pending','cancelling'))",
-        )
-        .bind(task_id.to_string()).fetch_one(&mut *tx).await.map_err(storage)?;
-        if cleanup_blocked {
-            return Err(DomainError::Conflict(
-                "Task has an interrupted or cleaning Run".into(),
-            ));
-        }
-
-        // BEGIN IMMEDIATE keeps prerequisite checks and the role claim atomic.
-        // The unique active-role index remains the final ownership constraint.
-        let result = sqlx::query(
-            "INSERT INTO assignments(id,task_id,role,agent_instance_id,status,acquired_at,expires_at,renewed_at)
-             SELECT ?, id, ?, ?, 'active', ?, ?, ? FROM tasks
-             WHERE id=? AND state NOT IN ('done','cancelled')"
-        )
-            .bind(id.to_string())
-            .bind(role)
-            .bind(agent_id.to_string())
-            .bind(now.to_rfc3339())
-            .bind(expires.to_rfc3339())
-            .bind(now.to_rfc3339())
-            .bind(task_id.to_string())
-            .execute(&mut *tx).await;
-
-        match result {
-            Ok(r) if r.rows_affected() == 0 => {
-                let state: Option<String> =
-                    sqlx::query_scalar("SELECT state FROM tasks WHERE id=?")
-                        .bind(task_id.to_string())
-                        .fetch_optional(&mut *tx)
-                        .await
-                        .map_err(storage)?;
-                return match state {
-                    None => Err(DomainError::NotFound(format!("task {task_id}"))),
-                    Some(state) => Err(DomainError::Conflict(format!("task is {state}"))),
-                };
-            }
-            Ok(_) => {}
-            Err(e) => {
-                if e.as_database_error().and_then(|d| d.code()).as_deref() == Some("2067") {
-                    return Err(DomainError::Conflict(format!(
-                        "task role '{role}' already has an active assignment"
-                    )));
-                }
-                return Err(storage(e));
-            }
-        }
-
-        sqlx::query("UPDATE tasks SET state=CASE WHEN state='ready' THEN 'in_progress' ELSE state END, updated_at=? WHERE id=?")
-            .bind(now.to_rfc3339()).bind(task_id.to_string()).execute(&mut *tx).await.map_err(storage)?;
-        append_event_tx(
-            &mut tx,
-            "agent_instance",
-            &agent_id.to_string(),
-            "task",
-            task_id,
-            "assignment.claimed",
-            json!({"assignment_id":id,"role":role,"expires_at":expires}),
-            None,
-        )
-        .await?;
+        let assignment = claim_task_tx(&mut tx, task_id, agent_id, role, lease_seconds).await?;
         tx.commit().await.map_err(storage)?;
-        Ok(Assignment {
-            id,
-            task_id,
-            role: role.to_owned(),
-            agent_instance_id: agent_id,
-            status: "active".into(),
-            acquired_at: now,
-            expires_at: expires,
-            renewed_at: now,
-        })
+        Ok(assignment)
     }
 
     pub async fn task_assignments(&self, task_id: Id) -> Result<Vec<Assignment>, DomainError> {
@@ -602,6 +517,13 @@ impl Store {
         let active: bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM assignments WHERE id=? AND status='active' AND expires_at>?)").bind(run.assignment_id.to_string()).bind(Utc::now().to_rfc3339()).fetch_one(&mut *tx).await.map_err(storage)?;
         if !active {
             return Err(DomainError::Conflict("assignment is not active".into()));
+        }
+        let readiness = completion::completion_check_conn(&mut tx, &run, &result).await?;
+        if !readiness.ready {
+            return Err(DomainError::Conflict(format!(
+                "completion blocked: {}",
+                readiness.blockers.join("; ")
+            )));
         }
         let now = Utc::now();
         sqlx::query("UPDATE runs SET status='completed', stop_reason='normal', result_json=?, ended_at=? WHERE id=?")
@@ -989,4 +911,105 @@ mod auth;
 
 mod operator_auth;
 
+mod completion;
 mod memory;
+
+// Reuse the exact claim checks for an operator-approved employee request.
+// The request resolution and assignment are committed together.
+async fn claim_task_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    task_id: Id,
+    agent_id: Id,
+    role: &str,
+    lease_seconds: i64,
+) -> Result<Assignment, DomainError> {
+    let now = Utc::now();
+    let expires = now + Duration::seconds(lease_seconds.max(30));
+    let id = Uuid::new_v4();
+    if role.trim().is_empty() {
+        return Err(DomainError::InvalidInput("role cannot be empty".into()));
+    }
+    if role == "executor" {
+        let blocked: bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM task_dependencies d JOIN tasks t ON t.id=d.depends_on_task_id WHERE d.task_id=? AND t.state!='done')").bind(task_id.to_string()).fetch_one(&mut **tx).await.map_err(storage)?;
+        if blocked {
+            return Err(DomainError::Conflict(
+                "task has unfinished dependencies".into(),
+            ));
+        }
+    }
+    let cleanup_blocked: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM runs WHERE task_id=? AND status IN ('interrupted','cleanup_pending','cancelling'))",
+        )
+        .bind(task_id.to_string()).fetch_one(&mut **tx).await.map_err(storage)?;
+    if cleanup_blocked {
+        return Err(DomainError::Conflict(
+            "Task has an interrupted or cleaning Run".into(),
+        ));
+    }
+
+    // BEGIN IMMEDIATE keeps prerequisite checks and the role claim atomic.
+    // The unique active-role index remains the final ownership constraint.
+    let result = sqlx::query(
+            "INSERT INTO assignments(id,task_id,role,agent_instance_id,status,acquired_at,expires_at,renewed_at)
+             SELECT ?, id, ?, ?, 'active', ?, ?, ? FROM tasks
+             WHERE id=? AND state NOT IN ('done','cancelled')"
+        )
+            .bind(id.to_string())
+            .bind(role)
+            .bind(agent_id.to_string())
+            .bind(now.to_rfc3339())
+            .bind(expires.to_rfc3339())
+            .bind(now.to_rfc3339())
+            .bind(task_id.to_string())
+            .execute(&mut **tx).await;
+
+    match result {
+        Ok(r) if r.rows_affected() == 0 => {
+            let state: Option<String> = sqlx::query_scalar("SELECT state FROM tasks WHERE id=?")
+                .bind(task_id.to_string())
+                .fetch_optional(&mut **tx)
+                .await
+                .map_err(storage)?;
+            return match state {
+                None => Err(DomainError::NotFound(format!("task {task_id}"))),
+                Some(state) => Err(DomainError::Conflict(format!("task is {state}"))),
+            };
+        }
+        Ok(_) => {}
+        Err(e) => {
+            if e.as_database_error().and_then(|d| d.code()).as_deref() == Some("2067") {
+                return Err(DomainError::Conflict(format!(
+                    "task role '{role}' already has an active assignment"
+                )));
+            }
+            return Err(storage(e));
+        }
+    }
+
+    sqlx::query("UPDATE tasks SET state=CASE WHEN state='ready' THEN 'in_progress' ELSE state END, updated_at=? WHERE id=?")
+            .bind(now.to_rfc3339()).bind(task_id.to_string()).execute(&mut **tx).await.map_err(storage)?;
+    append_event_tx(
+        tx,
+        "agent_instance",
+        &agent_id.to_string(),
+        "task",
+        task_id,
+        "assignment.claimed",
+        json!({"assignment_id":id,"role":role,"expires_at":expires}),
+        None,
+    )
+    .await?;
+
+    Ok(Assignment {
+        id,
+        task_id,
+        role: role.to_owned(),
+        agent_instance_id: agent_id,
+        status: "active".into(),
+        acquired_at: now,
+        expires_at: expires,
+        renewed_at: now,
+    })
+}
+
+mod assignment_request;

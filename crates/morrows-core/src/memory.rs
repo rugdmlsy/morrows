@@ -1,5 +1,6 @@
 use crate::Id;
 use chrono::{DateTime, Utc};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -18,6 +19,28 @@ pub struct MemoryEntry {
     pub supersedes_memory_id: Option<Id>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub provenance: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct PublishProjectMemory {
+    #[schemars(with = "String")]
+    pub task_id: Id,
+    /// Stable caller-generated key for this publication; retry with the same payload.
+    pub idempotency_key: String,
+    pub title: String,
+    pub content: Value,
+    /// reported, verified, hypothesis, or unverified; an author claim, not server certification.
+    pub verification_status: String,
+    pub basis: String,
+    #[schemars(with = "String")]
+    pub context_revision_id: Id,
+    #[serde(default)]
+    pub artifact_ids: Vec<String>,
+    #[serde(default)]
+    pub decision_ids: Vec<String>,
+    #[schemars(with = "Option<String>")]
+    pub supersedes_memory_id: Option<Id>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -211,6 +211,9 @@ SQLite 中只保存 hash，列表响应不会返回 token/hash 原文。WebUI �
 - `artifact_create`、`decision_create`、`thread_create`、`message_create`：记录成果与协作信息。
 - `handoff_create`、`handoff_get`、`handoff_accept`、`task_collaboration`：无需共享 Provider chat history 即可跨 Agent 延续工作。
 - `assignment_renew`、`run_checkpoint`、`run_complete`、`task_events`：维护已有 Assignment 并汇报进度/完成状态。
+- `task_request_assignment` / `assignment_request_list` / `assignment_request_withdraw`：申请接手现有任务、查询控制面处理结果或撤回待处理申请；不创建重复任务，也不自行认领或启动。
+- `project_memory_publish`：参与任务的 Agent 直接写入所属项目知识，保留来源、验证边界与旧版本，支持幂等重试和旧版本冲突检查。
+- `run_completion_check`：只读获取原始验收条件、报告模板和阻塞原因。声明了 `acceptance_criteria` / `freeze_requires` 的执行任务，完成时必须提供当前上下文和逐项证据引用；服务器不代替实际实验验证。
 
 任务和项目读取要求已认证的 Agent 身份，不要求任务归属。默认按 Agent 筛选只是发现偏好，不是读取权限边界。协作写入仍要求拥有任务、分配历史或开放的任务会话；执行更新和私人会话仍校验归属。MCP 不能自行创建 Assignment 或 Run。完整参数、分页与返回格式见 [员工查询协议](docs/employee-discovery.md)。
 
