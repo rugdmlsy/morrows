@@ -108,9 +108,12 @@ https://mcp.xycdev.com/morrows/ui/
 Public control-plane API calls require an Operator Bearer credential; the WebUI top bar can persist that token.
 
 Local Shell MCP on the VPS moves to `127.0.0.1:8766`. A loopback router owns
-`127.0.0.1:8765`: only `/morrows` is sent to Morrows and every other path continues
-to Local Shell MCP, so the existing `https://mcp.xycdev.com/mcp` endpoint is unchanged.
-This shared Caddy edge is owned by `deploy/morrow/deploy-vps.sh` in the
+`127.0.0.1:8765`: the public `/morrows` MCP first enters Local Shell MCP and reuses
+the same ChatGPT OAuth boundary as the Blender, Keynote, and other MCP integrations.
+After LSM validates OAuth, it translates the request to a private Morrows bridge
+credential and forwards it to `127.0.0.1:8787/mcp`. WebUI/control-plane paths still
+go directly to Morrows. The existing `https://mcp.xycdev.com/mcp` endpoint is
+unchanged. This shared Caddy edge is owned by `deploy/morrow/deploy-vps.sh` in the
 `local-shell-mcp` repository; Morrows does not maintain a second router copy.
 
 For local development, the previous tmux deployment remains available:
@@ -176,14 +179,24 @@ Morrows exposes a Streamable HTTP MCP endpoint for **employee operations**, not 
 http://127.0.0.1:8787/mcp
 ```
 
-Employee MCP calls support issued Bearer credentials:
+Internal employee MCP calls continue to use issued Bearer credentials:
 
 ```text
 Authorization: Bearer mrw_agent_<secret>
 X-Agent-Instance-Id: <uuid>   # optional with Bearer; if present it must match
 ```
 
-The local control plane can issue/list/revoke bridge credentials with `/api/agents/{id}/credentials` and `/api/agent-credentials/{id}/revoke`. Provider launchers use separate Run-bound runtime credentials and revoke them when the launch attempt finishes. Set `MORROWS_REQUIRE_AGENT_AUTH=1` to reject the legacy identity-header-only path even on loopback.
+These credentials are for Morrows-managed runtimes such as Codex/CodeBuddy and for
+the private LSM-OAuth-edge-to-Morrows bridge. **Public ChatGPT clients never receive
+or present a `mrw_agent_*` credential.** They authenticate only with the existing
+LSM OAuth flow; LSM translates the authenticated request to the configured Morrows
+bridge identity on loopback.
+
+The local control plane can issue/list/revoke bridge credentials with
+`/api/agents/{id}/credentials` and `/api/agent-credentials/{id}/revoke`. Provider
+launchers use separate Run-bound runtime credentials and revoke them when the launch
+attempt finishes. `MORROWS_REQUIRE_AGENT_AUTH=1` therefore remains enabled for the
+Morrows employee surface.
 
 The MCP surface intentionally does **not** expose agent/profile/account/machine registration, fleet state, capacity, dispatch policy, dispatch, assignment claiming, Run creation, launch profile management, launch/cancel operations, or dependency graph administration. Those remain control-plane responsibilities through REST/store/provider adapters.
 

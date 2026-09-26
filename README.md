@@ -106,10 +106,13 @@ https://mcp.xycdev.com/morrows/ui/
 控制平面 API 在公网模式强制 Operator Bearer 认证；WebUI 顶栏可保存对应 token。
 
 VPS 上的 Local Shell MCP 已移到 `127.0.0.1:8766`。本地路由层占用
-`127.0.0.1:8765`：仅 `/morrows` 转发到 Morrows，其余路径继续转发给
-Local Shell MCP，因此原有 `https://mcp.xycdev.com/mcp` 保持不变。这个共享
-Caddy 入口由 `local-shell-mcp` 仓库的 `deploy/morrow/deploy-vps.sh` 统一管理；
-Morrows 不再维护第二份路由配置。
+`127.0.0.1:8765`：公网 `/morrows` MCP 先进入 Local Shell MCP，复用与
+Blender、Keynote 等 MCP 相同的 ChatGPT OAuth 边界；LSM 验证成功后才用一个
+仅保存在 VPS 私密环境中的 Morrows bridge credential 转发到
+`127.0.0.1:8787/mcp`。WebUI / control-plane 路径仍直接进入 Morrows。
+原有 `https://mcp.xycdev.com/mcp` 保持不变。这个共享 Caddy 入口由
+`local-shell-mcp` 仓库的 `deploy/morrow/deploy-vps.sh` 统一管理；Morrows
+不再维护第二份路由配置。
 
 本地开发仍可使用旧的 tmux 部署：
 
@@ -174,14 +177,23 @@ Morrows 暴露一个 Streamable HTTP MCP endpoint，用于**员工操作**，而
 http://127.0.0.1:8787/mcp
 ```
 
-员工 MCP 调用支持签发的 Bearer credential：
+Morrows 内部员工 MCP 调用继续使用签发的 Bearer credential：
 
 ```text
 Authorization: Bearer mrw_agent_<secret>
 X-Agent-Instance-Id: <uuid>   # 使用 Bearer 时可选；若提供则必须匹配
 ```
 
-本地控制面可通过 `/api/agents/{id}/credentials` 和 `/api/agent-credentials/{id}/revoke` 签发、列出和撤销 bridge credential。Provider launcher 使用独立的、绑定 Run 的 runtime credential，并在 launch attempt 结束后撤销。设置 `MORROWS_REQUIRE_AGENT_AUTH=1` 后，即使在 loopback 上也会拒绝旧的仅 identity-header 模式。
+这套 credential 用于 Codex / CodeBuddy 等 Morrows 管理的 Agent runtime，以及
+LSM OAuth edge 到 Morrows 的内部 bridge；**ChatGPT 公网客户端不直接持有
+`mrw_agent_*`**。ChatGPT 只完成现有 LSM OAuth，LSM 在 loopback 内将其转换
+为预配置的 Morrows bridge identity。
+
+本地控制面可通过 `/api/agents/{id}/credentials` 和
+`/api/agent-credentials/{id}/revoke` 签发、列出和撤销 bridge credential。
+Provider launcher 使用独立的、绑定 Run 的 runtime credential，并在 launch
+attempt 结束后撤销。设置 `MORROWS_REQUIRE_AGENT_AUTH=1` 后，Morrows 自身的
+员工入口仍保持严格认证。
 
 MCP surface 有意**不提供** Agent/profile/account/machine 注册、fleet 状态、capacity、dispatch policy、dispatch、Assignment 领取、Run 创建、LaunchProfile 管理、launch/cancel 或 dependency graph 管理。这些仍属于控制平面的 REST/store/provider adapter 职责。
 
