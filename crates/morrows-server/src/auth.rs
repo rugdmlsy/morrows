@@ -4,25 +4,22 @@ use axum::{
     http::{HeaderValue, Method, Request, header::AUTHORIZATION},
     middleware::Next,
 };
-const LSM_OAUTH_VERIFIED_HEADER: &str = "x-morrows-lsm-oauth-verified";
+pub(crate) const LSM_OAUTH_VERIFIED_HEADER: &str = "x-morrows-lsm-oauth-verified";
+pub(crate) const LSM_OAUTH_CLIENT_ID_HEADER: &str = "x-morrows-lsm-oauth-client-id";
+pub(crate) const LSM_OAUTH_CLIENT_NAME_HEADER: &str = "x-morrows-lsm-oauth-client-name";
+pub(crate) const AUTH_SOURCE_HEADER: &str = "x-morrows-auth-source";
 
 #[derive(Clone)]
 pub struct AgentAuthState {
     store: Store,
     require_agent_auth: bool,
-    trusted_lsm_oauth_agent_id: Option<Id>,
 }
 
 impl AgentAuthState {
-    pub fn new(
-        store: Store,
-        require_agent_auth: bool,
-        trusted_lsm_oauth_agent_id: Option<Id>,
-    ) -> Self {
+    pub fn new(store: Store, require_agent_auth: bool) -> Self {
         Self {
             store,
             require_agent_auth,
-            trusted_lsm_oauth_agent_id,
         }
     }
 }
@@ -48,23 +45,63 @@ pub async fn authenticate_agent_requests(
         .get(LSM_OAUTH_VERIFIED_HEADER)
         .and_then(|value| value.to_str().ok())
         .is_some_and(|value| value == "1");
+    let lsm_client_id = request
+        .headers()
+        .get(LSM_OAUTH_CLIENT_ID_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let lsm_client_name = request
+        .headers()
+        .get(LSM_OAUTH_CLIENT_NAME_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    request.headers_mut().remove(AUTH_SOURCE_HEADER);
 
     if lsm_oauth_verified && requires_agent_auth {
-        let Some(agent_id) = state.trusted_lsm_oauth_agent_id else {
-            return unauthorized("LSM OAuth bridge is not configured");
+        let Some(client_id) = lsm_client_id else {
+            return unauthorized("LSM OAuth bridge is missing validated client identity");
         };
-        if state.store.get_agent(agent_id).await.is_err() {
-            return unauthorized("LSM OAuth bridge AgentInstance is unavailable");
-        }
-        let Ok(value) = HeaderValue::from_str(&agent_id.to_string()) else {
-            return unauthorized("invalid LSM OAuth bridge AgentInstance");
+        let agent = match state.store.resolve_lsm_oauth_agent(&client_id).await {
+            Ok(value) => value,
+            Err(_) => return unauthorized("LSM OAuth client identity could not be resolved"),
+        };
+        let Ok(agent_value) = HeaderValue::from_str(&agent.id.to_string()) else {
+            return unauthorized("invalid LSM OAuth AgentInstance");
+        };
+        let Ok(client_value) = HeaderValue::from_str(&client_id) else {
+            return unauthorized("invalid LSM OAuth client identity");
         };
         request.headers_mut().remove(LSM_OAUTH_VERIFIED_HEADER);
-        request.headers_mut().insert("x-agent-instance-id", value);
+        request
+            .headers_mut()
+            .insert(LSM_OAUTH_CLIENT_ID_HEADER, client_value);
+        if let Some(client_name) = lsm_client_name {
+            if let Ok(value) = HeaderValue::from_str(&client_name) {
+                request
+                    .headers_mut()
+                    .insert(LSM_OAUTH_CLIENT_NAME_HEADER, value);
+            } else {
+                request.headers_mut().remove(LSM_OAUTH_CLIENT_NAME_HEADER);
+            }
+        } else {
+            request.headers_mut().remove(LSM_OAUTH_CLIENT_NAME_HEADER);
+        }
+        request
+            .headers_mut()
+            .insert(AUTH_SOURCE_HEADER, HeaderValue::from_static("lsm_oauth"));
+        request
+            .headers_mut()
+            .insert("x-agent-instance-id", agent_value);
         return next.run(request).await;
     }
 
     request.headers_mut().remove(LSM_OAUTH_VERIFIED_HEADER);
+    request.headers_mut().remove(LSM_OAUTH_CLIENT_ID_HEADER);
+    request.headers_mut().remove(LSM_OAUTH_CLIENT_NAME_HEADER);
 
     if let Some(authorization) = authorization {
         let Some(token) = authorization.strip_prefix("Bearer ") else {
@@ -89,6 +126,10 @@ pub async fn authenticate_agent_requests(
                 return unauthorized("invalid Agent credential subject");
             };
             request.headers_mut().insert("x-agent-instance-id", value);
+            request.headers_mut().insert(
+                AUTH_SOURCE_HEADER,
+                HeaderValue::from_static("morrows_agent_credential"),
+            );
             request.extensions_mut().insert(credential);
         } else if state.require_agent_auth && (requires_agent_auth || claimed_agent.is_some()) {
             return unauthorized("Bearer Agent credential required");
@@ -199,13 +240,13 @@ mod tests {
             .to_owned()
     }
 
-    async fn app(store: Store, require: bool, trusted_lsm_oauth_agent_id: Option<Id>) -> Router {
+    async fn app(store: Store, require: bool) -> Router {
         Router::new()
             .route("/employee", get(subject))
             .route("/mcp", get(subject))
             .route("/api/agent-deliveries", get(subject))
             .layer(axum::middleware::from_fn_with_state(
-                AgentAuthState::new(store, require, trusted_lsm_oauth_agent_id),
+                AgentAuthState::new(store, require),
                 authenticate_agent_requests,
             ))
     }
@@ -218,7 +259,7 @@ mod tests {
             .issue_bridge_credential(agent.id, "test bridge", 600)
             .await
             .unwrap();
-        let response = app(store, true, None)
+        let response = app(store, true)
             .await
             .oneshot(
                 Request::builder()
@@ -246,7 +287,7 @@ mod tests {
             .await
             .unwrap();
 
-        let strict = app(store.clone(), true, None).await;
+        let strict = app(store.clone(), true).await;
         let legacy = strict
             .clone()
             .oneshot(
@@ -292,33 +333,72 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn strict_mcp_accepts_lsm_oauth_handoff_and_overrides_spoofed_identity() {
+    async fn strict_mcp_maps_validated_lsm_client_to_stable_technical_identity() {
         let store = Store::connect("sqlite::memory:").await.unwrap();
-        let trusted = store.register_agent("chatgpt-bridge", &[]).await.unwrap();
         let spoofed = store.register_agent("spoofed-agent", &[]).await.unwrap();
-        let response = app(store, true, Some(trusted.id))
-            .await
-            .oneshot(
-                Request::builder()
-                    .uri("/mcp")
-                    .header(LSM_OAUTH_VERIFIED_HEADER, "1")
-                    .header("x-agent-instance-id", spoofed.id.to_string())
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+        let strict = app(store.clone(), true).await;
+
+        let call = |client_id: &'static str| {
+            Request::builder()
+                .uri("/mcp")
+                .header(LSM_OAUTH_VERIFIED_HEADER, "1")
+                .header(LSM_OAUTH_CLIENT_ID_HEADER, client_id)
+                .header(LSM_OAUTH_CLIENT_NAME_HEADER, "ChatGPT")
+                .header("x-agent-instance-id", spoofed.id.to_string())
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        let first = strict
+            .clone()
+            .oneshot(call("oauth-client-a"))
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        assert_eq!(first.status(), StatusCode::OK);
+        let first_id = String::from_utf8(
+            axum::body::to_bytes(first.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        let first_id = Id::parse_str(&first_id).unwrap();
+        let first_agent = store.get_agent(first_id).await.unwrap();
+        assert_eq!(
+            first_agent.external_instance_ref.as_deref(),
+            Some("oauth-client-a")
+        );
+        assert_ne!(first_agent.id, spoofed.id);
+
+        let repeated = strict
+            .clone()
+            .oneshot(call("oauth-client-a"))
             .await
             .unwrap();
-        assert_eq!(body.as_ref(), trusted.id.to_string().as_bytes());
+        let repeated_id = String::from_utf8(
+            axum::body::to_bytes(repeated.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert_eq!(repeated_id, first_id.to_string());
+
+        let other = strict.oneshot(call("oauth-client-b")).await.unwrap();
+        let other_id = String::from_utf8(
+            axum::body::to_bytes(other.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert_ne!(other_id, first_id.to_string());
     }
 
     #[tokio::test]
-    async fn strict_mcp_rejects_lsm_oauth_handoff_without_configured_identity() {
+    async fn strict_mcp_rejects_lsm_handoff_without_validated_client_id() {
         let store = Store::connect("sqlite::memory:").await.unwrap();
-        let response = app(store, true, None)
+        let response = app(store, true)
             .await
             .oneshot(
                 Request::builder()
@@ -335,7 +415,7 @@ mod tests {
     #[tokio::test]
     async fn strict_agent_surface_rejects_missing_bearer_even_without_identity_header() {
         let store = Store::connect("sqlite::memory:").await.unwrap();
-        let response = app(store, true, None)
+        let response = app(store, true)
             .await
             .oneshot(
                 Request::builder()
@@ -352,7 +432,7 @@ mod tests {
     async fn local_compat_mode_still_accepts_identity_header() {
         let store = Store::connect("sqlite::memory:").await.unwrap();
         let agent = store.register_agent("legacy-agent", &[]).await.unwrap();
-        let response = app(store, false, None)
+        let response = app(store, false)
             .await
             .oneshot(
                 Request::builder()

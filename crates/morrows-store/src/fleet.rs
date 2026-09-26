@@ -297,6 +297,39 @@ async fn next_display_name(
 }
 
 impl Store {
+    /// Resolve one authenticated LSM OAuth client to a stable technical AgentInstance.
+    /// This identity is authorization-only; human-readable agent/account/platform/device
+    /// metadata is self-reported separately and never inferred here.
+    pub async fn resolve_lsm_oauth_agent(
+        &self,
+        client_id: &str,
+    ) -> Result<AgentInstance, DomainError> {
+        nonempty(client_id, "OAuth client id")?;
+        let client_id = client_id.trim();
+        if client_id.chars().count() > 256 || client_id.chars().any(char::is_control) {
+            return Err(DomainError::InvalidInput("invalid OAuth client id".into()));
+        }
+        let profile = self
+            .register_profile(RegisterProfile {
+                name: "LSM OAuth Client".into(),
+                provider: "lsm".into(),
+                kind: "external".into(),
+                default_capabilities: Vec::new(),
+                metadata: json!({"auth_source":"lsm_oauth","descriptive_identity":"self_reported"}),
+            })
+            .await?;
+        self.register_agent_instance(RegisterAgentInstance {
+            profile_id: profile.id,
+            account_id: None,
+            machine_id: None,
+            name: format!("lsm-oauth:{client_id}"),
+            display_name: None,
+            capabilities: None,
+            external_instance_ref: Some(client_id.to_owned()),
+        })
+        .await
+    }
+
     /// Serialize name lookup and insertion so concurrent legacy calls reuse the
     /// same UUID. Existing normalized links are never overwritten by a refresh.
     pub async fn register_agent(
@@ -790,6 +823,7 @@ impl Store {
                     None => None,
                 },
                 latest_capacity: self.capacity_latest(instance.id).await?,
+                reported_identity: self.latest_agent_identity_report(instance.id).await?,
                 instance,
             });
         }
