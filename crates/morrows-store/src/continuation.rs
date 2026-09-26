@@ -72,19 +72,28 @@ impl Store {
         let Some(row) = row else {
             return Ok(json!({"available":false,"reason":"no_predecessor_run"}));
         };
-        Ok(
-            json!({"available":true,"source_run_id":row.try_get::<String,_>("id").map_err(storage)?,
+        let source_run_id = row.try_get::<String, _>("id").map_err(storage)?;
+        let milestone = sqlx::query(
+            "SELECT * FROM run_milestones WHERE run_id=? ORDER BY sequence DESC LIMIT 1",
+        )
+        .bind(&source_run_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(storage)?
+        .map(super::milestone::row_to_run_milestone)
+        .transpose()?;
+        Ok(json!({"available":true,"source_run_id":source_run_id,
             "source_agent_id":row.try_get::<String,_>("agent_instance_id").map_err(storage)?,
             "status":row.try_get::<String,_>("status").map_err(storage)?,
             "stop_reason":row.try_get::<Option<String>,_>("stop_reason").map_err(storage)?,
+            "milestone":milestone,
             "checkpoint":parse_opt_json(row.try_get("checkpoint_json").map_err(storage)?)?,
             "checkpoint_at":row.try_get::<Option<String>,_>("checkpoint_at").map_err(storage)?,
             "context_revision_id":row.try_get::<Option<String>,_>("context_revision_id").map_err(storage)?,
             "handoff_id":row.try_get::<Option<String>,_>("handoff_id").map_err(storage)?,
             "started_at":row.try_get::<String,_>("started_at").map_err(storage)?,
             "ended_at":row.try_get::<Option<String>,_>("ended_at").map_err(storage)?,
-            "freshness":"last_persisted_only; uncheckpointed work and external effects may exist; verify before retrying"}),
-        )
+            "freshness":"latest durable milestone/checkpoint only; unrecorded reasoning and later external effects may exist, so verify the environment before retrying"}))
     }
 }
 

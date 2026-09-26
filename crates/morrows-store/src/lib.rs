@@ -14,6 +14,7 @@ use uuid::Uuid;
 mod continuation;
 mod discovery;
 mod git_memory;
+mod milestone;
 mod runtime;
 
 enum ContextRevisionWrite {

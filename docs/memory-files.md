@@ -142,3 +142,18 @@ snapshot 通过，避免把迁移历史误判成未发布。
 
 `POST /api/projects/<UUID>/memory/rebuild` 可以从已知权威 head 重建缺失或损坏的索引记录。
 意外 head 移动或额外 SQL 记录必须先调查；rebuild 不认可未知 commit，也不删除额外证据。
+
+
+## Run milestone 与中途恢复
+
+run_checkpoint 仍用于低成本的最新运行快照；run_milestone 用于不可变的阶段边界。
+Milestone 在同一事务中写入历史记录并刷新 Run 的 latest checkpoint，记录
+completed、verified、remaining、blockers、next_step、execution_locations 以及关联的
+Artifact / Decision，同时固定创建时的 Task ContextRevision。
+
+新的 handoff 必须引用 source Run 的最新 milestone。若之后又更新了 Task Context、
+或 handoff 想引用 milestone 未捕获的 Artifact / Decision，handoff 会拒绝，要求先创建
+fresh milestone。这样正常接力不能把“旧 checkpoint + 新 evidence”拼成一个看似完整的
+handoff。异常退出仍只能恢复到最后一次持久化边界；Morrows 不会也不能从 provider 私有
+token/context buffer 自动还原未记录的推理，因此 Agent 应在实质子目标完成、长耗时/高风险
+操作前、预算压力出现以及 handoff 前主动创建 milestone。

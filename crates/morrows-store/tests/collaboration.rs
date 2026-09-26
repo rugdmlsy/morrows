@@ -18,6 +18,7 @@ async fn task(store: &Store, title: &str) -> Task {
 }
 fn handoff() -> CreateHandoff {
     CreateHandoff {
+        milestone_id: None,
         summary: "Parser implemented; validate next".into(),
         completed: vec!["parser".into()],
         remaining: vec!["tests".into()],
@@ -26,6 +27,34 @@ fn handoff() -> CreateHandoff {
         decision_ids: vec![],
     }
 }
+async fn milestone(
+    store: &Store,
+    run: Id,
+    actor: Id,
+    artifact_ids: Vec<String>,
+    decision_ids: Vec<String>,
+) -> RunMilestone {
+    store
+        .create_run_milestone(
+            run,
+            actor,
+            CreateRunMilestone {
+                kind: "handoff_preparation".into(),
+                summary: "Durable handoff boundary".into(),
+                completed: vec!["parser".into()],
+                verified: vec!["saved state is recoverable".into()],
+                remaining: vec!["tests".into()],
+                blockers: vec![],
+                next_step: "Run tests".into(),
+                execution_locations: vec!["/work".into()],
+                artifact_ids,
+                decision_ids,
+            },
+        )
+        .await
+        .unwrap()
+}
+
 async fn context(store: &Store, id: Id, summary: &str) -> ContextRevision {
     store
         .create_context_revision(
@@ -102,7 +131,16 @@ async fn handoff_continuation_survives_restart_with_all_collaboration_records() 
         )
         .await
         .unwrap();
+    let milestone = milestone(
+        &store,
+        run.id,
+        a.id,
+        vec![artifact.id.to_string()],
+        vec![decision.id.to_string()],
+    )
+    .await;
     let mut input = handoff();
+    input.milestone_id = Some(milestone.id.to_string());
     input.artifact_ids.push(artifact.id.to_string());
     input.decision_ids.push(decision.id.to_string());
     assert!(matches!(
@@ -128,6 +166,8 @@ async fn handoff_continuation_survives_restart_with_all_collaboration_records() 
     assert_eq!(recovered.context.id, original.id);
     assert_eq!(recovered.context.constraints["no_push"], true);
     assert_eq!(recovered.handoff.content.remaining, vec!["tests"]);
+    assert_eq!(recovered.handoff.milestone_id, Some(milestone.id));
+    assert_eq!(recovered.milestone.as_ref().unwrap().id, milestone.id);
     assert_eq!(recovered.artifacts[0].id, artifact.id);
     assert_eq!(recovered.decisions[0].id, decision.id);
     let all = store.task_collaboration(t.id).await.unwrap();
@@ -295,9 +335,13 @@ async fn concurrent_handoffs_and_reverse_dependencies_have_one_winner() {
     context(&store, t.id, "context").await;
     let assignment = store.claim_task(t.id, a.id, "executor", 300).await.unwrap();
     let run = store.start_run(assignment.id, a.id, None).await.unwrap();
+    let milestone = milestone(&store, run.id, a.id, vec![], vec![]).await;
+    let mut first = handoff();
+    first.milestone_id = Some(milestone.id.to_string());
+    let second = first.clone();
     let (x, y) = tokio::join!(
-        store.create_handoff(run.id, a.id, handoff()),
-        store.create_handoff(run.id, a.id, handoff())
+        store.create_handoff(run.id, a.id, first),
+        store.create_handoff(run.id, a.id, second)
     );
     assert_ne!(x.is_ok(), y.is_ok());
     assert_eq!(store.task_handoffs(t.id).await.unwrap().len(), 1);
@@ -530,8 +574,11 @@ async fn handoff_acceptance_validates_target_and_is_atomic_and_durable() {
     context(&store, t.id, "continue").await;
     let assignment = store.claim_task(t.id, a.id, "executor", 300).await.unwrap();
     let source = store.start_run(assignment.id, a.id, None).await.unwrap();
+    let milestone = milestone(&store, source.id, a.id, vec![], vec![]).await;
+    let mut handoff_input = handoff();
+    handoff_input.milestone_id = Some(milestone.id.to_string());
     let h = store
-        .create_handoff(source.id, a.id, handoff())
+        .create_handoff(source.id, a.id, handoff_input)
         .await
         .unwrap();
     assert_eq!(h.status, "pending");

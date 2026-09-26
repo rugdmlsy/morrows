@@ -507,6 +507,68 @@ impl Store {
         let context_revision_id = parse_id(context.ok_or_else(|| {
             DomainError::InvalidInput("create task context before handoff".into())
         })?)?;
+        let milestone_id = input
+            .milestone_id
+            .as_deref()
+            .ok_or_else(|| {
+                DomainError::InvalidInput(
+                    "handoff requires milestone_id from the source Run's latest durable milestone"
+                        .into(),
+                )
+            })
+            .and_then(|raw| {
+                Uuid::parse_str(raw)
+                    .map_err(|_| DomainError::InvalidInput("invalid milestone UUID".into()))
+            })?;
+        let milestone = super::milestone::row_to_run_milestone(
+            sqlx::query("SELECT * FROM run_milestones WHERE id=?")
+                .bind(milestone_id.to_string())
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(storage)?
+                .ok_or_else(|| DomainError::NotFound("milestone".into()))?,
+        )?;
+        if milestone.run_id != run_id
+            || milestone.task_id != run.task_id
+            || milestone.created_by != actor
+        {
+            return Err(DomainError::Conflict(
+                "handoff milestone must belong to this source Run and agent".into(),
+            ));
+        }
+        let latest_milestone_id: String = sqlx::query_scalar(
+            "SELECT id FROM run_milestones WHERE run_id=? ORDER BY sequence DESC LIMIT 1",
+        )
+        .bind(run_id.to_string())
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(storage)?;
+        if latest_milestone_id != milestone_id.to_string() {
+            return Err(DomainError::Conflict(
+                "handoff requires the source Run's latest milestone".into(),
+            ));
+        }
+        let latest_checkpoint_milestone: Option<String> = sqlx::query_scalar(
+            "SELECT json_extract(payload_json,'$.milestone_id') FROM events
+             WHERE entity_type='run' AND entity_id=? AND event_type='run.checkpointed'
+             ORDER BY created_at DESC,rowid DESC LIMIT 1",
+        )
+        .bind(run_id.to_string())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(storage)?
+        .flatten();
+        if latest_checkpoint_milestone.as_deref() != Some(&milestone_id.to_string()) {
+            return Err(DomainError::Conflict(
+                "handoff requires a fresh milestone after the Run's latest checkpoint".into(),
+            ));
+        }
+        if milestone.context_revision_id != Some(context_revision_id) {
+            return Err(DomainError::Conflict(
+                "handoff milestone is stale relative to current task context; create a new milestone"
+                    .into(),
+            ));
+        }
         let id = Uuid::new_v4();
         let now = Utc::now();
         // Validate references within this task; links are foreign-key backed, not
@@ -537,10 +599,20 @@ impl Store {
                         "{table} reference is not in this task"
                     )));
                 }
+                let captured = match table {
+                    "artifacts" => milestone.content.artifact_ids.iter().any(|id| id == raw),
+                    "decisions" => milestone.content.decision_ids.iter().any(|id| id == raw),
+                    _ => false,
+                };
+                if !captured {
+                    return Err(DomainError::Conflict(format!(
+                        "{table} reference was created or selected after the cited milestone; create a fresh milestone before handoff"
+                    )));
+                }
             }
         }
-        sqlx::query("INSERT INTO handoffs(id,task_id,source_run_id,created_by,context_revision_id,content_json,created_at) VALUES(?,?,?,?,?,?,?)")
-            .bind(id.to_string()).bind(run.task_id.to_string()).bind(run_id.to_string()).bind(actor.to_string()).bind(context_revision_id.to_string()).bind(serde_json::to_string(&input).map_err(storage)?).bind(now.to_rfc3339()).execute(&mut *tx).await.map_err(storage)?;
+        sqlx::query("INSERT INTO handoffs(id,task_id,source_run_id,created_by,context_revision_id,milestone_id,content_json,created_at) VALUES(?,?,?,?,?,?,?,?)")
+            .bind(id.to_string()).bind(run.task_id.to_string()).bind(run_id.to_string()).bind(actor.to_string()).bind(context_revision_id.to_string()).bind(milestone_id.to_string()).bind(serde_json::to_string(&input).map_err(storage)?).bind(now.to_rfc3339()).execute(&mut *tx).await.map_err(storage)?;
         for (table, col, ids) in [
             ("handoff_artifacts", "artifact_id", &input.artifact_ids),
             ("handoff_decisions", "decision_id", &input.decision_ids),
@@ -558,7 +630,7 @@ impl Store {
         }
         sqlx::query("UPDATE runs SET status='handed_off',stop_reason='handoff',ended_at=? WHERE assignment_id=? AND status IN ('running','paused')").bind(now.to_rfc3339()).bind(a.id.to_string()).execute(&mut *tx).await.map_err(storage)?;
         sqlx::query("UPDATE assignments SET status='released',released_at=?,release_reason='handoff' WHERE id=?").bind(now.to_rfc3339()).bind(a.id.to_string()).execute(&mut *tx).await.map_err(storage)?;
-        append_event_tx(&mut tx,"agent_instance",&actor.to_string(),"task",run.task_id,"handoff.created",json!({"handoff_id":id,"source_run_id":run_id,"assignment_id":a.id,"context_revision_id":context_revision_id}),None).await?;
+        append_event_tx(&mut tx,"agent_instance",&actor.to_string(),"task",run.task_id,"handoff.created",json!({"handoff_id":id,"source_run_id":run_id,"assignment_id":a.id,"context_revision_id":context_revision_id,"milestone_id":milestone_id}),None).await?;
         tx.commit().await.map_err(storage)?;
         Ok(Handoff {
             id,
@@ -568,6 +640,7 @@ impl Store {
             accepted_by_run_id: None,
             created_by: actor,
             context_revision_id,
+            milestone_id: Some(milestone_id),
             content: input,
             created_at: now,
         })
@@ -685,9 +758,14 @@ impl Store {
                     .any(|raw| Uuid::parse_str(raw).ok() == Some(d.id))
             })
             .collect();
+        let milestone = match handoff.milestone_id {
+            Some(id) => Some(self.get_run_milestone(id).await?),
+            None => None,
+        };
         Ok(HandoffContext {
             handoff,
             context,
+            milestone,
             artifacts,
             decisions,
         })
@@ -721,6 +799,7 @@ fn row_to_handoff(r: sqlx::sqlite::SqliteRow) -> Result<Handoff, DomainError> {
             .transpose()?,
         created_by: parse_id(r.try_get("created_by").map_err(storage)?)?,
         context_revision_id: parse_id(r.try_get("context_revision_id").map_err(storage)?)?,
+        milestone_id: parse_opt_id(r.try_get("milestone_id").map_err(storage)?)?,
         content: serde_json::from_str(&r.try_get::<String, _>("content_json").map_err(storage)?)
             .map_err(storage)?,
         created_at: parse_dt(r.try_get("created_at").map_err(storage)?)?,

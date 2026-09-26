@@ -98,8 +98,51 @@ pub struct Message {
 
     pub created_at: DateTime<Utc>,
 }
+fn default_milestone_kind() -> String {
+    "milestone".into()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CreateRunMilestone {
+    /// milestone, budget_pressure, handoff_preparation, or manual.
+    #[serde(default = "default_milestone_kind")]
+    pub kind: String,
+    pub summary: String,
+    #[serde(default)]
+    pub completed: Vec<String>,
+    #[serde(default)]
+    pub verified: Vec<String>,
+    #[serde(default)]
+    pub remaining: Vec<String>,
+    #[serde(default)]
+    pub blockers: Vec<String>,
+    pub next_step: String,
+    #[serde(default)]
+    pub execution_locations: Vec<String>,
+    #[serde(default)]
+    pub artifact_ids: Vec<String>,
+    #[serde(default)]
+    pub decision_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunMilestone {
+    pub id: Id,
+    pub run_id: Id,
+    pub task_id: Id,
+    pub created_by: Id,
+    pub sequence: i64,
+    pub context_revision_id: Option<Id>,
+    #[serde(flatten)]
+    pub content: CreateRunMilestone,
+    pub created_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct CreateHandoff {
+    /// Must identify the latest durable milestone of the source Run.
+    #[serde(default)]
+    pub milestone_id: Option<String>,
     pub summary: String,
     pub completed: Vec<String>,
     pub remaining: Vec<String>,
@@ -119,6 +162,7 @@ pub struct Handoff {
     pub accepted_by_run_id: Option<Id>,
     pub created_by: Id,
     pub context_revision_id: Id,
+    pub milestone_id: Option<Id>,
     #[serde(flatten)]
     pub content: CreateHandoff,
     pub created_at: DateTime<Utc>,
@@ -143,6 +187,7 @@ pub struct Collaboration {
 pub struct HandoffContext {
     pub handoff: Handoff,
     pub context: ContextRevision,
+    pub milestone: Option<RunMilestone>,
     pub artifacts: Vec<Artifact>,
     pub decisions: Vec<Decision>,
 }

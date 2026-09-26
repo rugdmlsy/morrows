@@ -488,10 +488,10 @@ async fn continuation_chain_is_ordered_single_owner_and_recovers_checkpoints() {
         if let Some((old_run, old_agent, handoff)) = previous {
             let recovery = store.task_recovery_context(task.id, agent).await.unwrap();
             assert_eq!(recovery["source_run_id"], json!(old_run));
-            assert_eq!(
-                recovery["checkpoint"],
-                json!({"next":"continue","agent":old_agent})
-            );
+            assert_eq!(recovery["milestone"]["kind"], "budget_pressure");
+            assert_eq!(recovery["milestone"]["next_step"], "continue");
+            assert_eq!(recovery["checkpoint"]["kind"], "budget_pressure");
+            assert_eq!(recovery["checkpoint"]["next_step"], "continue");
             assert_eq!(recovery["context_revision_id"], json!(context.id));
             assert!(recovery["checkpoint_at"].is_string());
             assert_eq!(recovery["handoff_id"], json!(handoff));
@@ -516,8 +516,24 @@ async fn continuation_chain_is_ordered_single_owner_and_recovers_checkpoints() {
                 .unwrap()["available"],
             false
         );
-        store
-            .checkpoint_run(run.id, agent, json!({"next":"continue","agent":agent}))
+        let milestone = store
+            .create_run_milestone(
+                run.id,
+                agent,
+                serde_json::from_value(json!({
+                    "kind":"budget_pressure",
+                    "summary":"Provider budget is exhausted; preserve exact continuation state",
+                    "completed":[],
+                    "verified":["current Run ownership and continuation policy are valid"],
+                    "remaining":["continue"],
+                    "blockers":["provider budget exhausted"],
+                    "next_step":"continue",
+                    "execution_locations":["morrows:test:continuation-chain"],
+                    "artifact_ids":[],
+                    "decision_ids":[]
+                }))
+                .unwrap(),
+            )
             .await
             .unwrap();
         let credential = store
@@ -525,7 +541,7 @@ async fn continuation_chain_is_ordered_single_owner_and_recovers_checkpoints() {
             .await
             .unwrap();
         store.verify_agent_token(&credential.token).await.unwrap();
-        let handoff = store.create_handoff(run.id,agent,input(json!({"summary":"provider budget exhausted","completed":[],"remaining":["continue"],"blockers":[],"artifact_ids":[],"decision_ids":[]}))).await.unwrap();
+        let handoff = store.create_handoff(run.id,agent,input(json!({"milestone_id":milestone.id,"summary":"provider budget exhausted","completed":[],"remaining":["continue"],"blockers":[],"artifact_ids":[],"decision_ids":[]}))).await.unwrap();
         assert!(store.verify_agent_token(&credential.token).await.is_err());
         previous = Some((run.id, agent, handoff.id));
     }

@@ -325,7 +325,27 @@ mod tests {
             .0,
             StatusCode::OK
         );
-        let (status,handoff)=request(&app,"POST",&format!("/runs/{}/handoffs",run.id),Some(agent.id),json!({"summary":"continue","completed":["patch"],"remaining":["test"],"artifact_ids":[artifact["id"]],"decision_ids":[decision["id"]]})).await;
+        let milestone = store
+            .create_run_milestone(
+                run.id,
+                agent.id,
+                serde_json::from_value(json!({
+                    "kind":"handoff_preparation",
+                    "summary":"REST collaboration state is durable",
+                    "completed":["patch"],
+                    "verified":["artifact and decision persisted"],
+                    "remaining":["test"],
+                    "blockers":[],
+                    "next_step":"test",
+                    "execution_locations":["file:///patch"],
+                    "artifact_ids":[artifact["id"]],
+                    "decision_ids":[decision["id"]]
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let (status,handoff)=request(&app,"POST",&format!("/runs/{}/handoffs",run.id),Some(agent.id),json!({"milestone_id":milestone.id,"summary":"continue","completed":["patch"],"remaining":["test"],"artifact_ids":[artifact["id"]],"decision_ids":[decision["id"]]})).await;
         assert_eq!(status, StatusCode::OK);
         let (status, recovered) = request(
             &app,

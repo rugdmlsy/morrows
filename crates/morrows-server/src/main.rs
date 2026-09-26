@@ -120,6 +120,12 @@ struct RunMutationBody {
 }
 
 #[derive(Deserialize)]
+struct RunMilestoneBody {
+    agent_instance_id: Id,
+    input: morrows_core::CreateRunMilestone,
+}
+
+#[derive(Deserialize)]
 struct RenewAssignmentBody {
     agent_instance_id: Id,
     #[serde(default = "default_lease")]
@@ -209,6 +215,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/agents", get(list_agents).post(register_agent))
         .route("/runs", post(start_run))
         .route("/runs/{id}/checkpoint", post(checkpoint_run))
+        .route("/runs/{id}/milestones", post(create_run_milestone))
         .route("/runs/{id}/complete", post(complete_run))
         .merge(auth::routes())
         .merge(memory::routes())
@@ -518,6 +525,22 @@ async fn checkpoint_run(
             state
                 .store
                 .checkpoint_run(id, body.agent_instance_id, body.payload)
+                .await?,
+        )
+        .unwrap(),
+    ))
+}
+
+async fn create_run_milestone(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<RunMilestoneBody>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        serde_json::to_value(
+            state
+                .store
+                .create_run_milestone(id, body.agent_instance_id, body.input)
                 .await?,
         )
         .unwrap(),

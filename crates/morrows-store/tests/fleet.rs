@@ -459,7 +459,16 @@ async fn migration_preserves_m21_uuids_and_references_and_capacity_is_append_onl
         before.push(dump(&pool, table).await);
     }
     let store = Store::connect(&url).await.unwrap();
-    for (table, expected) in tables.into_iter().zip(before) {
+    for (table, mut expected) in tables.into_iter().zip(before) {
+        if table == "handoffs" {
+            // Migration 0028 only appends the nullable milestone_id link to
+            // legacy handoffs; every preexisting value must remain byte-for-byte
+            // represented in the migrated row.
+            expected = expected
+                .into_iter()
+                .map(|row| format!("{row}|milestone_id:None"))
+                .collect();
+        }
         assert_eq!(dump(&pool, table).await, expected, "{table} changed");
     }
     assert!(

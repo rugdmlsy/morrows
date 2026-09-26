@@ -87,11 +87,32 @@ async fn live_and_persisted_context_use_the_newest_handoff() {
             .start_run(assignment.id, agent.id, None)
             .await
             .unwrap();
+        let milestone = store
+            .create_run_milestone(
+                run.id,
+                agent.id,
+                serde_json::from_value(json!({
+                    "kind":"handoff_preparation",
+                    "summary":next,
+                    "completed":[],
+                    "verified":[],
+                    "remaining":[next],
+                    "blockers":[next],
+                    "next_step":next,
+                    "execution_locations":[],
+                    "artifact_ids":[],
+                    "decision_ids":[]
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
         store
             .create_handoff(
                 run.id,
                 agent.id,
                 serde_json::from_value(json!({
+                    "milestone_id":milestone.id,
                     "summary":next, "completed":[], "remaining":[next], "blockers":[next]
                 }))
                 .unwrap(),

@@ -153,7 +153,7 @@ impl MorrowsMcp {
             "missing_context": missing, "persisted_package": package_ref, "execution": execution,
             "acceptance_criteria_paths": acceptance_paths,
             "assignment_requests": requests,
-            "workflow": {"request_assignment":"task_request_assignment", "request_status":"assignment_request_list", "publish_project_knowledge":"project_memory_publish", "completion_preflight":"run_completion_check", "structured_completion_required_for_executor":context.as_ref().is_some_and(|c| !morrows_core::completion_criteria(&c.constraints).is_empty()), "project_memory_disposition_required_for_executor":task.project_id.is_some()},
+            "workflow": {"request_assignment":"task_request_assignment", "request_status":"assignment_request_list", "persist_milestone":"run_milestone", "handoff_requires_latest_milestone":true, "publish_project_knowledge":"project_memory_publish", "completion_preflight":"run_completion_check", "structured_completion_required_for_executor":context.as_ref().is_some_and(|c| !morrows_core::completion_criteria(&c.constraints).is_empty()), "project_memory_disposition_required_for_executor":task.project_id.is_some()},
             "read_more": {"memory": "memory_get", "instructions": "instructions_get", "collaboration": "task_collaboration", "events": "task_events", "execution": "task_get"},
         }).to_string())
     }
@@ -292,6 +292,12 @@ pub struct CheckpointRunRequest {
     pub run_id: String,
     #[schemars(with = "std::collections::BTreeMap<String, Value>")]
     pub checkpoint: Value,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct MilestoneRunRequest {
+    pub run_id: String,
+    pub input: morrows_core::CreateRunMilestone,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -908,7 +914,7 @@ impl MorrowsMcp {
         serde_json::to_string(&value).map_err(|e| e.to_string())
     }
     #[tool(
-        description = "Create a durable handoff. Atomically ends source runs and releases assignment; requires task context."
+        description = "Create a durable handoff. Atomically ends source runs and releases assignment. New handoffs must cite the source Run's latest milestone; that milestone must pin the current task context and already contain every referenced artifact/decision."
     )]
     async fn handoff_create(
         &self,
@@ -969,7 +975,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Read any task by ID with paged assignment metadata and the caller's executions/checkpoints. Use task_context for project background and working context."
+        description = "Read any task by ID with paged assignment metadata plus the caller's Runs, immutable milestones and checkpoints. Successor recovery includes the predecessor's latest milestone when available. Use task_context for project background and working context."
     )]
     async fn task_get(
         &self,
@@ -1037,6 +1043,26 @@ impl MorrowsMcp {
             .await
             .map_err(|e| e.to_string())?;
         serde_json::to_string(&assignment).map_err(|e| e.to_string())
+    }
+
+    #[tool(
+        description = "Persist an immutable Run milestone and atomically refresh the Run's latest checkpoint. Use after a substantive subgoal, before a long/risky operation, when provider/token budget is under pressure, and immediately before handoff. Include exact next_step, execution_locations, and relevant same-task evidence IDs."
+    )]
+    async fn run_milestone(
+        &self,
+        Parameters(req): Parameters<MilestoneRunRequest>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<String, String> {
+        let milestone = self
+            .store
+            .create_run_milestone(
+                parse_id(&req.run_id)?,
+                authenticated_agent(&parts)?,
+                req.input,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        serde_json::to_string(&milestone).map_err(|e| e.to_string())
     }
 
     #[tool(
@@ -1494,11 +1520,13 @@ mod tests {
             "decision_create",
             "thread_create",
             "message_create",
+            "run_milestone",
             "handoff_create",
             "handoff_get",
             "handoff_accept",
             "task_collaboration",
             "assignment_renew",
+            "run_milestone",
             "run_checkpoint",
             "run_complete",
             "run_completion_check",
@@ -2050,10 +2078,34 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
+        let milestone: Value = serde_json::from_str(
+            &mcp.run_milestone(
+                Parameters(MilestoneRunRequest {
+                    run_id: run.id.to_string(),
+                    input: morrows_core::CreateRunMilestone {
+                        kind: "handoff_preparation".into(),
+                        summary: "patch ready for continuation".into(),
+                        completed: vec!["patch".into()],
+                        verified: vec!["artifact persisted".into()],
+                        remaining: vec!["test".into()],
+                        blockers: vec![],
+                        next_step: "run tests".into(),
+                        execution_locations: vec!["file:///patch".into()],
+                        artifact_ids: vec![artifact["id"].as_str().unwrap().into()],
+                        decision_ids: vec![],
+                    },
+                }),
+                Extension(parts(Some(a.id))),
+            )
+            .await
+            .unwrap(),
+        )
+        .unwrap();
         let request = || {
             Parameters(CreateHandoffRequest {
                 run_id: run.id.to_string(),
                 input: CreateHandoff {
+                    milestone_id: Some(milestone["id"].as_str().unwrap().into()),
                     summary: "continue".into(),
                     completed: vec!["patch".into()],
                     remaining: vec!["test".into()],

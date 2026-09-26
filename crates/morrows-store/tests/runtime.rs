@@ -590,15 +590,26 @@ async fn handoff_waits_for_child_exit_and_lsm_terminalization() {
         .bind_run_lsm(execution.run.id, "s_handoff")
         .await
         .unwrap();
-    store
-        .checkpoint_run(
+    let milestone = store
+        .create_run_milestone(
             execution.run.id,
             assignment.agent_instance_id,
-            json!({"files":["uncommitted.rs"]}),
+            input(json!({
+                "kind":"budget_pressure",
+                "summary":"quota exhausted; preserve uncommitted work location",
+                "completed":[],
+                "verified":["runtime is still attached to s_handoff"],
+                "remaining":["finish"],
+                "blockers":["provider quota exhausted"],
+                "next_step":"resume from uncommitted.rs after predecessor runtime is terminal",
+                "execution_locations":["uncommitted.rs","lsm:s_handoff"],
+                "artifact_ids":[],
+                "decision_ids":[]
+            })),
         )
         .await
         .unwrap();
-    store.create_handoff(execution.run.id,assignment.agent_instance_id,input(json!({"summary":"quota exhausted","remaining":["finish"],"completed":[],"blockers":[],"artifact_ids":[],"decision_ids":[]}))).await.unwrap();
+    store.create_handoff(execution.run.id,assignment.agent_instance_id,input(json!({"milestone_id":milestone.id,"summary":"quota exhausted","remaining":["finish"],"completed":[],"blockers":[],"artifact_ids":[],"decision_ids":[]}))).await.unwrap();
     assert!(store.launch_stop_requested(attempt.id).await.unwrap());
     let successor = store.register_agent("successor", &[]).await.unwrap();
     assert!(
@@ -638,7 +649,16 @@ async fn handoff_waits_for_child_exit_and_lsm_terminalization() {
         .task_recovery_context(next.task_id, successor.id)
         .await
         .unwrap();
-    assert_eq!(recovered["checkpoint"], json!({"files":["uncommitted.rs"]}));
+    assert_eq!(recovered["milestone"]["id"], json!(milestone.id));
+    assert_eq!(recovered["milestone"]["kind"], "budget_pressure");
+    assert_eq!(
+        recovered["checkpoint"]["execution_locations"],
+        json!(["uncommitted.rs", "lsm:s_handoff"])
+    );
+    assert_eq!(
+        recovered["checkpoint"]["next_step"],
+        "resume from uncommitted.rs after predecessor runtime is terminal"
+    );
 }
 
 #[tokio::test]
