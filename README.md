@@ -241,7 +241,7 @@ PKCE，并把 OAuth token 仅保存在当前标签页的 `sessionStorage` 中。
 - `task_claim`：对 `assignment_mode=open` 的任务原子创建 Assignment + Run；成功返回即已获得执行权，同一角色并发接单只有一个成功。
 - `task_request_assignment` / `assignment_request_list` / `assignment_request_withdraw`：仅用于 `approval` 任务的接取申请、结果查询与撤回；`dispatch` 任务由调度器分配。
 - `project_memory_publish`：参与任务的 Agent 直接写入所属项目知识，保留来源、验证边界与旧版本，支持幂等重试和旧版本冲突检查。
-- `run_completion_check`：只读获取原始验收条件、报告模板和阻塞原因。声明了 `acceptance_criteria` / `freeze_requires` 的执行任务，完成时必须提供当前上下文和逐项证据引用；服务器不代替实际实验验证。
+- `run_completion_check`：只读获取原始验收条件、报告模板和阻塞原因。声明了 `acceptance_criteria` / `freeze_requires` 的执行任务，完成时必须提供当前上下文和逐项证据引用；服务器不代替实际实验验证。若任务产出了实验、研究、评估、审计或最终报告，可选通过 `report_path` 提交实际文件路径或 URI，便于后续直接定位；该字段不是完成必填项，也不会单独满足验收条件。
 
 任务和项目读取要求已认证的 Agent 身份，不要求任务归属。默认按 Agent 筛选只是发现偏好，不是读取权限边界。协作写入仍要求拥有任务、分配历史或开放的任务会话；执行更新和私人会话仍校验归属。员工 MCP 只有 `task_claim` 能为 `open` 任务原子创建调用者自己的 Assignment + Run；`approval` 与 `dispatch` 仍由控制面约束。完整参数、分页与返回格式见 [员工查询协议](docs/employee-discovery.md)。
 

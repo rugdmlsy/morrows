@@ -379,17 +379,22 @@ pub struct CompleteRunRequest {
     pub completion: Option<morrows_core::CompletionReport>,
     /// Required for executor tasks attached to a project. Publish/update reusable project knowledge or explicitly use not_applicable with a rationale.
     pub memory_disposition: Option<morrows_core::MemoryDisposition>,
+    /// Optional path or URI to a human-readable report produced by this run. Stored as result.report_path for later discovery; it is not required and does not satisfy acceptance criteria by itself.
+    pub report_path: Option<String>,
 }
 
 impl CompleteRunRequest {
     fn result_with_completion(&self) -> Result<Value, String> {
         let mut result = self.result.clone();
-        if self.completion.is_some() || self.memory_disposition.is_some() {
+        if self.completion.is_some()
+            || self.memory_disposition.is_some()
+            || self.report_path.is_some()
+        {
             if result.is_null() {
                 result = json!({});
             }
             let object = result.as_object_mut().ok_or(
-                "result must be an object when completion or memory_disposition is supplied",
+                "result must be an object when completion, memory_disposition, or report_path is supplied",
             )?;
             if let Some(completion) = &self.completion {
                 if object.contains_key("completion") {
@@ -413,6 +418,18 @@ impl CompleteRunRequest {
                     "memory_disposition".into(),
                     serde_json::to_value(disposition).map_err(|e| e.to_string())?,
                 );
+            }
+            if let Some(report_path) = &self.report_path {
+                let report_path = report_path.trim();
+                if report_path.is_empty() {
+                    return Err("report_path must be nonempty when supplied".into());
+                }
+                if object.contains_key("report_path") {
+                    return Err(
+                        "supply report_path either at top level or in result, not both".into(),
+                    );
+                }
+                object.insert("report_path".into(), Value::String(report_path.into()));
             }
         }
         Ok(result)
@@ -1179,7 +1196,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Complete an owned run. Project-backed executor tasks must explicitly supply memory_disposition: published/updated with same-task project MemoryEntry IDs, or not_applicable with a rationale. Executor tasks with acceptance_criteria/freeze_requires also require a current-context completion report with every criterion passed, rationale and same-task artifact references. Use run_completion_check first. Validation is atomic; failure leaves state unchanged."
+        description = "Complete an owned run. Project-backed executor tasks must explicitly supply memory_disposition: published/updated with same-task project MemoryEntry IDs, or not_applicable with a rationale. Executor tasks with acceptance_criteria/freeze_requires also require a current-context completion report with every criterion passed, rationale and same-task artifact references. If the run produced a human-readable experiment/research/final report, optionally supply report_path with its actual path or URI; this is recorded for discovery but is not a completion requirement or acceptance evidence by itself. Use run_completion_check first. Validation is atomic; failure leaves state unchanged."
     )]
     async fn run_complete(
         &self,
@@ -1197,7 +1214,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Read-only completion preflight for an owned run. Omit result/completion/memory_disposition to discover exact saved criteria, completion_template, memory_disposition_template and blockers. Project-backed executor tasks must explicitly publish/update durable project knowledge or justify not_applicable. Supply a proposed report/disposition to validate it. Does not complete, claim, acknowledge or verify content truth; run_complete repeats validation atomically."
+        description = "Read-only completion preflight for an owned run. Omit result/completion/memory_disposition/report_path to discover exact saved criteria, completion_template, memory_disposition_template and blockers. Project-backed executor tasks must explicitly publish/update durable project knowledge or justify not_applicable. Supply a proposed report/disposition to validate it. If the run produced a human-readable experiment/research/final report, report_path may optionally record its actual path or URI; it is not required and does not satisfy acceptance criteria by itself. Does not complete, claim, acknowledge or verify content truth; run_complete repeats validation atomically."
     )]
     async fn run_completion_check(
         &self,
@@ -1602,6 +1619,60 @@ mod tests {
                 "{field} must be an object JSON Schema for strict MCP clients"
             );
         }
+
+        let complete_schema =
+            serde_json::to_value(rmcp::schemars::schema_for!(CompleteRunRequest)).unwrap();
+        assert!(complete_schema["properties"]["report_path"].is_object());
+        let required = complete_schema["required"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            !required.iter().any(|field| field == "report_path"),
+            "report_path must remain optional in the MCP schema"
+        );
+    }
+
+    #[test]
+    fn complete_run_request_records_optional_report_path_without_requiring_it() {
+        let without_report = CompleteRunRequest {
+            run_id: uuid::Uuid::new_v4().to_string(),
+            result: json!({"ok": true}),
+            completion: None,
+            memory_disposition: None,
+            report_path: None,
+        };
+        assert_eq!(
+            without_report.result_with_completion().unwrap(),
+            json!({"ok": true})
+        );
+
+        let with_report = CompleteRunRequest {
+            report_path: Some(" reports/final.md ".into()),
+            ..without_report
+        };
+        assert_eq!(
+            with_report.result_with_completion().unwrap()["report_path"],
+            json!("reports/final.md")
+        );
+
+        let duplicate = CompleteRunRequest {
+            run_id: uuid::Uuid::new_v4().to_string(),
+            result: json!({"report_path": "result.md"}),
+            completion: None,
+            memory_disposition: None,
+            report_path: Some("top-level.md".into()),
+        };
+        assert!(duplicate.result_with_completion().is_err());
+
+        let empty = CompleteRunRequest {
+            run_id: uuid::Uuid::new_v4().to_string(),
+            result: json!({}),
+            completion: None,
+            memory_disposition: None,
+            report_path: Some("   ".into()),
+        };
+        assert!(empty.result_with_completion().is_err());
     }
 
     #[tokio::test]
@@ -2496,6 +2567,7 @@ mod tests {
                             .into(),
                     memory_entry_ids: vec![memory_id.clone()],
                 }),
+                report_path: None,
             }),
             Extension(parts(Some(agent_a.id))),
         )

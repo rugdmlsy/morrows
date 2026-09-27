@@ -112,7 +112,11 @@ or `freeze_requires` in the current context constraints, completion requires:
 - Normal ownership, lease, lifecycle and unfinished-dependency checks.
 
 Pass the report as `completion` to the MCP tool, or as `result.completion` (also
-supported by the REST/CLI path). Extra result fields remain intact. Explicit
+supported by the REST/CLI path). If the run produced a human-readable experiment,
+research, evaluation, audit, or final report, `report_path` may optionally record its
+actual file path or URI. Morrows stores it as `result.report_path` for discovery; it is
+not required and does not count as acceptance evidence by itself. Extra result fields
+remain intact. Explicit
 `result.ok=false` or `all_acceptance_criteria_met=false` blocks completion even
 without structured criteria. A stale report, missing/duplicate/unknown criterion,
 or foreign evidence prevents all state changes. `run_complete` repeats validation
