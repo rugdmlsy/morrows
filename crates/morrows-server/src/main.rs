@@ -232,7 +232,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/projects/{id}", get(get_project))
         .route("/tasks", get(list_tasks).post(create_task))
         .route("/tasks/management", get(list_task_management))
-        .route("/tasks/{id}", get(get_task))
+        .route("/tasks/{id}", get(get_task).delete(delete_task))
         .route("/tasks/{id}/project", post(set_task_project))
         .route("/tasks/{id}/rework", post(create_task_rework))
         .route("/tasks/{id}/reopen", post(reopen_task))
@@ -482,6 +482,14 @@ async fn get_task(
     Ok(Json(
         serde_json::to_value(state.store.get_task(id).await?).unwrap(),
     ))
+}
+
+async fn delete_task(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    state.store.delete_task(id).await?;
+    Ok(Json(json!({"task_id":id,"deleted":true})))
 }
 
 async fn set_task_project(

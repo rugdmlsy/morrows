@@ -405,6 +405,81 @@ impl Store {
         Ok(Some(self.get_task(task_id).await?))
     }
 
+    pub async fn delete_task(&self, task_id: Id) -> Result<(), DomainError> {
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(storage)?;
+        let task = row_to_task(
+            sqlx::query("SELECT * FROM tasks WHERE id=?")
+                .bind(task_id.to_string())
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(storage)?
+                .ok_or_else(|| DomainError::NotFound(format!("task {task_id}")))?,
+        )?;
+        let has_history: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM assignments WHERE task_id=?)
+                OR EXISTS(SELECT 1 FROM sessions WHERE task_id=?)
+                OR EXISTS(SELECT 1 FROM context_revisions WHERE task_id=?)
+                OR EXISTS(SELECT 1 FROM assignment_requests WHERE task_id=?)
+                OR EXISTS(SELECT 1 FROM artifacts WHERE task_id=?)
+                OR EXISTS(SELECT 1 FROM decisions WHERE task_id=?)
+                OR EXISTS(SELECT 1 FROM message_threads WHERE task_id=?)
+                OR EXISTS(SELECT 1 FROM handoffs WHERE task_id=?)
+                OR EXISTS(SELECT 1 FROM task_dependencies WHERE task_id=? OR depends_on_task_id=?)
+                OR EXISTS(SELECT 1 FROM task_relationships WHERE source_task_id=? OR target_task_id=?)
+                OR EXISTS(SELECT 1 FROM run_milestones WHERE task_id=?)",
+        )
+        .bind(task_id.to_string())
+        .bind(task_id.to_string())
+        .bind(task_id.to_string())
+        .bind(task_id.to_string())
+        .bind(task_id.to_string())
+        .bind(task_id.to_string())
+        .bind(task_id.to_string())
+        .bind(task_id.to_string())
+        .bind(task_id.to_string())
+        .bind(task_id.to_string())
+        .bind(task_id.to_string())
+        .bind(task_id.to_string())
+        .bind(task_id.to_string())
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(storage)?;
+        if has_history || task.current_context_revision_id.is_some() {
+            return Err(DomainError::Conflict(
+                "task has execution, collaboration, context, or relationship history and cannot be hard-deleted; cancel/withdraw it instead".into(),
+            ));
+        }
+        sqlx::query("DELETE FROM tasks WHERE id=?")
+            .bind(task_id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(|_| DomainError::Conflict(
+                "task has dependent records and cannot be hard-deleted; cancel/withdraw it instead".into(),
+            ))?;
+        sqlx::query("DELETE FROM events WHERE entity_type='task' AND entity_id=?")
+            .bind(task_id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?;
+        append_event_tx(
+            &mut tx,
+            "human",
+            "webui",
+            "task",
+            task_id,
+            "task.deleted",
+            json!({"title":task.title,"project_id":task.project_id}),
+            None,
+        )
+        .await?;
+        tx.commit().await.map_err(storage)?;
+        Ok(())
+    }
+
     pub async fn set_task_assignment_mode(
         &self,
         task_id: Id,

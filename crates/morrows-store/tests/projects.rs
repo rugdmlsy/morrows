@@ -223,3 +223,49 @@ async fn unbound_project_repair_is_atomic_idempotent_and_refuses_reassignment() 
     assert!(error.to_string().contains("refuses reassignment"));
     assert_eq!(store.get_task(task.id).await.unwrap().project_id, Some(alpha.id));
 }
+
+#[tokio::test]
+async fn pristine_task_can_be_deleted_but_task_with_history_is_preserved() {
+    let store = Store::connect("sqlite::memory:").await.unwrap();
+    let pristine = store
+        .create_task(CreateTask {
+            project_id: None,
+            title: "Disposable task".into(),
+            description: String::new(),
+            owner_actor_id: "human:webui".into(),
+            state: morrows_core::TaskState::Ready,
+            priority: 0,
+        })
+        .await
+        .unwrap();
+    store.delete_task(pristine.id).await.unwrap();
+    assert!(store.get_task(pristine.id).await.is_err());
+
+    let retained = store
+        .create_task(CreateTask {
+            project_id: None,
+            title: "Task with context".into(),
+            description: String::new(),
+            owner_actor_id: "human:webui".into(),
+            state: morrows_core::TaskState::Ready,
+            priority: 0,
+        })
+        .await
+        .unwrap();
+    store
+        .create_context_revision(
+            retained.id,
+            morrows_core::CreateContextRevision {
+                goal: "keep history".into(),
+                background: String::new(),
+                constraints: serde_json::json!({}),
+                current_summary: String::new(),
+                created_by_actor_id: "human:webui".into(),
+            },
+        )
+        .await
+        .unwrap();
+    let error = store.delete_task(retained.id).await.unwrap_err();
+    assert!(error.to_string().contains("cannot be hard-deleted"));
+    assert_eq!(store.get_task(retained.id).await.unwrap().id, retained.id);
+}

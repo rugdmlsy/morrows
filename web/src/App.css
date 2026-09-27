@@ -1905,3 +1905,29 @@ h3 { margin: 20px 0 8px; color: var(--ink-3); font: 700 calc(8px * var(--font-sc
 .operator-pairing { display: grid; gap: 10px; }
 .operator-oauth-login { display: grid; gap: 4px; justify-items: end; }
 .operator-signin-hint { max-width: 260px; font-size: 12px; text-align: left; }
+
+.detail-heading-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+button.danger,
+.task-management-actions-cell button.danger {
+  padding: 6px 9px;
+  border: 1px solid color-mix(in srgb, var(--red) 48%, var(--line));
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--red) 9%, var(--panel));
+  color: var(--red);
+  cursor: pointer;
+  font-size: calc(8px * var(--font-scale));
+  white-space: nowrap;
+}
+button.danger:hover,
+.task-management-actions-cell button.danger:hover {
+  border-color: color-mix(in srgb, var(--red) 72%, var(--line-hover));
+  background: color-mix(in srgb, var(--red) 16%, var(--panel));
+  color: var(--red);
+}
+.task-management-actions-cell { width: 1%; white-space: nowrap; }
