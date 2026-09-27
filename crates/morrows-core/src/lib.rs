@@ -136,6 +136,9 @@ pub struct CreateTask {
 fn default_owner() -> String {
     "human:local".into()
 }
+fn default_assignment_phase() -> String {
+    "implementing".into()
+}
 fn default_task_state() -> TaskState {
     TaskState::Ready
 }
@@ -163,6 +166,8 @@ pub struct Assignment {
     pub role: String,
     pub agent_instance_id: Id,
     pub status: String,
+    #[serde(default = "default_assignment_phase")]
+    pub phase: String,
     pub acquired_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
     pub renewed_at: DateTime<Utc>,
@@ -296,3 +301,5 @@ mod completion;
 pub use completion::*;
 mod assignment_request;
 pub use assignment_request::*;
+mod intake;
+pub use intake::*;

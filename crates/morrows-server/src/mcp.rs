@@ -198,7 +198,7 @@ Current summary: {}",
             "missing_context": missing, "persisted_package": package_ref, "execution": execution,
             "acceptance_criteria_paths": acceptance_paths,
             "assignment_requests": requests,
-            "workflow": {"claim_open_task":"task_claim", "request_approval":"task_request_assignment", "request_status":"assignment_request_list", "persist_milestone":"run_milestone", "handoff_requires_latest_milestone":true, "publish_project_knowledge":"project_memory_publish", "completion_preflight":"run_completion_check", "structured_completion_required_for_executor":context.as_ref().is_some_and(|c| !morrows_core::completion_criteria(&c.constraints).is_empty()), "project_memory_disposition_required_for_executor":task.project_id.is_some()},
+            "workflow": {"claim_open_task":"task_claim", "request_approval":"task_request_assignment", "request_status":"assignment_request_list", "mandatory_executor_intake":["task_intake_until_project_memory_complete","task_interview_submit","human_operator_approval","task_begin_execution"], "intake_read":"task_intake", "interview_submit":"task_interview_submit", "execution_start":"task_begin_execution", "implementation_authorized_only_when_assignment_phase":"implementing", "persist_milestone":"run_milestone", "handoff_requires_latest_milestone":true, "publish_project_knowledge":"project_memory_publish", "completion_preflight":"run_completion_check", "structured_completion_required_for_executor":context.as_ref().is_some_and(|c| !morrows_core::completion_criteria(&c.constraints).is_empty()), "project_memory_disposition_required_for_executor":task.project_id.is_some()},
             "read_more": {"memory": "memory_get", "memory_search": "memory_search", "instructions": "instructions_get", "collaboration": "task_collaboration", "events": "task_events", "execution": "task_get"},
         }).to_string())
     }
@@ -350,6 +350,24 @@ pub struct TaskClaimRequest {
     pub role: String,
     #[serde(default = "default_lease")]
     pub lease_seconds: i64,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TaskIntakeRequest {
+    pub task_id: String,
+    #[serde(flatten)]
+    pub page: PageRequest,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct InterviewSubmitRequest {
+    pub task_id: String,
+    pub understanding: String,
+    #[serde(default)]
+    pub constraints: std::collections::BTreeMap<String, Value>,
+    pub plan: Vec<String>,
+    #[serde(default)]
+    pub questions: Vec<String>,
 }
 
 fn default_claim_role() -> String {
@@ -712,7 +730,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Start work here: read fresh task/project background, current context and memory, latest handoff, decisions, artifacts, dependencies and instructions. Reports missing background/structured acceptance criteria. Bounded sections include continuation offsets; no message/event history and no writes."
+        description = "Read fresh task/project background, current context and memory, latest handoff, decisions, artifacts, dependencies and instructions. This is read-only background and does NOT authorize implementation. After taking an executor Assignment, use task_intake to record the mandatory Project Memory + ContextPackage review before the human interview."
     )]
     async fn task_context(
         &self,
@@ -1283,7 +1301,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Atomically claim an open task for the authenticated AgentInstance and start its Run. This creates the Assignment and Run in one transaction, so success means execution ownership is live immediately. Only tasks with assignment_mode=open can be self-claimed; approval tasks use task_request_assignment and dispatch tasks are control-plane managed. Concurrent claims for the same role allow only one winner."
+        description = "Atomically claim an open task for the authenticated AgentInstance and start an intake Run. Executor claims begin in phase=context_review: the Run may be used to read Morrows context and conduct the human interview, but it does NOT authorize implementation or LSM execution. Next call task_intake until Project Memory is fully read, then task_interview_submit. Only tasks with assignment_mode=open can be self-claimed; approval tasks use task_request_assignment and dispatch tasks are control-plane managed."
     )]
     async fn task_claim(
         &self,
@@ -1299,6 +1317,70 @@ impl MorrowsMcp {
                     &req.role,
                     req.lease_seconds,
                 )
+                .await
+                .map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())
+    }
+
+    #[tool(
+        description = "Mandatory executor intake read. Returns the task's Project background, a bounded page of current Project/organization memory, and a fresh current ContextPackage, and records server-side read receipts pinned to the Project memory head and task context revision. Follow project_memory.next_offset with the same task until it is null. This does not authorize implementation."
+    )]
+    async fn task_intake(
+        &self,
+        Parameters(req): Parameters<TaskIntakeRequest>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<String, String> {
+        let value = self
+            .store
+            .task_intake_page(
+                parse_id(&req.task_id)?,
+                authenticated_agent(&parts)?,
+                req.page.limit,
+                req.page.offset,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        serde_json::to_string(&value).map_err(|e| e.to_string())
+    }
+
+    #[tool(
+        description = "Submit the mandatory human interview after task_intake has fully read the current Project Memory and ContextPackage. Provide your understanding of the goal/constraints, an ordered implementation plan, and every unresolved question. Morrows moves the Assignment to human_interview; implementation remains blocked until a human operator approves the interview."
+    )]
+    async fn task_interview_submit(
+        &self,
+        Parameters(req): Parameters<InterviewSubmitRequest>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<String, String> {
+        let value = self
+            .store
+            .submit_intake_interview(
+                parse_id(&req.task_id)?,
+                authenticated_agent(&parts)?,
+                morrows_core::InterviewSubmission {
+                    understanding: req.understanding,
+                    constraints: json!(req.constraints),
+                    plan: json!(req.plan),
+                    questions: req.questions,
+                },
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        serde_json::to_string(&value).map_err(|e| e.to_string())
+    }
+
+    #[tool(
+        description = "After a human has approved the intake interview, atomically revalidate the Project Memory/ContextPackage receipts and transition your executor Assignment from ready to implementing. Calls before approval, with unresolved questions, or after context/memory changes are rejected. Managed launcher Runs still receive LSM capability only after this transition."
+    )]
+    async fn task_begin_execution(
+        &self,
+        Parameters(req): Parameters<TaskIdRequest>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<String, String> {
+        serde_json::to_string(
+            &self
+                .store
+                .begin_task_execution(parse_id(&req.task_id)?, authenticated_agent(&parts)?)
                 .await
                 .map_err(|e| e.to_string())?,
         )
@@ -1766,6 +1848,9 @@ mod tests {
             "run_completion_check",
             "project_memory_publish",
             "task_claim",
+            "task_intake",
+            "task_interview_submit",
+            "task_begin_execution",
             "task_request_assignment",
             "assignment_request_list",
             "assignment_request_withdraw",

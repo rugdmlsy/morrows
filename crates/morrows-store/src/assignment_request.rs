@@ -194,6 +194,7 @@ impl Store {
                         request.agent_instance_id,
                         &request.role,
                         lease_seconds,
+                        true,
                     )
                     .await?
                     .id

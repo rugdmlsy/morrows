@@ -595,12 +595,21 @@ async fn execute_codebuddy_with_root(
     }
 
     let control = LsmControl::from_env()?;
-    let agent_binding = if let Some(control) = &control {
-        Some(
-            control
-                .provision_agent(&store, execution.run.id, &execution.task.title)
-                .await?,
-        )
+    let execution_authorized = store
+        .get_assignment(execution.run.assignment_id)
+        .await?
+        .phase
+        == INTAKE_PHASE_IMPLEMENTING;
+    let agent_binding = if execution_authorized {
+        if let Some(control) = &control {
+            Some(
+                control
+                    .provision_agent(&store, execution.run.id, &execution.task.title)
+                    .await?,
+            )
+        } else {
+            None
+        }
     } else {
         None
     };
@@ -695,6 +704,8 @@ async fn execute_codebuddy_with_root(
             "\nLSM execution context: {}. Use only this Logical Session for LSM calls. Morrows owns Session lifecycle; do not start, finish, cancel, or delete it.\n",
             binding.logical_session_id,
         ));
+    } else {
+        prompt.push_str("\nThis is an intake-only launch. Morrows has not issued LSM execution capability. Use task_intake to read the complete current Project Memory and ContextPackage, submit task_interview_submit with all unclear details, then wait for human approval. Do not implement or modify external state until the Assignment phase becomes implementing.\n");
     }
 
     if let Some(mut stdin) = child.stdin.take() {
@@ -888,12 +899,21 @@ async fn execute_codex_with_root(
     }
 
     let control = LsmControl::from_env()?;
-    let agent_binding = if let Some(control) = &control {
-        Some(
-            control
-                .provision_agent(&store, execution.run.id, &execution.task.title)
-                .await?,
-        )
+    let execution_authorized = store
+        .get_assignment(execution.run.assignment_id)
+        .await?
+        .phase
+        == INTAKE_PHASE_IMPLEMENTING;
+    let agent_binding = if execution_authorized {
+        if let Some(control) = &control {
+            Some(
+                control
+                    .provision_agent(&store, execution.run.id, &execution.task.title)
+                    .await?,
+            )
+        } else {
+            None
+        }
     } else {
         None
     };
@@ -921,6 +941,7 @@ async fn execute_codex_with_root(
         &cwd,
         last_message_path.to_string_lossy().as_ref(),
         resume_session.as_deref(),
+        !execution_authorized,
     );
     inject_morrows_config(&mut args);
     if let Some(binding) = &agent_binding {
@@ -990,6 +1011,8 @@ async fn execute_codex_with_root(
             "\nLSM execution context: {}. Use only this Logical Session for LSM calls. Morrows owns Session lifecycle; do not start, finish, cancel, or delete it. LSM will reject old Session IDs from resumed Session history.\n",
             binding.logical_session_id,
         ));
+    } else {
+        prompt.push_str("\nThis is an intake-only launch. Morrows has not issued LSM execution capability. Use task_intake to read the complete current Project Memory and ContextPackage, submit task_interview_submit with all unclear details, then wait for human approval. Do not implement or modify external state until the Assignment phase becomes implementing.\n");
     }
     if let Some(mut stdin) = child.stdin.take() {
         if let Err(err) = stdin.write_all(prompt.as_bytes()).await {
@@ -1129,6 +1152,7 @@ pub(crate) fn codex_args(
     cwd: &str,
     last_message_path: &str,
     resume_session: Option<&str>,
+    intake_only: bool,
 ) -> Vec<String> {
     if let Some(session) = resume_session {
         let mut args = vec![
@@ -1141,6 +1165,10 @@ pub(crate) fn codex_args(
         if let Some(model) = profile.model.as_deref() {
             args.extend(["-m".into(), model.into()]);
         }
+        if intake_only {
+            args.extend(["-c".into(), "sandbox_mode=\"read-only\"".into()]);
+            args.extend(["-c".into(), "approval_policy=\"never\"".into()]);
+        }
         args.extend([session.into(), "-".into()]);
         return args;
     }
@@ -1149,12 +1177,19 @@ pub(crate) fn codex_args(
         "--json".into(),
         "--color".into(),
         "never".into(),
-        "--approve-for-me".into(),
+    ];
+    if intake_only {
+        args.extend(["--sandbox".into(), "read-only".into()]);
+        args.extend(["-c".into(), "approval_policy=\"never\"".into()]);
+    } else {
+        args.push("--approve-for-me".into());
+    }
+    args.extend([
         "-C".into(),
         cwd.into(),
         "-o".into(),
         last_message_path.into(),
-    ];
+    ]);
     if let Some(model) = profile.model.as_deref() {
         args.push("-m".into());
         args.push(model.into());
@@ -1601,14 +1636,60 @@ mod tests {
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
-        let args = codex_args(&profile, "/tmp/work", "/tmp/last", None);
+        let args = codex_args(&profile, "/tmp/work", "/tmp/last", None, false);
         assert_eq!(args.last().map(String::as_str), Some("-"));
         assert!(!args.join(" ").contains("task"));
         assert!(!args.iter().any(|arg| arg.contains("rm -rf")));
-        let resumed = codex_args(&profile, "/tmp/work", "/tmp/last", Some("session-123"));
+        let resumed = codex_args(
+            &profile,
+            "/tmp/work",
+            "/tmp/last",
+            Some("session-123"),
+            false,
+        );
         assert_eq!(&resumed[0..3], &["exec", "resume", "--json"]);
         assert_eq!(resumed[resumed.len() - 2], "session-123");
         assert!(!resumed.join(" ").contains("task"));
+    }
+
+    #[test]
+    fn codex_intake_argv_is_read_only_and_never_auto_approves_writes() {
+        let profile = LaunchProfile {
+            id: uuid::Uuid::new_v4(),
+            name: "codex".into(),
+            adapter: "codex_cli".into(),
+            agent_instance_id: uuid::Uuid::new_v4(),
+            program: "/bin/codex".into(),
+            default_cwd: Some("/tmp/work".into()),
+            model: None,
+            enabled: true,
+            metadata: json!({}),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let fresh = codex_args(&profile, "/tmp/work", "/tmp/last", None, true);
+        assert!(
+            fresh
+                .windows(2)
+                .any(|pair| pair == ["--sandbox", "read-only"])
+        );
+        assert!(!fresh.iter().any(|arg| arg == "--approve-for-me"));
+        assert!(fresh.iter().any(|arg| arg == "approval_policy=\"never\""));
+
+        let resumed = codex_args(
+            &profile,
+            "/tmp/work",
+            "/tmp/last",
+            Some("session-123"),
+            true,
+        );
+        assert!(
+            resumed
+                .iter()
+                .any(|arg| arg == "sandbox_mode=\"read-only\"")
+        );
+        assert!(resumed.iter().any(|arg| arg == "approval_policy=\"never\""));
+        assert!(!resumed.iter().any(|arg| arg == "--approve-for-me"));
     }
 
     #[test]
@@ -1626,7 +1707,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
-        let mut args = codex_args(&profile, "/tmp/work", "/tmp/last", None);
+        let mut args = codex_args(&profile, "/tmp/work", "/tmp/last", None, false);
         inject_morrows_config(&mut args);
         let joined = args.join(" ");
         assert!(joined.contains("MORROWS_AGENT_AUTHORIZATION"));

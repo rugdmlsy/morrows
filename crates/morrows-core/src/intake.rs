@@ -1,0 +1,65 @@
+use crate::{Assignment, ContextPackage, Id, MemoryEntry, Page, Project};
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+pub const INTAKE_PHASE_CONTEXT_REVIEW: &str = "context_review";
+pub const INTAKE_PHASE_HUMAN_INTERVIEW: &str = "human_interview";
+pub const INTAKE_PHASE_READY: &str = "ready";
+pub const INTAKE_PHASE_IMPLEMENTING: &str = "implementing";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssignmentIntake {
+    pub assignment_id: Id,
+    pub task_id: Id,
+    pub agent_instance_id: Id,
+    pub project_id: Option<Id>,
+    pub project_memory_head: Option<String>,
+    pub project_memory_next_offset: Option<i64>,
+    pub project_memory_complete: bool,
+    pub project_memory_read_at: Option<DateTime<Utc>>,
+    pub context_package_id: Option<Id>,
+    pub context_revision_id: Option<Id>,
+    pub context_package_read_at: Option<DateTime<Utc>>,
+    pub understanding: String,
+    pub constraints: Value,
+    pub plan: Value,
+    pub questions: Vec<String>,
+    pub unresolved_questions: Vec<String>,
+    pub interview_status: String,
+    pub human_response: Option<String>,
+    pub approved_by_actor_id: Option<String>,
+    pub approved_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TaskIntakeView {
+    pub assignment: Assignment,
+    pub intake: AssignmentIntake,
+    pub project: Project,
+    pub project_memory: Page<MemoryEntry>,
+    pub context_package: ContextPackage,
+    pub blockers: Vec<String>,
+    pub execution_ready: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InterviewSubmission {
+    pub understanding: String,
+    #[serde(default = "default_object")]
+    pub constraints: Value,
+    #[serde(default = "default_array")]
+    pub plan: Value,
+    #[serde(default)]
+    pub questions: Vec<String>,
+}
+
+fn default_object() -> Value {
+    serde_json::json!({})
+}
+
+fn default_array() -> Value {
+    serde_json::json!([])
+}

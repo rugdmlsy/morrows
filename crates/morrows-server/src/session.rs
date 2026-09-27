@@ -405,6 +405,7 @@ async fn execute_session_runtime(
                 &cwd,
                 last_message_path.to_string_lossy().as_ref(),
                 previous_ref.as_deref(),
+                false,
             );
             super::launch::inject_morrows_config(&mut args);
             if let Some(effort) = attempt.reasoning_effort.as_deref() {

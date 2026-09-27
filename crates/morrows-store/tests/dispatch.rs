@@ -438,8 +438,14 @@ async fn continuation_chain_is_ordered_single_owner_and_recovers_checkpoints() {
     let b = worker(&store, "chain-b", &["code"], 1, 1).await;
     let c = worker(&store, "chain-c", &["code"], 1, 1).await;
     let outsider = worker(&store, "outsider", &["code"], 9, 9).await;
+    let project = store
+        .create_project(input(json!({"name":"continuation intake"})))
+        .await
+        .unwrap();
     let task = store
-        .create_task(input(json!({"title":"one task three executions"})))
+        .create_task(input(
+            json!({"title":"one task three executions","project_id":project.id}),
+        ))
         .await
         .unwrap();
     let context = store
@@ -478,6 +484,29 @@ async fn continuation_chain_is_ordered_single_owner_and_recovers_checkpoints() {
         let assignment = &assignments[0];
         assert_eq!(assignment.agent_instance_id, agent);
         assert_eq!(assignment.task_id, task.id);
+        assert_eq!(assignment.phase, INTAKE_PHASE_CONTEXT_REVIEW);
+        let intake = store
+            .task_intake_page(task.id, agent, 100, 0)
+            .await
+            .unwrap();
+        assert!(intake.project_memory.next_offset.is_none());
+        store
+            .submit_intake_interview(
+                task.id,
+                agent,
+                InterviewSubmission {
+                    understanding: "continue the same durable task".into(),
+                    constraints: json!({}),
+                    plan: json!(["resume from durable handoff and checkpoint"]),
+                    questions: vec![],
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .resolve_intake_interview(assignment.id, "approve", "approved", "human:test")
+            .await
+            .unwrap();
         let (one, two) = tokio::join!(
             store.start_run(assignment.id, agent, None),
             store.start_run(assignment.id, agent, None)

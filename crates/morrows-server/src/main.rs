@@ -4,6 +4,7 @@ mod collaboration;
 mod delivery;
 mod dispatch;
 mod fleet;
+mod intake;
 mod launch;
 mod lsm;
 mod mcp;
@@ -23,7 +24,9 @@ use axum::{
 };
 use mcp::MorrowsMcp;
 use memory_search::MemorySearch;
-use morrows_core::{AssignmentMode, CreateContextRevision, CreateProject, CreateTask, DomainError, Id};
+use morrows_core::{
+    AssignmentMode, CreateContextRevision, CreateProject, CreateTask, DomainError, Id,
+};
 use morrows_store::Store;
 use rmcp::transport::{
     StreamableHttpServerConfig,
@@ -239,6 +242,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(dispatch::routes())
         .merge(delivery::routes())
         .merge(fleet::routes())
+        .merge(intake::routes())
         .merge(launch::routes())
         .with_state(state);
 

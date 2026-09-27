@@ -260,7 +260,8 @@ impl Store {
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(storage)?;
-        let assignment = claim_task_tx(&mut tx, task_id, agent_id, role, lease_seconds).await?;
+        let assignment =
+            claim_task_tx(&mut tx, task_id, agent_id, role, lease_seconds, false).await?;
         tx.commit().await.map_err(storage)?;
         Ok(assignment)
     }
@@ -410,10 +411,12 @@ impl Store {
             .await
             .map_err(storage)?;
         let run = start_run_tx(
+            self,
             &mut tx,
             assignment_id,
             actor_agent_id,
             external_session_ref,
+            true,
         )
         .await?;
         tx.commit().await.map_err(storage)?;
@@ -446,7 +449,9 @@ impl Store {
         let mode: String = row.try_get("assignment_mode").map_err(storage)?;
         if mode != "open" {
             return Err(DomainError::Conflict(match mode.as_str() {
-                "approval" => "task requires assignment approval; use task_request_assignment".into(),
+                "approval" => {
+                    "task requires assignment approval; use task_request_assignment".into()
+                }
                 "dispatch" => "task is dispatcher-managed and cannot be self-claimed".into(),
                 _ => format!("task assignment mode is {mode}"),
             }));
@@ -457,8 +462,9 @@ impl Store {
             )));
         }
 
-        let assignment = claim_task_tx(&mut tx, task_id, agent_id, role, lease_seconds).await?;
-        let run = start_run_tx(&mut tx, assignment.id, agent_id, None).await?;
+        let assignment =
+            claim_task_tx(&mut tx, task_id, agent_id, role, lease_seconds, true).await?;
+        let run = start_run_tx(self, &mut tx, assignment.id, agent_id, None, false).await?;
 
         let now = Utc::now();
         let pending_request_id: Option<String> = sqlx::query_scalar(
@@ -905,6 +911,7 @@ fn row_to_assignment(row: sqlx::sqlite::SqliteRow) -> Result<Assignment, DomainE
         role: row.try_get("role").map_err(storage)?,
         agent_instance_id: parse_id(row.try_get("agent_instance_id").map_err(storage)?)?,
         status: row.try_get("status").map_err(storage)?,
+        phase: row.try_get("phase").map_err(storage)?,
         acquired_at: parse_dt(row.try_get("acquired_at").map_err(storage)?)?,
         expires_at: parse_dt(row.try_get("expires_at").map_err(storage)?)?,
         renewed_at: parse_dt(row.try_get("renewed_at").map_err(storage)?)?,
@@ -1013,10 +1020,12 @@ mod completion;
 mod memory;
 
 async fn start_run_tx(
+    store: &Store,
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     assignment_id: Id,
     actor_agent_id: Id,
     external_session_ref: Option<String>,
+    enforce_intake: bool,
 ) -> Result<Run, DomainError> {
     let row = sqlx::query(
         "SELECT task_id,agent_instance_id,status,expires_at FROM assignments WHERE id=?",
@@ -1050,6 +1059,16 @@ async fn start_run_tx(
         return Err(DomainError::Conflict(
             "assignment already has an active run".into(),
         ));
+    }
+    if enforce_intake {
+        let assignment = row_to_assignment(
+            sqlx::query("SELECT * FROM assignments WHERE id=?")
+                .bind(assignment_id.to_string())
+                .fetch_one(&mut **tx)
+                .await
+                .map_err(storage)?,
+        )?;
+        intake::enforce_execution_phase_tx(store, tx, &assignment).await?;
     }
 
     let id = Uuid::new_v4();
@@ -1099,7 +1118,7 @@ async fn start_run_tx(
         "run",
         id,
         "run.started",
-        json!({"task_id":task_id,"assignment_id":assignment_id}),
+        json!({"task_id":task_id,"assignment_id":assignment_id,"intake_only":!enforce_intake}),
         None,
     )
     .await?;
@@ -1128,6 +1147,7 @@ async fn claim_task_tx(
     agent_id: Id,
     role: &str,
     lease_seconds: i64,
+    intake_required: bool,
 ) -> Result<Assignment, DomainError> {
     let now = Utc::now();
     if continuation::predecessor_runtime_active(&mut *tx, task_id).await? {
@@ -1158,16 +1178,24 @@ async fn claim_task_tx(
         ));
     }
 
+    let intake_required = intake_required && role == "executor";
+    let initial_phase = if intake_required {
+        morrows_core::INTAKE_PHASE_CONTEXT_REVIEW
+    } else {
+        morrows_core::INTAKE_PHASE_IMPLEMENTING
+    };
+
     // BEGIN IMMEDIATE keeps prerequisite checks and the role claim atomic.
     // The unique active-role index remains the final ownership constraint.
     let result = sqlx::query(
-            "INSERT INTO assignments(id,task_id,role,agent_instance_id,status,acquired_at,expires_at,renewed_at)
-             SELECT ?, id, ?, ?, 'active', ?, ?, ? FROM tasks
+            "INSERT INTO assignments(id,task_id,role,agent_instance_id,status,phase,acquired_at,expires_at,renewed_at)
+             SELECT ?, id, ?, ?, 'active', ?, ?, ?, ? FROM tasks
              WHERE id=? AND state NOT IN ('done','cancelled')"
         )
             .bind(id.to_string())
             .bind(role)
             .bind(agent_id.to_string())
+            .bind(initial_phase)
             .bind(now.to_rfc3339())
             .bind(expires.to_rfc3339())
             .bind(now.to_rfc3339())
@@ -1197,6 +1225,10 @@ async fn claim_task_tx(
         }
     }
 
+    if intake_required {
+        intake::create_assignment_intake_tx(tx, id, task_id, agent_id).await?;
+    }
+
     sqlx::query("UPDATE tasks SET state=CASE WHEN state='ready' THEN 'in_progress' ELSE state END, updated_at=? WHERE id=?")
             .bind(now.to_rfc3339()).bind(task_id.to_string()).execute(&mut **tx).await.map_err(storage)?;
     append_event_tx(
@@ -1217,6 +1249,7 @@ async fn claim_task_tx(
         role: role.to_owned(),
         agent_instance_id: agent_id,
         status: "active".into(),
+        phase: initial_phase.into(),
         acquired_at: now,
         expires_at: expires,
         renewed_at: now,
@@ -1224,3 +1257,4 @@ async fn claim_task_tx(
 }
 
 mod assignment_request;
+mod intake;
