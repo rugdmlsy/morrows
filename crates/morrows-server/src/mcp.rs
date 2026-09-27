@@ -330,6 +330,8 @@ pub struct WorkRequestSubmitRequest {
     pub title: String,
     #[serde(default)]
     pub description: String,
+    /// Optional existing Project UUID. Omit to create an explicitly unbound work request.
+    pub project_id: Option<String>,
 }
 
 fn default_lease() -> i64 {
@@ -1114,7 +1116,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Submit a work request to Morrows for company scheduling. The caller becomes the request owner; employees cannot set dispatch priority or claim the work themselves."
+        description = "Submit a work request to Morrows for company scheduling. Optionally bind it atomically to an existing visible Project with project_id; omit project_id to create an explicitly unbound task. Invalid or unavailable Project IDs are rejected and never fall back to unbound. The caller becomes the request owner; employees cannot set dispatch priority or choose an assignee/launcher."
     )]
     async fn work_request_submit(
         &self,
@@ -1126,10 +1128,20 @@ impl MorrowsMcp {
             .get_agent(agent_id)
             .await
             .map_err(|e| e.to_string())?;
+        let project_id = req.project_id.as_deref().map(parse_id).transpose()?;
+        // Projects are readable by every authenticated Agent today. Keep the explicit
+        // read check here so a future ACL cannot silently turn an inaccessible ID
+        // into an unbound task; create_task revalidates inside the write transaction.
+        if let Some(project_id) = project_id {
+            self.store
+                .get_project(project_id)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
         let task = self
             .store
             .create_task(CreateTask {
-                project_id: None,
+                project_id,
                 title: req.title,
                 description: req.description,
                 owner_actor_id: format!("agent:{agent_id}"),
@@ -2652,6 +2664,7 @@ mod tests {
                 Parameters(WorkRequestSubmitRequest {
                     title: "Need review".into(),
                     description: "Please review this change".into(),
+                    project_id: None,
                 }),
                 Extension(parts(None)),
             )
@@ -2663,6 +2676,7 @@ mod tests {
                 Parameters(WorkRequestSubmitRequest {
                     title: "Need review".into(),
                     description: "Please review this change".into(),
+                    project_id: None,
                 }),
                 Extension(parts(Some(employee.id))),
             )
@@ -2678,6 +2692,198 @@ mod tests {
             .unwrap();
         assert_eq!(events[0].actor_type, "agent_instance");
         assert_eq!(events[0].actor_id, employee.id.to_string());
+    }
+
+    #[tokio::test]
+    async fn work_request_submit_supports_project_binding_and_rejects_bad_projects_atomically() {
+        let store = Store::connect("sqlite::memory:").await.unwrap();
+        let employee = store.register_agent("project-worker", &[]).await.unwrap();
+        let project = store
+            .create_project(serde_json::from_value(json!({"name":"Bound Project"})).unwrap())
+            .await
+            .unwrap();
+        let mcp = MorrowsMcp::new(store.clone());
+
+        let schema = rmcp::schemars::schema_for!(WorkRequestSubmitRequest);
+        let schema = serde_json::to_value(schema).unwrap();
+        assert!(
+            schema["properties"].get("project_id").is_some(),
+            "work_request_submit schema must advertise project_id"
+        );
+
+        let bound: Value = serde_json::from_str(
+            &mcp.work_request_submit(
+                Parameters(WorkRequestSubmitRequest {
+                    title: "Bound request".into(),
+                    description: "project-aware".into(),
+                    project_id: Some(project.id.to_string()),
+                }),
+                Extension(parts(Some(employee.id))),
+            )
+            .await
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(bound["project_id"], json!(project.id));
+        let task_id = parse_id(bound["id"].as_str().unwrap()).unwrap();
+        let context: Value =
+            serde_json::from_str(&mcp.load_task_context(task_id, employee.id).await.unwrap())
+                .unwrap();
+        assert_eq!(context["project"]["id"], json!(project.id));
+
+        let count_before_invalid = store.list_tasks().await.unwrap().len();
+        let missing = Uuid::new_v4();
+        let error = mcp
+            .work_request_submit(
+                Parameters(WorkRequestSubmitRequest {
+                    title: "Must not leak".into(),
+                    description: String::new(),
+                    project_id: Some(missing.to_string()),
+                }),
+                Extension(parts(Some(employee.id))),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.contains("project"));
+        assert_eq!(
+            store.list_tasks().await.unwrap().len(),
+            count_before_invalid,
+            "invalid project must not leave an unbound/orphan task"
+        );
+
+        let unbound: Value = serde_json::from_str(
+            &mcp.work_request_submit(
+                Parameters(WorkRequestSubmitRequest {
+                    title: "Legacy unbound".into(),
+                    description: String::new(),
+                    project_id: None,
+                }),
+                Extension(parts(Some(employee.id))),
+            )
+            .await
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(unbound["project_id"].is_null());
+    }
+
+    #[tokio::test]
+    async fn project_bound_work_request_e2e_publishes_memory_before_completion() {
+        let store = Store::connect("sqlite::memory:").await.unwrap();
+        let employee = store
+            .register_agent("e2e-project-worker", &[])
+            .await
+            .unwrap();
+        let project = store
+            .create_project(serde_json::from_value(json!({"name":"E2E Project"})).unwrap())
+            .await
+            .unwrap();
+        let mcp = MorrowsMcp::new(store.clone());
+
+        let created: Value = serde_json::from_str(
+            &mcp.work_request_submit(
+                Parameters(WorkRequestSubmitRequest {
+                    title: "Project lifecycle".into(),
+                    description: "exercise project memory completion".into(),
+                    project_id: Some(project.id.to_string()),
+                }),
+                Extension(parts(Some(employee.id))),
+            )
+            .await
+            .unwrap(),
+        )
+        .unwrap();
+        let task_id = parse_id(created["id"].as_str().unwrap()).unwrap();
+        let context = store
+            .create_context_revision(
+                task_id,
+                serde_json::from_value(json!({
+                    "goal":"Exercise a project-bound lifecycle",
+                    "background":"E2E regression",
+                    "current_summary":"Work started",
+                    "constraints":{}
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let claim = store
+            .claim_task_for_execution(task_id, employee.id, "executor", 300)
+            .await
+            .unwrap();
+        store
+            .create_run_milestone(
+                claim.run.id,
+                employee.id,
+                morrows_core::CreateRunMilestone {
+                    kind: "milestone".into(),
+                    summary: "Project-bound work is ready to publish".into(),
+                    completed: vec!["Created bound task and context".into()],
+                    verified: vec!["Task retains expected project_id".into()],
+                    remaining: vec!["Publish reusable memory and complete".into()],
+                    blockers: vec![],
+                    next_step: "Publish Project Memory".into(),
+                    next_plan: vec![
+                        "Publish memory from the current task context".into(),
+                        "Complete with a published memory disposition".into(),
+                    ],
+                    execution_locations: vec!["test://project-bound-e2e".into()],
+                    artifact_ids: vec![],
+                    decision_ids: vec![],
+                },
+            )
+            .await
+            .unwrap();
+
+        let missing = store
+            .run_completion_check(claim.run.id, employee.id, &json!({}))
+            .await
+            .unwrap();
+        assert!(missing.memory_disposition_required);
+        assert!(!missing.ready);
+
+        let publication: morrows_core::PublishProjectMemory = serde_json::from_value(json!({
+            "task_id": task_id,
+            "context_revision_id": context.id,
+            "expected_project_id": project.id,
+            "idempotency_key": "project-bound-e2e-v1",
+            "title": "Project-bound work request lifecycle",
+            "content": {"verified": true, "source_task": task_id},
+            "verification_status": "unverified",
+            "basis": "E2E lifecycle regression"
+        }))
+        .unwrap();
+        let memory = store
+            .publish_project_memory(employee.id, publication)
+            .await
+            .unwrap();
+
+        let result = json!({
+            "memory_disposition": {
+                "status": "published",
+                "rationale": "The lifecycle behavior is reusable project knowledge.",
+                "memory_entry_ids": [memory.id]
+            }
+        });
+        assert!(
+            store
+                .run_completion_check(claim.run.id, employee.id, &result)
+                .await
+                .unwrap()
+                .ready
+        );
+        store
+            .complete_run(claim.run.id, employee.id, result)
+            .await
+            .unwrap();
+        assert_eq!(
+            store.get_task(task_id).await.unwrap().state,
+            TaskState::Done
+        );
+        assert_eq!(memory.project_id, Some(project.id));
+        let expected_source = format!("morrows:task:{task_id}");
+        assert_eq!(memory.source_ref.as_deref(), Some(expected_source.as_str()));
     }
 
     #[tokio::test]

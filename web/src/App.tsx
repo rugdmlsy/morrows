@@ -1751,7 +1751,7 @@ export default function App() {
                   onChange={(event) => setNewTaskProjectId(event.target.value)}
                   title={t("project")}
                 >
-                  <option value="">{t("unclassified")}</option>
+                  <option value="">{t("unboundProject")}</option>
                   {projects.map((project) => (
                     <option key={project.id} value={project.id}>{project.name}</option>
                   ))}
@@ -2019,7 +2019,7 @@ export default function App() {
                           onChange={(event) => void moveTaskToProject(event.target.value)}
                           disabled={projectBusy}
                         >
-                          <option value="">{t("unclassified")}</option>
+                          <option value="">{t("unboundProject")}</option>
                           {projects.map((project) => (
                             <option key={project.id} value={project.id}>{project.name}</option>
                           ))}

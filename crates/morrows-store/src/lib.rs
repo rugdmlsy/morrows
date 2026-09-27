@@ -121,12 +121,31 @@ impl Store {
         task_id: Id,
         project_id: Option<Id>,
     ) -> Result<Task, DomainError> {
-        self.get_task(task_id).await?;
-        if let Some(project_id) = project_id {
-            self.get_project(project_id).await?;
-        }
         let now = Utc::now();
-        let mut tx = self.pool.begin().await.map_err(storage)?;
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(storage)?;
+        let task_row = sqlx::query("SELECT project_id FROM tasks WHERE id=?")
+            .bind(task_id.to_string())
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(storage)?
+            .ok_or_else(|| DomainError::NotFound(format!("task {task_id}")))?;
+        let previous_project_id: Option<String> =
+            task_row.try_get("project_id").map_err(storage)?;
+        if let Some(project_id) = project_id {
+            let exists: bool =
+                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM projects WHERE id=?)")
+                    .bind(project_id.to_string())
+                    .fetch_one(&mut *tx)
+                    .await
+                    .map_err(storage)?;
+            if !exists {
+                return Err(DomainError::NotFound(format!("project {project_id}")));
+            }
+        }
         sqlx::query("UPDATE tasks SET project_id=?, updated_at=? WHERE id=?")
             .bind(project_id.map(|value| value.to_string()))
             .bind(now.to_rfc3339())
@@ -141,7 +160,10 @@ impl Store {
             "task",
             task_id,
             "task.project_changed",
-            json!({"project_id": project_id}),
+            json!({
+                "previous_project_id": previous_project_id,
+                "project_id": project_id,
+            }),
             None,
         )
         .await?;
@@ -183,18 +205,97 @@ impl Store {
         self.get_task(task_id).await
     }
 
+    /// Operator repair path for legacy work requests that were created without
+    /// a Project. The first successful bind wins; retrying the same target is
+    /// idempotent, while rebinding an already-bound task is rejected.
+    pub async fn bind_unbound_task_project(
+        &self,
+        task_id: Id,
+        project_id: Id,
+    ) -> Result<Task, DomainError> {
+        let now = Utc::now();
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(storage)?;
+        let task_row = sqlx::query("SELECT project_id FROM tasks WHERE id=?")
+            .bind(task_id.to_string())
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(storage)?
+            .ok_or_else(|| DomainError::NotFound(format!("task {task_id}")))?;
+        let previous_project_id: Option<String> =
+            task_row.try_get("project_id").map_err(storage)?;
+        let target = project_id.to_string();
+        if previous_project_id.as_deref() == Some(target.as_str()) {
+            tx.commit().await.map_err(storage)?;
+            return self.get_task(task_id).await;
+        }
+        if let Some(current) = previous_project_id {
+            return Err(DomainError::Conflict(format!(
+                "task {task_id} is already bound to project {current}; repair binding refuses reassignment"
+            )));
+        }
+        let exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM projects WHERE id=?)")
+                .bind(&target)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(storage)?;
+        if !exists {
+            return Err(DomainError::NotFound(format!("project {project_id}")));
+        }
+        sqlx::query("UPDATE tasks SET project_id=?, updated_at=? WHERE id=? AND project_id IS NULL")
+            .bind(&target)
+            .bind(now.to_rfc3339())
+            .bind(task_id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?;
+        append_event_tx(
+            &mut tx,
+            "operator",
+            "repair-cli",
+            "task",
+            task_id,
+            "task.project_changed",
+            json!({
+                "previous_project_id": null,
+                "project_id": project_id,
+                "reason": "legacy_unbound_repair",
+            }),
+            None,
+        )
+        .await?;
+        tx.commit().await.map_err(storage)?;
+        self.get_task(task_id).await
+    }
+
     pub async fn create_task(&self, input: CreateTask) -> Result<Task, DomainError> {
         if input.title.trim().is_empty() {
             return Err(DomainError::InvalidInput(
                 "task title cannot be empty".into(),
             ));
         }
-        if let Some(project_id) = input.project_id {
-            self.get_project(project_id).await?;
-        }
         let id = Uuid::new_v4();
         let now = Utc::now();
-        let mut tx = self.pool.begin().await.map_err(storage)?;
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(storage)?;
+        if let Some(project_id) = input.project_id {
+            let exists: bool =
+                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM projects WHERE id=?)")
+                    .bind(project_id.to_string())
+                    .fetch_one(&mut *tx)
+                    .await
+                    .map_err(storage)?;
+            if !exists {
+                return Err(DomainError::NotFound(format!("project {project_id}")));
+            }
+        }
         sqlx::query(
             "INSERT INTO tasks(id,project_id,title,description,owner_actor_id,state,priority,created_at,updated_at)
              VALUES(?,?,?,?,?,?,?,?,?)",
@@ -221,7 +322,12 @@ impl Store {
             "task",
             id,
             "task.created",
-            json!({"state": input.state, "assignment_mode": "open", "title": input.title}),
+            json!({
+                "state": input.state,
+                "assignment_mode": "open",
+                "title": input.title,
+                "project_id": input.project_id,
+            }),
             None,
         )
         .await?;
