@@ -1608,7 +1608,7 @@ export default function App() {
                     </div>
                   </section>
 
-                  <h3>{t("tasks")}</h3>
+                  <h3 className="detail-section-title tone-blue">{t("tasks")}</h3>
                   <div className="unclassified-task-grid">
                     {unclassifiedTasks.map((task) => (
                       <button
@@ -1628,7 +1628,7 @@ export default function App() {
                     {!unclassifiedTasks.length && <div className="empty compact">{t("noUnclassifiedTasks")}</div>}
                   </div>
 
-                  <h3>{t("projectMemories")}</h3>
+                  <h3 className="detail-section-title tone-violet">{t("projectMemories")}</h3>
                   <div className="empty compact">{t("unclassifiedNoMemory")}</div>
                 </>
               ) : openedProject ? (
@@ -1679,7 +1679,7 @@ export default function App() {
                     </div>
                   </section>
 
-                  <h3>{t("projectMemories")}</h3>
+                  <h3 className="detail-section-title tone-violet">{t("projectMemories")}</h3>
                   {projectMemoryLoading ? (
                     <div className="empty compact">{t("loadingMemories")}</div>
                   ) : projectMemories.length ? (
@@ -1810,7 +1810,7 @@ export default function App() {
 
                   <div className="detail-columns">
                     <div>
-                      <h3>{t("context")}</h3>
+                      <h3 className="detail-section-title tone-blue">{t("context")}</h3>
                       {context ? (
                         <div className="context-card">
                           <div className="section-caption">{t("revision")} v{context.version}</div>
@@ -1854,7 +1854,7 @@ export default function App() {
                         </form>
                       </details>
 
-                      <h3>{t("contextPackage")}</h3>
+                      <h3 className="detail-section-title tone-violet">{t("contextPackage")}</h3>
                       <div className="context-package-card">
                         <div className="mini-card-row">
                           <strong>{contextPackage?.objective || t("noContextPackage")}</strong>
@@ -1881,7 +1881,7 @@ export default function App() {
                         </> : <p>{t("contextPackageHint")}</p>}
                       </div>
 
-                      <h3>{t("dispatcher")}</h3>
+                      <h3 className="detail-section-title tone-accent">{t("dispatcher")}</h3>
                       <div className="dispatch-card">
                         <div className="dispatch-form">
                           <label>
@@ -1931,7 +1931,7 @@ export default function App() {
 
                       <div className="task-session-section">
                         <div className="mini-card-row">
-                          <h3>{locale === "zh-CN" ? "相关会话" : "Related sessions"}</h3>
+                          <h3 className="detail-section-title tone-violet">{locale === "zh-CN" ? "相关会话" : "Related sessions"}</h3>
                           <button
                             type="button"
                             className="secondary"
@@ -1975,7 +1975,7 @@ export default function App() {
                         </div>
                       </div>
 
-                      <h3>{t("assignments")}</h3>
+                      <h3 className="detail-section-title tone-green">{t("assignments")}</h3>
                       <div className="stack">
                         {assignments.map((item) => (
                           <div className="mini-card" key={item.id}>
@@ -1987,7 +1987,7 @@ export default function App() {
                         {!assignments.length && <div className="empty compact">{t("unassigned")}</div>}
                       </div>
 
-                      <h3>{t("launcher")}</h3>
+                      <h3 className="detail-section-title tone-accent">{t("launcher")}</h3>
                       <div className="stack">
                         {assignments
                           .filter((item) => item.role === "executor" && item.status === "active")
@@ -2032,7 +2032,7 @@ export default function App() {
                         )}
                       </div>
 
-                      <h3>{t("launchAttempts")}</h3>
+                      <h3 className="detail-section-title tone-violet">{t("launchAttempts")}</h3>
                       <div className="stack">
                         {launchAttempts.map((attempt) => (
                           <div className="mini-card launch-attempt" key={attempt.id}>
@@ -2069,7 +2069,7 @@ export default function App() {
                         {!launchAttempts.length && <div className="empty compact">{t("noLaunchAttempts")}</div>}
                       </div>
 
-                      <h3>{t("runs")}</h3>
+                      <h3 className="detail-section-title tone-blue">{t("runs")}</h3>
                       <div className="stack">
                         {runs.map((run) => {
                           const execution = runExecutions[run.id];
@@ -2135,7 +2135,7 @@ export default function App() {
 
                     <div>
                       {collaboration && <>
-                        <h3>{t("handoffs")}</h3>
+                        <h3 className="detail-section-title tone-violet">{t("handoffs")}</h3>
                         {collaboration.handoffs.map((handoff) => <div className="context-card" key={handoff.id}>
                           <div className="mini-card-row">
                             <strong>{handoff.summary}</strong>
@@ -2150,18 +2150,18 @@ export default function App() {
                           </small>
                         </div>)}
                         {!collaboration.handoffs.length && <div className="empty compact">{t("noHandoffs")}</div>}
-                        <h3>{t("artifacts")}</h3>
+                        <h3 className="detail-section-title tone-green">{t("artifacts")}</h3>
                         {collaboration.artifacts.map((artifact) => <div className="mini-card" key={artifact.id}>
                           <div className="mini-card-row"><strong>{artifact.title}</strong><span className="badge">{artifact.kind}</span></div>
                           <p>{artifact.description}</p><code>{artifact.uri}</code>
                         </div>)}
                         {!collaboration.artifacts.length && <div className="empty compact">{t("noArtifacts")}</div>}
-                        <h3>{t("decisions")}</h3>
+                        <h3 className="detail-section-title tone-accent">{t("decisions")}</h3>
                         {collaboration.decisions.map((decision) => <div className="mini-card" key={decision.id}>
                           <strong>{decision.title}</strong><p>{decision.rationale}</p>
                         </div>)}
                         {!collaboration.decisions.length && <div className="empty compact">{t("noDecisions")}</div>}
-                        <h3>{t("discussion")}</h3>
+                        <h3 className="detail-section-title tone-blue">{t("discussion")}</h3>
                         {collaboration.threads.map((thread) => <div className="context-card" key={thread.id}>
                           <strong>{thread.title}</strong>
                           {collaboration.messages.filter((message) => message.thread_id === thread.id).map((message) =>
@@ -2177,7 +2177,7 @@ export default function App() {
                             </div>)}
                         </div>)}
                         {!collaboration.threads.length && <div className="empty compact">{t("noDiscussions")}</div>}
-                        <h3>{t("prerequisites")}</h3>
+                        <h3 className="detail-section-title tone-red">{t("prerequisites")}</h3>
                         {collaboration.dependencies.map((dependency) => <div key={dependency.depends_on_task_id}>
                           <button onClick={() => selectTask(dependency.depends_on_task_id)}>
                             {tasks.find((task) => task.id === dependency.depends_on_task_id)?.title || shortId(dependency.depends_on_task_id)}
@@ -2185,7 +2185,7 @@ export default function App() {
                         </div>)}
                         {!collaboration.dependencies.length && <div className="empty compact">{t("noPrerequisites")}</div>}
                       </>}
-                      <h3>{t("eventTimeline")}</h3>
+                      <h3 className="detail-section-title tone-blue">{t("eventTimeline")}</h3>
                       <div className="timeline">
                         {events.map((event) => (
                           <div className="timeline-item" key={event.id}>
