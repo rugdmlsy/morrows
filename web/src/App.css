@@ -673,10 +673,12 @@ button.project-group-head:disabled { cursor: default; opacity: 1; }
 }
 .eyebrow { margin: 0 0 6px; color: var(--accent); font: 700 calc(8px * var(--font-scale)) "SFMono-Regular", Consolas, monospace; letter-spacing: .1em; text-transform: uppercase; }
 .detail-heading h2 {
+  min-width: 0;
   margin: 5px 0 0;
   font-size: calc(22px * var(--font-scale));
   line-height: 1.2;
   letter-spacing: -.03em;
+  overflow-wrap: anywhere;
 }
 .description {
   max-width: 920px;
@@ -684,6 +686,9 @@ button.project-group-head:disabled { cursor: default; opacity: 1; }
   color: var(--ink-3);
   font-size: calc(11px * var(--font-scale));
   line-height: 1.75;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .task-metadata-card {
@@ -886,10 +891,30 @@ h3 { margin: 20px 0 8px; color: var(--ink-3); font: 700 calc(8px * var(--font-sc
   background: var(--inset);
   padding: 13px 14px;
 }
-.context-card strong, .mini-card strong { font-size: calc(10px * var(--font-scale)); line-height: 1.45; }
-.context-card p, .mini-card p { margin: 8px 0; color: var(--ink-3); font-size: calc(10px * var(--font-scale)); line-height: 1.7; }
-.context-card small, .mini-card small { color: var(--muted); font-size: calc(8px * var(--font-scale)); line-height: 1.55; }
+.context-card strong, .mini-card strong {
+  min-width: 0;
+  font-size: calc(10px * var(--font-scale));
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.context-card p, .mini-card p {
+  margin: 8px 0;
+  color: var(--ink-3);
+  font-size: calc(10px * var(--font-scale));
+  line-height: 1.7;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.context-card small, .mini-card small {
+  min-width: 0;
+  color: var(--muted);
+  font-size: calc(8px * var(--font-scale));
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
 .mini-card-row { display: flex !important; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 7px !important; }
+.mini-card-row > * { min-width: 0; }
 .stack { display: grid; gap: 9px; }
 .mini-card code { color: var(--ink-3); font-size: calc(9px * var(--font-scale)); overflow-wrap: anywhere; }
 
@@ -915,8 +940,16 @@ h3 { margin: 20px 0 8px; color: var(--ink-3); font: 700 calc(8px * var(--font-sc
   background: var(--inset);
   padding: 10px;
 }
-.context-package-card > p, .context-package-card pre { margin: 0; color: var(--ink-3); font-size: calc(9px * var(--font-scale)); line-height: 1.5; }
-.context-package-card pre { max-height: 180px; overflow: auto; white-space: pre-wrap; padding: 7px; border: 1px solid var(--line-soft); border-radius: 6px; background: var(--bg-soft); }
+.context-package-card > p, .context-package-card pre {
+  margin: 0;
+  color: var(--ink-3);
+  font-size: calc(9px * var(--font-scale));
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.context-package-card pre { max-height: 180px; overflow: auto; padding: 7px; border: 1px solid var(--line-soft); border-radius: 6px; background: var(--bg-soft); }
 .context-package-card small { color: var(--muted); font-size: calc(8px * var(--font-scale)); }
 .context-package-refs { display: flex; flex-wrap: wrap; gap: 5px; }
 .context-package-refs span {
@@ -1593,7 +1626,13 @@ h3 { margin: 20px 0 8px; color: var(--ink-3); font: 700 calc(8px * var(--font-sc
 .task-session-section { display: grid; gap: 8px; }
 .task-session-section > .mini-card-row h3 { margin: 0; }
 .task-session-link { width: 100%; text-align: left; cursor: pointer; color: inherit; }
-.task-session-link p { margin: 5px 0 0; color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.task-session-link p {
+  margin: 5px 0 0;
+  color: var(--ink-3);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
 .session-list { min-height: 0; overflow-y: auto; padding: 6px; }
 .session-row {
   position: relative;
