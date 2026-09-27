@@ -1,8 +1,8 @@
 use chrono::{DateTime, Duration, Utc};
 use morrows_core::{
-    AgentInstance, Assignment, AssignmentMode, ContextRevision, CreateContextRevision, CreateProject,
-    CreateTask, DomainError, Event, Id, Project, Run, Task, TaskClaim, TaskState,
-    UpdateContextRevision,
+    AgentInstance, Assignment, AssignmentMode, ContextRevision, CreateContextRevision,
+    CreateProject, CreateTask, DomainError, Event, Id, Project, Run, Task, TaskClaim,
+    TaskManagementSummary, TaskState, UpdateContextRevision,
 };
 use serde_json::{Value, json};
 use sqlx::{
@@ -237,6 +237,74 @@ impl Store {
         rows.into_iter().map(row_to_task).collect()
     }
 
+    pub async fn list_task_management(&self) -> Result<Vec<TaskManagementSummary>, DomainError> {
+        let rows = sqlx::query(
+            "SELECT t.*, p.name AS project_name,
+                    a.id AS executor_assignment_id,
+                    a.status AS executor_assignment_status,
+                    a.agent_instance_id AS executor_agent_instance_id,
+                    COALESCE(ai.display_name, ai.name) AS executor_agent_display_name,
+                    a.acquired_at AS executor_acquired_at,
+                    r.id AS latest_run_id,
+                    r.status AS latest_run_status,
+                    r.started_at AS latest_run_started_at
+             FROM tasks t
+             LEFT JOIN projects p ON p.id=t.project_id
+             LEFT JOIN assignments a ON a.id=(
+                 SELECT aa.id FROM assignments aa
+                 WHERE aa.task_id=t.id AND aa.role='executor'
+                 ORDER BY CASE WHEN aa.status='active' THEN 0 ELSE 1 END, aa.acquired_at DESC
+                 LIMIT 1
+             )
+             LEFT JOIN agent_instances ai ON ai.id=a.agent_instance_id
+             LEFT JOIN runs r ON r.id=(
+                 SELECT rr.id FROM runs rr
+                 WHERE rr.task_id=t.id
+                 ORDER BY rr.started_at DESC
+                 LIMIT 1
+             )
+             ORDER BY t.created_at DESC",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage)?;
+
+        rows.into_iter()
+            .map(|row| {
+                let project_name = row.try_get("project_name").map_err(storage)?;
+                let executor_assignment_id =
+                    parse_opt_id(row.try_get("executor_assignment_id").map_err(storage)?)?;
+                let executor_assignment_status =
+                    row.try_get("executor_assignment_status").map_err(storage)?;
+                let executor_agent_instance_id =
+                    parse_opt_id(row.try_get("executor_agent_instance_id").map_err(storage)?)?;
+                let executor_agent_display_name = row
+                    .try_get("executor_agent_display_name")
+                    .map_err(storage)?;
+                let executor_acquired_at =
+                    parse_opt_dt(row.try_get("executor_acquired_at").map_err(storage)?)?;
+                let latest_run_id = parse_opt_id(row.try_get("latest_run_id").map_err(storage)?)?;
+                let latest_run_status = row.try_get("latest_run_status").map_err(storage)?;
+                let latest_run_started_at =
+                    parse_opt_dt(row.try_get("latest_run_started_at").map_err(storage)?)?;
+                let task = row_to_task(row)?;
+
+                Ok(TaskManagementSummary {
+                    task,
+                    project_name,
+                    executor_assignment_id,
+                    executor_assignment_status,
+                    executor_agent_instance_id,
+                    executor_agent_display_name,
+                    executor_acquired_at,
+                    latest_run_id,
+                    latest_run_status,
+                    latest_run_started_at,
+                })
+            })
+            .collect()
+    }
+
     pub async fn get_task(&self, id: Id) -> Result<Task, DomainError> {
         let row = sqlx::query("SELECT * FROM tasks WHERE id=?")
             .bind(id.to_string())
@@ -409,13 +477,8 @@ impl Store {
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(storage)?;
-        let run = start_run_tx(
-            &mut tx,
-            assignment_id,
-            actor_agent_id,
-            external_session_ref,
-        )
-        .await?;
+        let run =
+            start_run_tx(&mut tx, assignment_id, actor_agent_id, external_session_ref).await?;
         tx.commit().await.map_err(storage)?;
         Ok(run)
     }
@@ -446,7 +509,9 @@ impl Store {
         let mode: String = row.try_get("assignment_mode").map_err(storage)?;
         if mode != "open" {
             return Err(DomainError::Conflict(match mode.as_str() {
-                "approval" => "task requires assignment approval; use task_request_assignment".into(),
+                "approval" => {
+                    "task requires assignment approval; use task_request_assignment".into()
+                }
                 "dispatch" => "task is dispatcher-managed and cannot be self-claimed".into(),
                 _ => format!("task assignment mode is {mode}"),
             }));

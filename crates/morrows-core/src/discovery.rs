@@ -1,4 +1,4 @@
-use crate::{AssignmentMode, Id, TaskState};
+use crate::{AssignmentMode, Id, Task, TaskState};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
@@ -34,6 +34,20 @@ pub struct TaskSummary {
     pub assignment_mode: AssignmentMode,
     pub priority: i32,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TaskManagementSummary {
+    pub task: Task,
+    pub project_name: Option<String>,
+    pub executor_assignment_id: Option<Id>,
+    pub executor_assignment_status: Option<String>,
+    pub executor_agent_instance_id: Option<Id>,
+    pub executor_agent_display_name: Option<String>,
+    pub executor_acquired_at: Option<DateTime<Utc>>,
+    pub latest_run_id: Option<Id>,
+    pub latest_run_status: Option<String>,
+    pub latest_run_started_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Default)]

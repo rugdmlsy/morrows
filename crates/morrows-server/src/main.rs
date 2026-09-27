@@ -23,7 +23,9 @@ use axum::{
 };
 use mcp::MorrowsMcp;
 use memory_search::MemorySearch;
-use morrows_core::{AssignmentMode, CreateContextRevision, CreateProject, CreateTask, DomainError, Id};
+use morrows_core::{
+    AssignmentMode, CreateContextRevision, CreateProject, CreateTask, DomainError, Id,
+};
 use morrows_store::Store;
 use rmcp::transport::{
     StreamableHttpServerConfig,
@@ -216,9 +218,13 @@ async fn main() -> anyhow::Result<()> {
         .route("/projects", get(list_projects).post(create_project))
         .route("/projects/{id}", get(get_project))
         .route("/tasks", get(list_tasks).post(create_task))
+        .route("/tasks/management", get(list_task_management))
         .route("/tasks/{id}", get(get_task))
         .route("/tasks/{id}/project", post(set_task_project))
-        .route("/tasks/{id}/assignment-mode", post(set_task_assignment_mode))
+        .route(
+            "/tasks/{id}/assignment-mode",
+            post(set_task_assignment_mode),
+        )
         .route("/tasks/{id}/claim", post(claim_task))
         .route("/assignments/{id}/renew", post(renew_assignment))
         .route("/tasks/{id}/context", get(get_context).post(create_context))
@@ -435,6 +441,12 @@ async fn get_project(
 async fn list_tasks(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     Ok(Json(
         serde_json::to_value(state.store.list_tasks().await?).unwrap(),
+    ))
+}
+
+async fn list_task_management(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        serde_json::to_value(state.store.list_task_management().await?).unwrap(),
     ))
 }
 

@@ -57,6 +57,21 @@ type Task = {
   updated_at: string;
 };
 
+type TaskManagementSummary = {
+  task: Task;
+  project_name?: string | null;
+  executor_assignment_id?: string | null;
+  executor_assignment_status?: string | null;
+  executor_agent_instance_id?: string | null;
+  executor_agent_display_name?: string | null;
+  executor_acquired_at?: string | null;
+  latest_run_id?: string | null;
+  latest_run_status?: string | null;
+  latest_run_started_at?: string | null;
+};
+
+type TaskManagementFilter = "all" | "unclaimed" | "assigned" | "running" | "review" | "blocked" | "done" | "cancelled";
+
 type Collaboration = {
   handoffs: {
     id: string;
@@ -350,7 +365,7 @@ function shortId(id: string) {
   return id.slice(0, 8);
 }
 
-type SidebarIconName = "project" | "session" | "agent" | "collapse" | "expand";
+type SidebarIconName = "project" | "task" | "session" | "agent" | "collapse" | "expand";
 
 function SidebarIcon({ name }: { name: SidebarIconName }) {
   const common = {
@@ -366,6 +381,16 @@ function SidebarIcon({ name }: { name: SidebarIconName }) {
       <svg viewBox="0 0 24 24" aria-hidden="true" {...common}>
         <path d="M3.5 7.25h6l1.7 2h9.3v8.25a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2V7.25Z" />
         <path d="M3.5 7.25V5.8a1.8 1.8 0 0 1 1.8-1.8h4.05l1.7 2h5.55" />
+      </svg>
+    );
+  }
+
+  if (name === "task") {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true" {...common}>
+        <rect x="4" y="3.5" width="16" height="17" rx="2.5" />
+        <path d="M8 8h8M8 12h5.5M8 16h7" />
+        <path d="m6.75 8 .65.65 1.1-1.35M6.75 12l.65.65 1.1-1.35M6.75 16l.65.65 1.1-1.35" />
       </svg>
     );
   }
@@ -424,6 +449,45 @@ function MorrowsMark() {
 
 function StateBadge({ state, locale }: { state: string; locale: Locale }) {
   return <span className={`badge state-${state}`}>{formatState(locale, state)}</span>;
+}
+
+function taskManagementStatus(row: TaskManagementSummary): TaskManagementFilter {
+  if (row.task.state === "done") return "done";
+  if (row.task.state === "cancelled") return "cancelled";
+  if (row.task.state === "blocked") return "blocked";
+  if (row.task.state === "review") return "review";
+  if (
+    row.task.state === "in_progress"
+    || ["running", "starting", "awaiting_agent", "interrupted", "cleanup_pending", "cancelling"].includes(row.latest_run_status || "")
+  ) {
+    return "running";
+  }
+  if (row.executor_assignment_status === "active") return "assigned";
+  return "unclaimed";
+}
+
+function taskManagementStatusLabel(locale: Locale, status: TaskManagementFilter) {
+  const zh: Record<TaskManagementFilter, string> = {
+    all: "全部",
+    unclaimed: "未接单",
+    assigned: "已接单",
+    running: "执行中",
+    review: "待复核",
+    blocked: "阻塞",
+    done: "已完成",
+    cancelled: "已取消",
+  };
+  const en: Record<TaskManagementFilter, string> = {
+    all: "All",
+    unclaimed: "Unclaimed",
+    assigned: "Assigned",
+    running: "Running",
+    review: "Review",
+    blocked: "Blocked",
+    done: "Completed",
+    cancelled: "Cancelled",
+  };
+  return (locale === "zh-CN" ? zh : en)[status];
 }
 
 function agentKindDisplayName(kind: string, locale: Locale) {
@@ -503,9 +567,12 @@ export default function App() {
     const saved = Number(window.localStorage.getItem("morrows.projectsPaneWidth"));
     return Number.isFinite(saved) && saved >= 260 && saved <= 720 ? saved : 360;
   });
-  const [view, setView] = useState<"sessions" | "queue" | "agents">("sessions");
+  const [view, setView] = useState<"sessions" | "queue" | "tasks" | "agents">("sessions");
   const [projects, setProjects] = useState<Project[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [taskManagement, setTaskManagement] = useState<TaskManagementSummary[]>([]);
+  const [taskManagementFilter, setTaskManagementFilter] = useState<TaskManagementFilter>("all");
+  const [taskManagementQuery, setTaskManagementQuery] = useState("");
   const [agents, setAgents] = useState<FleetEntry[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [assignments, setAssignments] = useState<Assignment[]>([]);
@@ -639,6 +706,39 @@ export default function App() {
     }
     return grouped;
   }, [projects, tasks, projectSort, locale]);
+
+  const taskManagementCounts = useMemo(() => {
+    const counts: Record<TaskManagementFilter, number> = {
+      all: taskManagement.length,
+      unclaimed: 0,
+      assigned: 0,
+      running: 0,
+      review: 0,
+      blocked: 0,
+      done: 0,
+      cancelled: 0,
+    };
+    taskManagement.forEach((row) => { counts[taskManagementStatus(row)] += 1; });
+    return counts;
+  }, [taskManagement]);
+
+  const filteredTaskManagement = useMemo(() => {
+    const query = taskManagementQuery.trim().toLocaleLowerCase(locale);
+    return taskManagement.filter((row) => {
+      const status = taskManagementStatus(row);
+      if (taskManagementFilter !== "all" && status !== taskManagementFilter) return false;
+      if (!query) return true;
+      return [
+        row.task.title,
+        row.task.description,
+        row.project_name || "",
+        row.task.owner_actor_id,
+        row.executor_agent_display_name || "",
+        row.executor_agent_instance_id || "",
+      ].some((value) => value.toLocaleLowerCase(locale).includes(query));
+    });
+  }, [taskManagement, taskManagementFilter, taskManagementQuery, locale]);
+
   const t = (key: TranslationKey) => translate(locale, key);
 
   useEffect(() => {
@@ -722,6 +822,17 @@ export default function App() {
     }
   }, [selectedId]);
 
+  const refreshTaskManagement = useCallback(async () => {
+    try {
+      const next = await api<TaskManagementSummary[]>("/api/tasks/management");
+      setTaskManagement(next);
+      setTasks(next.map((row) => row.task));
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }, []);
+
   const refreshDetail = useCallback(async () => {
     if (view !== "queue" || !selectedId || selectedProjectId) return;
     try {
@@ -781,11 +892,18 @@ export default function App() {
   }, [view, refreshSessionScopes]);
 
   useEffect(() => {
-    if (view !== "queue") return;
-    void refreshQueueBase();
-    const timer = window.setInterval(() => void refreshQueueBase(), 3000);
-    return () => window.clearInterval(timer);
-  }, [view, refreshQueueBase]);
+    if (view === "queue") {
+      void refreshQueueBase();
+      const timer = window.setInterval(() => void refreshQueueBase(), 3000);
+      return () => window.clearInterval(timer);
+    }
+    if (view === "tasks") {
+      void refreshTaskManagement();
+      const timer = window.setInterval(() => void refreshTaskManagement(), 3000);
+      return () => window.clearInterval(timer);
+    }
+    return undefined;
+  }, [view, refreshQueueBase, refreshTaskManagement]);
 
   useEffect(() => {
     void refreshDetail();
@@ -1192,6 +1310,22 @@ export default function App() {
     }
   }
 
+  function actorDisplayName(actorId: string) {
+    if (actorId === "human:webui") return locale === "zh-CN" ? "WebUI 用户" : "WebUI user";
+    if (actorId === "human:local") return locale === "zh-CN" ? "本地用户" : "Local user";
+    if (actorId.startsWith("agent:")) {
+      const agentId = actorId.slice("agent:".length);
+      const entry = agents.find((item) => item.instance.id === agentId);
+      return entry ? cleanAgentDisplayName(entry, locale) : shortId(agentId);
+    }
+    return actorId;
+  }
+
+  function openTaskFromManagement(taskId: string) {
+    selectTask(taskId);
+    setView("queue");
+  }
+
   function beginProjectsResize(event: ReactPointerEvent<HTMLDivElement>) {
     const grid = event.currentTarget.parentElement;
     if (!grid) return;
@@ -1237,6 +1371,12 @@ export default function App() {
       descZh: "按项目组织任务 · 上下文快照 · 调度 · 执行与恢复证据",
       descEn: "Project-organized tasks · context snapshots · dispatch · execution evidence",
     },
+    tasks: {
+      zh: "任务",
+      en: "Tasks",
+      descZh: "全局任务状态 · 接单与执行进度 · 发布人与负责人 · 时间与项目元数据",
+      descEn: "Global task status · assignment and execution progress · ownership · timing and project metadata",
+    },
     agents: {
       zh: "Agent 集群",
       en: "Agent Fleet",
@@ -1279,6 +1419,15 @@ export default function App() {
           >
             <span className="nav-label"><span className="nav-icon"><SidebarIcon name="project" /></span><span className="nav-text">{t("projects")}</span></span>
             <span className="nav-count">{projects.length}</span>
+          </button>
+          <button
+            className={view === "tasks" ? "nav-active" : ""}
+            onClick={() => setView("tasks")}
+            aria-current={view === "tasks" ? "page" : undefined}
+            title={sidebarCollapsed ? t("tasks") : undefined}
+          >
+            <span className="nav-label"><span className="nav-icon"><SidebarIcon name="task" /></span><span className="nav-text">{t("tasks")}</span></span>
+            <span className="nav-count">{tasks.length}</span>
           </button>
           <button
             className={view === "sessions" ? "nav-active" : ""}
@@ -1346,6 +1495,7 @@ export default function App() {
                   void refreshQueueBase();
                   void refreshDetail();
                 }
+                if (view === "tasks") void refreshTaskManagement();
               }}
             >
               ↻
@@ -1417,6 +1567,7 @@ export default function App() {
             <OperatorLogin locale={locale} onLogin={() => {
               void refreshFleet();
               void refreshQueueBase();
+              void refreshTaskManagement();
               void refreshSessionScopes();
               if (selectedId) void refreshDetail();
             }} />
@@ -1440,7 +1591,118 @@ export default function App() {
 
         {error && <div className="error-banner">{error}</div>}
 
-        {view === "queue" ? (
+        {view === "tasks" ? (
+          <section className="task-management-page">
+            <div className="task-management-summary">
+              {(["all", "unclaimed", "assigned", "running", "review", "blocked", "done", "cancelled"] as TaskManagementFilter[]).map((status) => (
+                <button
+                  type="button"
+                  key={status}
+                  className={`task-summary-filter task-status-${status}${taskManagementFilter === status ? " selected" : ""}`}
+                  onClick={() => setTaskManagementFilter(status)}
+                >
+                  <span>{taskManagementStatusLabel(locale, status)}</span>
+                  <strong>{taskManagementCounts[status]}</strong>
+                </button>
+              ))}
+            </div>
+
+            <div className="task-management-toolbar">
+              <div>
+                <strong>{locale === "zh-CN" ? "全部任务" : "All tasks"}</strong>
+                <small>
+                  {locale === "zh-CN"
+                    ? `显示 ${filteredTaskManagement.length} / ${taskManagement.length} 条`
+                    : `Showing ${filteredTaskManagement.length} of ${taskManagement.length}`}
+                </small>
+              </div>
+              <input
+                type="search"
+                value={taskManagementQuery}
+                onChange={(event) => setTaskManagementQuery(event.target.value)}
+                placeholder={locale === "zh-CN" ? "搜索任务、项目、发布人或接单人" : "Search task, project, publisher, or assignee"}
+                aria-label={locale === "zh-CN" ? "搜索任务" : "Search tasks"}
+              />
+            </div>
+
+            <div className="task-management-table-wrap">
+              <table className="task-management-table">
+                <thead>
+                  <tr>
+                    <th>{locale === "zh-CN" ? "状态" : "Status"}</th>
+                    <th>{locale === "zh-CN" ? "任务" : "Task"}</th>
+                    <th>{locale === "zh-CN" ? "项目" : "Project"}</th>
+                    <th>{locale === "zh-CN" ? "发布人" : "Publisher"}</th>
+                    <th>{locale === "zh-CN" ? "接单人" : "Assignee"}</th>
+                    <th>{locale === "zh-CN" ? "创建时间" : "Created"}</th>
+                    <th>{locale === "zh-CN" ? "更新时间" : "Updated"}</th>
+                    <th>{locale === "zh-CN" ? "优先级" : "Priority"}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredTaskManagement.map((row) => {
+                    const status = taskManagementStatus(row);
+                    const assignmentMode = row.task.assignment_mode === "open"
+                      ? t("assignmentModeOpen")
+                      : row.task.assignment_mode === "approval"
+                        ? t("assignmentModeApproval")
+                        : t("assignmentModeDispatch");
+                    return (
+                      <tr key={row.task.id}>
+                        <td>
+                          <span className={`task-management-state task-status-${status}`}>
+                            <span className="task-management-state-dot" />
+                            {taskManagementStatusLabel(locale, status)}
+                          </span>
+                          <small className="task-management-substate">
+                            {row.latest_run_status
+                              ? `Run · ${formatState(locale, row.latest_run_status)}`
+                              : formatState(locale, row.task.state)}
+                          </small>
+                        </td>
+                        <td className="task-management-title-cell">
+                          <button type="button" onClick={() => openTaskFromManagement(row.task.id)}>
+                            <strong>{row.task.title}</strong>
+                            <span>{row.task.description || (locale === "zh-CN" ? "无描述" : "No description")}</span>
+                          </button>
+                          <small>{shortId(row.task.id)} · {assignmentMode}</small>
+                        </td>
+                        <td>
+                          <strong>{row.project_name || (locale === "zh-CN" ? "未分类" : "Unclassified")}</strong>
+                        </td>
+                        <td>
+                          <strong>{actorDisplayName(row.task.owner_actor_id)}</strong>
+                          <small>{row.task.owner_actor_id}</small>
+                        </td>
+                        <td>
+                          {row.executor_agent_display_name ? (
+                            <>
+                              <strong>{row.executor_agent_display_name}</strong>
+                              <small>
+                                {row.executor_assignment_status ? formatState(locale, row.executor_assignment_status) : ""}
+                                {row.executor_acquired_at ? ` · ${formatDateTime(locale, row.executor_acquired_at)}` : ""}
+                              </small>
+                            </>
+                          ) : (
+                            <span className="task-unassigned-label">{locale === "zh-CN" ? "尚未接单" : "Unassigned"}</span>
+                          )}
+                        </td>
+                        <td><time>{formatDateTime(locale, row.task.created_at)}</time></td>
+                        <td><time>{formatDateTime(locale, row.task.updated_at)}</time></td>
+                        <td><span className="task-priority-pill">P{row.task.priority}</span></td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+              {!filteredTaskManagement.length && (
+                <div className="empty large">
+                  {locale === "zh-CN" ? "没有符合当前筛选条件的任务。" : "No tasks match the current filters."}
+                </div>
+              )}
+            </div>
+          </section>
+        ) : view === "queue" ? (
           <div
             className="workspace-grid"
             style={{ gridTemplateColumns: `${projectsPaneWidth}px 8px minmax(0, 1fr)` }}
