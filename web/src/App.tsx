@@ -350,6 +350,78 @@ function shortId(id: string) {
   return id.slice(0, 8);
 }
 
+type SidebarIconName = "project" | "session" | "agent" | "collapse" | "expand";
+
+function SidebarIcon({ name }: { name: SidebarIconName }) {
+  const common = {
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: 1.8,
+    strokeLinecap: "round" as const,
+    strokeLinejoin: "round" as const,
+  };
+
+  if (name === "project") {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true" {...common}>
+        <path d="M3.5 7.25h6l1.7 2h9.3v8.25a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2V7.25Z" />
+        <path d="M3.5 7.25V5.8a1.8 1.8 0 0 1 1.8-1.8h4.05l1.7 2h5.55" />
+      </svg>
+    );
+  }
+
+  if (name === "session") {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true" {...common}>
+        <path d="M5.25 5.25h13.5a2.5 2.5 0 0 1 2.5 2.5v7a2.5 2.5 0 0 1-2.5 2.5H11l-4.75 3v-3h-1a2.5 2.5 0 0 1-2.5-2.5v-7a2.5 2.5 0 0 1 2.5-2.5Z" />
+        <path d="M7.5 10.25h9M7.5 13.25h5.5" />
+      </svg>
+    );
+  }
+
+  if (name === "agent") {
+    return (
+      <svg viewBox="0 0 24 24" aria-hidden="true" {...common}>
+        <path d="M12 4V2.5M8 5.5h8a3 3 0 0 1 3 3v7a3 3 0 0 1-3 3H8a3 3 0 0 1-3-3v-7a3 3 0 0 1 3-3Z" />
+        <path d="M2.75 10.25v4M21.25 10.25v4M8.5 18.5v2M15.5 18.5v2" />
+        <circle cx="9.25" cy="11.25" r=".8" fill="currentColor" stroke="none" />
+        <circle cx="14.75" cy="11.25" r=".8" fill="currentColor" stroke="none" />
+        <path d="M9 14.5h6" />
+      </svg>
+    );
+  }
+
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" {...common}>
+      <rect x="3.5" y="4" width="17" height="16" rx="2.5" />
+      <path d="M8.5 4v16" />
+      {name === "collapse" ? <path d="m14.5 9-3 3 3 3" /> : <path d="m11.5 9 3 3-3 3" />}
+    </svg>
+  );
+}
+
+function MorrowsMark() {
+  return (
+    <svg className="brand-mark" viewBox="0 0 36 36" aria-hidden="true">
+      <defs>
+        <linearGradient id="morrows-mark-bg" x1="5" y1="4" x2="31" y2="32" gradientUnits="userSpaceOnUse">
+          <stop offset="0" stopColor="#F4B54A" />
+          <stop offset=".55" stopColor="#E77C4F" />
+          <stop offset="1" stopColor="#B95C7A" />
+        </linearGradient>
+        <linearGradient id="morrows-mark-glow" x1="18" y1="9" x2="18" y2="28" gradientUnits="userSpaceOnUse">
+          <stop offset="0" stopColor="#FFF8E7" />
+          <stop offset="1" stopColor="#F7DFC0" />
+        </linearGradient>
+      </defs>
+      <rect x="1" y="1" width="34" height="34" rx="10" fill="url(#morrows-mark-bg)" />
+      <path d="M8.25 24.75V12.5l5.05 7.25L18 12.5l4.7 7.25 5.05-7.25v12.25" stroke="url(#morrows-mark-glow)" strokeWidth="2.35" strokeLinecap="round" strokeLinejoin="round" fill="none" />
+      <path d="M8.25 27h19.5" stroke="#5B2D37" strokeOpacity=".32" strokeWidth="1.4" strokeLinecap="round" />
+      <circle cx="18" cy="8.5" r="1.45" fill="#FFF4D6" />
+    </svg>
+  );
+}
+
 function StateBadge({ state, locale }: { state: string; locale: Locale }) {
   return <span className={`badge state-${state}`}>{formatState(locale, state)}</span>;
 }
@@ -426,6 +498,7 @@ export default function App() {
     return Number.isFinite(saved) && saved >= 0.85 && saved <= 1.5 ? saved : 1.15;
   });
   const [showSettings, setShowSettings] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => window.localStorage.getItem("morrows.sidebarCollapsed") === "1");
   const [view, setView] = useState<"sessions" | "queue" | "agents">("sessions");
   const [projects, setProjects] = useState<Project[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -577,6 +650,10 @@ export default function App() {
     window.localStorage.setItem("morrows.fontScale", String(fontScale));
     document.documentElement.style.setProperty("--font-scale", String(fontScale));
   }, [fontScale]);
+
+  useEffect(() => {
+    window.localStorage.setItem("morrows.sidebarCollapsed", sidebarCollapsed ? "1" : "0");
+  }, [sidebarCollapsed]);
 
   useEffect(() => {
     window.localStorage.setItem("morrows.projectSort", projectSort);
@@ -1114,8 +1191,8 @@ export default function App() {
       descEn: "Persistent Agent sessions · lazy history · durable delivery",
     },
     queue: {
-      zh: "任务",
-      en: "Tasks",
+      zh: "项目",
+      en: "Projects",
       descZh: "按项目组织任务 · 上下文快照 · 调度 · 执行与恢复证据",
       descEn: "Project-organized tasks · context snapshots · dispatch · execution evidence",
     },
@@ -1128,41 +1205,57 @@ export default function App() {
   }[view];
 
   return (
-    <div className="app-shell">
-      <aside className="sidebar">
+    <div className={`app-shell${sidebarCollapsed ? " sidebar-collapsed" : ""}`}>
+      <aside className={`sidebar${sidebarCollapsed ? " is-collapsed" : ""}`}>
         <div className="brand">
-          <svg className="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
-            <defs>
-              <linearGradient id="morrows-dawn" x1="0" y1="0" x2="1" y2="1">
-                <stop offset="0" stopColor="#E8A33D" />
-                <stop offset="1" stopColor="#E76F51" />
-              </linearGradient>
-            </defs>
-            <rect width="32" height="32" rx="8" fill="var(--inset)" />
-            <circle cx="11" cy="21" r="5.5" fill="url(#morrows-dawn)" />
-            <path d="M6 9.5h20" stroke="#E8A33D" strokeWidth="2" strokeLinecap="round" />
-            <path d="M6 12.5h20" stroke="#6FA8C9" strokeWidth="1.4" strokeLinecap="round" />
-            <path d="M6 15.5h20" stroke="var(--ink-3)" strokeWidth="1.4" strokeLinecap="round" />
-          </svg>
+          <MorrowsMark />
           <div className="brand-copy">
             <strong>Morrows</strong>
             <span>Agent Work OS</span>
           </div>
+          <button
+            type="button"
+            className="sidebar-toggle"
+            onClick={() => setSidebarCollapsed((value) => !value)}
+            aria-label={sidebarCollapsed
+              ? (locale === "zh-CN" ? "展开侧栏" : "Expand sidebar")
+              : (locale === "zh-CN" ? "收起侧栏" : "Collapse sidebar")}
+            title={sidebarCollapsed
+              ? (locale === "zh-CN" ? "展开侧栏" : "Expand sidebar")
+              : (locale === "zh-CN" ? "收起侧栏" : "Collapse sidebar")}
+          >
+            <SidebarIcon name={sidebarCollapsed ? "expand" : "collapse"} />
+          </button>
         </div>
 
         <nav className="side-nav">
           <div className="nav-group">{locale === "zh-CN" ? "工作 WORK" : "WORK"}</div>
-          <button className={view === "queue" ? "nav-active" : ""} onClick={() => setView("queue")}>
-            <span className="nav-label"><span className="nav-icon">▤</span>{locale === "zh-CN" ? "任务" : "Tasks"}</span>
-            <span className="nav-count">{tasks.length}</span>
+          <button
+            className={view === "queue" ? "nav-active" : ""}
+            onClick={() => setView("queue")}
+            aria-current={view === "queue" ? "page" : undefined}
+            title={sidebarCollapsed ? t("projects") : undefined}
+          >
+            <span className="nav-label"><span className="nav-icon"><SidebarIcon name="project" /></span><span className="nav-text">{t("projects")}</span></span>
+            <span className="nav-count">{projects.length}</span>
           </button>
-          <button className={view === "sessions" ? "nav-active" : ""} onClick={() => setView("sessions")}>
-            <span className="nav-label"><span className="nav-icon">◫</span>{t("sessions")}</span>
+          <button
+            className={view === "sessions" ? "nav-active" : ""}
+            onClick={() => setView("sessions")}
+            aria-current={view === "sessions" ? "page" : undefined}
+            title={sidebarCollapsed ? t("sessions") : undefined}
+          >
+            <span className="nav-label"><span className="nav-icon"><SidebarIcon name="session" /></span><span className="nav-text">{t("sessions")}</span></span>
           </button>
 
           <div className="nav-group">{locale === "zh-CN" ? "资源 RESOURCES" : "RESOURCES"}</div>
-          <button className={view === "agents" ? "nav-active" : ""} onClick={() => setView("agents")}>
-            <span className="nav-label"><span className="nav-icon">⌘</span>{t("agentFleet")}</span>
+          <button
+            className={view === "agents" ? "nav-active" : ""}
+            onClick={() => setView("agents")}
+            aria-current={view === "agents" ? "page" : undefined}
+            title={sidebarCollapsed ? t("agentFleet") : undefined}
+          >
+            <span className="nav-label"><span className="nav-icon"><SidebarIcon name="agent" /></span><span className="nav-text">{t("agentFleet")}</span></span>
             <span className="nav-count">{agents.filter((a) => a.instance.status === "online").length}</span>
           </button>
         </nav>

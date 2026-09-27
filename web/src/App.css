@@ -63,9 +63,12 @@ code, .task-id, .mcp-pill, .nav-count { font-family: "SFMono-Regular", Consolas,
   display: grid;
   grid-template-columns: 224px minmax(0, 1fr);
   background: var(--bg);
+  transition: grid-template-columns .18s ease;
 }
+.app-shell.sidebar-collapsed { grid-template-columns: 76px minmax(0, 1fr); }
 
 .sidebar {
+  position: relative;
   min-width: 0;
   padding: 18px 14px 14px;
   font-size: calc(16px * var(--font-scale));
@@ -73,24 +76,52 @@ code, .task-id, .mcp-pill, .nav-count { font-family: "SFMono-Regular", Consolas,
   flex-direction: column;
   border-right: 1px solid var(--line-soft);
   background: var(--elev);
+  transition: padding .18s ease;
 }
+.sidebar.is-collapsed { padding-left: 12px; padding-right: 12px; }
 
 .brand {
   display: flex;
   align-items: center;
   gap: 11px;
-  padding: 3px 7px 20px;
+  min-height: 42px;
+  padding: 1px 7px 19px;
 }
 .brand-mark {
-  width: 34px;
-  height: 34px;
-  flex: 0 0 34px;
-  border-radius: 9px;
-  box-shadow: 0 0 0 1px var(--line-soft);
+  width: 36px;
+  height: 36px;
+  flex: 0 0 36px;
+  border-radius: 10px;
+  filter: drop-shadow(0 7px 14px rgba(0, 0, 0, .16));
 }
-.brand-copy { min-width: 0; }
+.brand-copy { min-width: 0; overflow: hidden; white-space: nowrap; }
 .brand-copy strong { display: block; font-size: calc(14px * var(--font-scale)); letter-spacing: -.02em; }
 .brand-copy span { display: block; margin-top: 2px; color: var(--ink-3); font-size: calc(10px * var(--font-scale)); }
+.sidebar-toggle {
+  position: absolute;
+  top: 23px;
+  right: -13px;
+  z-index: 3;
+  width: 26px;
+  height: 26px;
+  padding: 4px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--elev);
+  color: var(--ink-3);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, .18);
+  cursor: pointer;
+  transition: color .15s ease, border-color .15s ease, background .15s ease, transform .15s ease;
+}
+.sidebar-toggle:hover {
+  color: var(--ink);
+  border-color: var(--line-hover);
+  background: var(--panel-2);
+  transform: scale(1.04);
+}
+.sidebar-toggle svg { width: 16px; height: 16px; }
 
 .side-nav { display: grid; gap: 4px; }
 .nav-group {
@@ -121,13 +152,17 @@ code, .task-id, .mcp-pill, .nav-count { font-family: "SFMono-Regular", Consolas,
   border-color: var(--line-soft);
   box-shadow: inset 2px 0 0 var(--accent);
 }
-.nav-label { display: flex; align-items: center; gap: 9px; min-width: 0; font-size: 16px; }
+.nav-label { display: flex; align-items: center; gap: 10px; min-width: 0; font-size: 16px; }
+.nav-text { min-width: 0; white-space: nowrap; }
 .nav-icon {
-  width: 18px;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
+  display: grid;
+  place-items: center;
   color: var(--ink-3);
-  font-size: calc(14px * var(--font-scale));
-  text-align: center;
 }
+.nav-icon svg { width: 20px; height: 20px; }
 .nav-active .nav-icon { color: var(--accent); }
 .nav-count {
   min-width: 18px;
@@ -139,6 +174,16 @@ code, .task-id, .mcp-pill, .nav-count { font-family: "SFMono-Regular", Consolas,
   text-align: center;
 }
 .sidebar-spacer { flex: 1; min-height: 18px; }
+.sidebar.is-collapsed .brand { justify-content: center; padding-left: 0; padding-right: 0; }
+.sidebar.is-collapsed .brand-copy,
+.sidebar.is-collapsed .nav-group,
+.sidebar.is-collapsed .nav-text,
+.sidebar.is-collapsed .nav-count,
+.sidebar.is-collapsed .system-card > div,
+.sidebar.is-collapsed .planes-tip { display: none; }
+.sidebar.is-collapsed .side-nav button { justify-content: center; padding: 10px; }
+.sidebar.is-collapsed .nav-label { justify-content: center; }
+.sidebar.is-collapsed .system-card { justify-content: center; padding: 10px; }
 
 .system-card {
   padding: 10px 11px;
@@ -1338,9 +1383,10 @@ h3 { margin: 20px 0 8px; color: var(--ink-3); font: 700 calc(8px * var(--font-sc
 ::-webkit-scrollbar-track { background: transparent; }
 
 @media (max-width: 1020px) {
-  .app-shell { grid-template-columns: 72px minmax(0, 1fr); }
+  .app-shell, .app-shell.sidebar-collapsed { grid-template-columns: 72px minmax(0, 1fr); }
   .brand-copy, .nav-group, .nav-label > :not(.nav-icon), .nav-count, .system-card > div, .planes-tip { display: none; }
   .brand { justify-content: center; padding-left: 0; padding-right: 0; }
+  .sidebar-toggle { display: none; }
   .side-nav button { justify-content: center; padding: 9px; }
   .nav-label { justify-content: center; }
   .system-card { justify-content: center; }
@@ -1359,7 +1405,7 @@ h3 { margin: 20px 0 8px; color: var(--ink-3); font: 700 calc(8px * var(--font-sc
 @media (max-width: 800px) {
   body { overflow: auto; }
   .app-shell { min-height: 100vh; height: auto; grid-template-columns: 1fr; }
-  .sidebar { position: sticky; top: 0; z-index: 20; flex-direction: row; align-items: center; gap: 6px; padding: 8px 10px; border-right: 0; border-bottom: 1px solid var(--line-soft); }
+  .sidebar, .sidebar.is-collapsed { position: sticky; top: 0; z-index: 20; flex-direction: row; align-items: center; gap: 6px; padding: 8px 10px; border-right: 0; border-bottom: 1px solid var(--line-soft); }
   .brand { padding: 0; }
   .brand-copy, .system-card, .planes-tip, .nav-group, .nav-count { display: none; }
   .side-nav { display: flex; gap: 4px; }
