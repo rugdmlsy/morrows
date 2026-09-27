@@ -1,6 +1,17 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <defs><linearGradient id="dawn" x1="0" x2="1" y1="1" y2="0"><stop stop-color="#6838d8"/><stop offset="1" stop-color="#ee9e6b"/></linearGradient></defs>
-  <rect width="64" height="64" rx="17" fill="#17142d"/>
-  <path d="M12 43V22l11 14 9-13 9 13 11-14v21" fill="none" stroke="url(#dawn)" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M14 49h36" stroke="#f6c493" stroke-width="3" stroke-linecap="round"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 36 36">
+  <defs>
+    <linearGradient id="morrows-mark-bg" x1="5" y1="4" x2="31" y2="32" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#F4B54A"/>
+      <stop offset=".55" stop-color="#E77C4F"/>
+      <stop offset="1" stop-color="#B95C7A"/>
+    </linearGradient>
+    <linearGradient id="morrows-mark-glow" x1="18" y1="9" x2="18" y2="28" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFF8E7"/>
+      <stop offset="1" stop-color="#F7DFC0"/>
+    </linearGradient>
+  </defs>
+  <rect x="1" y="1" width="34" height="34" rx="10" fill="url(#morrows-mark-bg)"/>
+  <path d="M8.25 24.75V12.5l5.05 7.25L18 12.5l4.7 7.25 5.05-7.25v12.25" fill="none" stroke="url(#morrows-mark-glow)" stroke-width="2.35" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M8.25 27h19.5" stroke="#5B2D37" stroke-opacity=".32" stroke-width="1.4" stroke-linecap="round"/>
+  <circle cx="18" cy="8.5" r="1.45" fill="#FFF4D6"/>
 </svg>

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import type { FormEvent } from "react";
+import type { FormEvent, PointerEvent as ReactPointerEvent } from "react";
 import "./App.css";
 import SessionChat from "./SessionChat";
 import AssignmentRequests from "./AssignmentRequests";
@@ -499,6 +499,10 @@ export default function App() {
   });
   const [showSettings, setShowSettings] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => window.localStorage.getItem("morrows.sidebarCollapsed") === "1");
+  const [projectsPaneWidth, setProjectsPaneWidth] = useState(() => {
+    const saved = Number(window.localStorage.getItem("morrows.projectsPaneWidth"));
+    return Number.isFinite(saved) && saved >= 260 && saved <= 720 ? saved : 360;
+  });
   const [view, setView] = useState<"sessions" | "queue" | "agents">("sessions");
   const [projects, setProjects] = useState<Project[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -655,6 +659,10 @@ export default function App() {
   useEffect(() => {
     window.localStorage.setItem("morrows.sidebarCollapsed", sidebarCollapsed ? "1" : "0");
   }, [sidebarCollapsed]);
+
+  useEffect(() => {
+    window.localStorage.setItem("morrows.projectsPaneWidth", String(projectsPaneWidth));
+  }, [projectsPaneWidth]);
 
   useEffect(() => {
     window.localStorage.setItem("morrows.projectSort", projectSort);
@@ -1184,6 +1192,38 @@ export default function App() {
     }
   }
 
+  function beginProjectsResize(event: ReactPointerEvent<HTMLDivElement>) {
+    const grid = event.currentTarget.parentElement;
+    if (!grid) return;
+    event.preventDefault();
+
+    const startX = event.clientX;
+    const startWidth = projectsPaneWidth;
+    const gridWidth = grid.getBoundingClientRect().width;
+    const minProjectsWidth = 270;
+    const minDetailWidth = 480;
+    const maxProjectsWidth = Math.max(minProjectsWidth, Math.min(720, gridWidth - minDetailWidth - 8));
+
+    const previousCursor = document.body.style.cursor;
+    const previousUserSelect = document.body.style.userSelect;
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+
+    const onMove = (moveEvent: PointerEvent) => {
+      const nextWidth = Math.min(maxProjectsWidth, Math.max(minProjectsWidth, startWidth + moveEvent.clientX - startX));
+      setProjectsPaneWidth(Math.round(nextWidth));
+    };
+    const onUp = () => {
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousUserSelect;
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp, { once: true });
+  }
+
   const viewMeta = {
     sessions: {
       zh: "会话",
@@ -1401,8 +1441,11 @@ export default function App() {
         {error && <div className="error-banner">{error}</div>}
 
         {view === "queue" ? (
-          <div className="workspace-grid">
-            <section className="panel queue-panel">
+          <div
+            className="workspace-grid"
+            style={{ gridTemplateColumns: `${projectsPaneWidth}px 8px minmax(0, 1fr)` }}
+          >
+            <section className="queue-panel workspace-pane">
               <AssignmentRequests locale={locale} tasks={tasks} agents={agents.map(entry => entry.instance)} onSelectTask={selectTask} onResolved={async () => { await refreshQueueBase(); await refreshDetail(); }} />
               <div className="task-browser-head">
                 <div>
@@ -1517,7 +1560,24 @@ export default function App() {
               </div>
             </section>
 
-            <section className="panel detail-panel">
+            <div
+              className="workspace-resizer"
+              role="separator"
+              aria-orientation="vertical"
+              aria-label={locale === "zh-CN" ? "调整项目栏与详情栏宽度" : "Resize Projects and detail panes"}
+              tabIndex={0}
+              onPointerDown={beginProjectsResize}
+              onKeyDown={(event) => {
+                if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+                event.preventDefault();
+                const delta = event.key === "ArrowLeft" ? -16 : 16;
+                setProjectsPaneWidth((width) => Math.min(720, Math.max(270, width + delta)));
+              }}
+            >
+              <span />
+            </div>
+
+            <section className="detail-panel workspace-pane">
               {unclassifiedOpen ? (
                 <>
                   <div className="detail-heading">
