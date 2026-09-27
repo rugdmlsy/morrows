@@ -1319,6 +1319,28 @@ export default function App() {
     }
   }
 
+  async function deleteTask(task: Task) {
+    const message = t("deleteTaskConfirm").replace("{title}", task.title);
+    if (!window.confirm(message)) return;
+    setTaskMutationBusy(true);
+    try {
+      await api<{ task_id: string; deleted: boolean }>(`/api/tasks/${task.id}`, { method: "DELETE" });
+      const nextTaskId = tasks.find((item) => item.id !== task.id)?.id ?? null;
+      setTasks((current) => current.filter((item) => item.id !== task.id));
+      setTaskManagement((current) => current.filter((row) => row.task.id !== task.id));
+      if (selectedId === task.id) {
+        setSelectedProjectId(null);
+        setSelectedId(nextTaskId);
+      }
+      await Promise.all([refreshQueueBase(), refreshTaskManagement()]);
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setTaskMutationBusy(false);
+    }
+  }
+
   async function createSelectedTaskRework() {
     if (!selectedTask || selectedTask.state !== "done") return;
     const reason = window.prompt(t("reworkReasonPrompt"));
@@ -1689,6 +1711,7 @@ export default function App() {
                     <th>{locale === "zh-CN" ? "创建时间" : "Created"}</th>
                     <th>{locale === "zh-CN" ? "更新时间" : "Updated"}</th>
                     <th>{locale === "zh-CN" ? "优先级" : "Priority"}</th>
+                    <th>{locale === "zh-CN" ? "操作" : "Actions"}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -1742,6 +1765,11 @@ export default function App() {
                         <td><time>{formatDateTime(locale, row.task.created_at)}</time></td>
                         <td><time>{formatDateTime(locale, row.task.updated_at)}</time></td>
                         <td><span className="task-priority-pill">P{row.task.priority}</span></td>
+                        <td className="task-management-actions-cell">
+                          <button className="danger" type="button" onClick={() => void deleteTask(row.task)} disabled={taskMutationBusy}>
+                            {t("deleteTask")}
+                          </button>
+                        </td>
                       </tr>
                     );
                   })}
@@ -2051,7 +2079,12 @@ export default function App() {
                       <span className="task-id">{selectedTask.id}</span>
                       <h2>{selectedTask.title}</h2>
                     </div>
-                    <StateBadge state={selectedTask.state} locale={locale} />
+                    <div className="detail-heading-actions">
+                      <StateBadge state={selectedTask.state} locale={locale} />
+                      <button className="danger" type="button" onClick={() => void deleteTask(selectedTask)} disabled={taskMutationBusy}>
+                        {t("deleteTask")}
+                      </button>
+                    </div>
                   </div>
                   <p className="description">{selectedTask.description || t("noDescription")}</p>
 
