@@ -2887,6 +2887,166 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn project_bound_work_request_lifecycle_publishes_memory_and_completes() {
+        let store = Store::connect("sqlite::memory:").await.unwrap();
+        let employee = store.register_agent("lifecycle-worker", &[]).await.unwrap();
+        let project = store
+            .create_project(serde_json::from_value(json!({"name":"Lifecycle Project"})).unwrap())
+            .await
+            .unwrap();
+        let mcp = MorrowsMcp::new(store.clone());
+
+        let task: Value = serde_json::from_str(
+            &mcp.work_request_submit(
+                Parameters(WorkRequestSubmitRequest {
+                    title: "Project lifecycle".into(),
+                    description: "exercise durable memory gate".into(),
+                    project_id: Some(project.id.to_string()),
+                }),
+                Extension(parts(Some(employee.id))),
+            )
+            .await
+            .unwrap(),
+        )
+        .unwrap();
+        let task_id = parse_id(task["id"].as_str().unwrap()).unwrap();
+        assert_eq!(task["project_id"], json!(project.id));
+
+        let context = store
+            .create_context_revision(
+                task_id,
+                serde_json::from_value(json!({
+                    "goal":"Exercise bound work request lifecycle",
+                    "background":"E2E fixture",
+                    "current_summary":"Ready to claim",
+                    "constraints":{}
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let live: Value =
+            serde_json::from_str(&mcp.load_task_context(task_id, employee.id).await.unwrap())
+                .unwrap();
+        assert_eq!(live["project"]["id"], json!(project.id));
+        assert_eq!(live["context"]["id"], json!(context.id));
+
+        let claim: Value = serde_json::from_str(
+            &mcp.task_claim(
+                Parameters(TaskClaimRequest {
+                    task_id: task_id.to_string(),
+                    role: "executor".into(),
+                    lease_seconds: 300,
+                }),
+                Extension(parts(Some(employee.id))),
+            )
+            .await
+            .unwrap(),
+        )
+        .unwrap();
+        let run_id = parse_id(claim["run"]["id"].as_str().unwrap()).unwrap();
+
+        let milestone: Value = serde_json::from_str(
+            &mcp.run_milestone(
+                Parameters(MilestoneRunRequest {
+                    run_id: run_id.to_string(),
+                    input: serde_json::from_value(json!({
+                        "summary":"Bound lifecycle reached durable milestone",
+                        "completed":["Created task directly in project"],
+                        "verified":["Project is present in live task context"],
+                        "remaining":["Publish durable project knowledge and complete"],
+                        "blockers":[],
+                        "next_step":"Publish the E2E memory",
+                        "next_plan":["Publish project memory","Complete the run"],
+                        "execution_locations":["test:sqlite-memory"],
+                        "artifact_ids":[],
+                        "decision_ids":[]
+                    }))
+                    .unwrap(),
+                }),
+                Extension(parts(Some(employee.id))),
+            )
+            .await
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(milestone["context_revision_id"], json!(context.id));
+
+        let memory: Value = serde_json::from_str(
+            &mcp.project_memory_publish(
+                Parameters(
+                    serde_json::from_value(json!({
+                        "task_id":task_id,
+                        "idempotency_key":"bound-lifecycle-e2e",
+                        "expected_project_id":project.id,
+                        "title":"Bound lifecycle E2E",
+                        "content":{"finding":"project-bound work requests can publish durable memory before completion"},
+                        "verification_status":"reported",
+                        "basis":"E2E lifecycle regression",
+                        "context_revision_id":context.id,
+                        "artifact_ids":[],
+                        "decision_ids":[]
+                    }))
+                    .unwrap(),
+                ),
+                Extension(parts(Some(employee.id))),
+            )
+            .await
+            .unwrap(),
+        )
+        .unwrap();
+        let memory_id = memory["id"].as_str().unwrap().to_owned();
+
+        let disposition = serde_json::from_value(json!({
+            "status":"published",
+            "rationale":"The E2E produced reusable project lifecycle evidence.",
+            "memory_entry_ids":[memory_id]
+        }))
+        .unwrap();
+        let request = CompleteRunRequest {
+            run_id: run_id.to_string(),
+            result: json!({"ok":true}),
+            completion: None,
+            memory_disposition: Some(disposition),
+            report_path: None,
+        };
+        let readiness: Value = serde_json::from_str(
+            &mcp.run_completion_check(Parameters(request), Extension(parts(Some(employee.id))))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(readiness["ready"], json!(true));
+
+        let disposition = serde_json::from_value(json!({
+            "status":"published",
+            "rationale":"The E2E produced reusable project lifecycle evidence.",
+            "memory_entry_ids":[memory["id"].as_str().unwrap()]
+        }))
+        .unwrap();
+        let completed: Value = serde_json::from_str(
+            &mcp.run_complete(
+                Parameters(CompleteRunRequest {
+                    run_id: run_id.to_string(),
+                    result: json!({"ok":true}),
+                    completion: None,
+                    memory_disposition: Some(disposition),
+                    report_path: None,
+                }),
+                Extension(parts(Some(employee.id))),
+            )
+            .await
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(completed["status"], "completed");
+        assert_eq!(
+            store.get_task(task_id).await.unwrap().state,
+            TaskState::Done
+        );
+    }
+
+    #[tokio::test]
     async fn mcp_tools_expose_collaboration_and_enforce_header_identity() {
         let store = Store::connect("sqlite::memory:").await.unwrap();
         let a = store.register_agent("mcp-a", &[]).await.unwrap();
