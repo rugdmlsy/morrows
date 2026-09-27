@@ -65,7 +65,7 @@ code, .task-id, .mcp-pill, .nav-count { font-family: "SFMono-Regular", Consolas,
   background: var(--bg);
   transition: grid-template-columns .18s ease;
 }
-.app-shell.sidebar-collapsed { grid-template-columns: 76px minmax(0, 1fr); }
+.app-shell.sidebar-collapsed { grid-template-columns: 60px minmax(0, 1fr); }
 
 .sidebar {
   position: relative;
@@ -78,7 +78,7 @@ code, .task-id, .mcp-pill, .nav-count { font-family: "SFMono-Regular", Consolas,
   background: var(--elev);
   transition: padding .18s ease;
 }
-.sidebar.is-collapsed { padding-left: 12px; padding-right: 12px; }
+.sidebar.is-collapsed { padding-left: 10px; padding-right: 10px; }
 
 .brand {
   display: flex;
@@ -181,9 +181,9 @@ code, .task-id, .mcp-pill, .nav-count { font-family: "SFMono-Regular", Consolas,
 .sidebar.is-collapsed .nav-count,
 .sidebar.is-collapsed .system-card > div,
 .sidebar.is-collapsed .planes-tip { display: none; }
-.sidebar.is-collapsed .side-nav button { justify-content: center; padding: 10px; }
+.sidebar.is-collapsed .side-nav button { justify-content: center; padding: 8px; }
 .sidebar.is-collapsed .nav-label { justify-content: center; }
-.sidebar.is-collapsed .system-card { justify-content: center; padding: 10px; }
+.sidebar.is-collapsed .system-card { justify-content: center; padding: 8px; }
 
 .system-card {
   padding: 10px 11px;
@@ -528,6 +528,11 @@ button.project-group-head:disabled { cursor: default; opacity: 1; }
 .project-group-head > div:nth-child(2) { min-width: 0; display: grid; gap: 2px; }
 .project-group-head strong { font-size: calc(10px * var(--font-scale)); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .project-group-head small { color: var(--muted); font-size: calc(8px * var(--font-scale)); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.project-group-tail {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
 .project-task-count {
   min-width: 20px;
   height: 20px;
@@ -539,7 +544,23 @@ button.project-group-head:disabled { cursor: default; opacity: 1; }
   color: var(--ink-3);
   font: calc(8px * var(--font-scale)) "SFMono-Regular", Consolas, monospace;
 }
-.project-task-items { padding: 4px; display: grid; gap: 2px; }
+.project-disclosure {
+  width: 16px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  font-size: calc(17px * var(--font-scale));
+  line-height: 1;
+  transform: rotate(0deg);
+  transition: transform .15s ease, color .15s ease;
+}
+.project-disclosure.expanded {
+  color: var(--ink-2);
+  transform: rotate(90deg);
+}
+.project-group-head[aria-expanded="false"] { border-bottom-color: transparent; }
+.project-task-items { padding: 4px; display: grid; gap: 2px; border-top: 1px solid var(--line-soft); }
 .project-empty {
   min-height: calc(34px * var(--font-scale));
   padding: 9px 10px 10px;
@@ -1383,7 +1404,8 @@ h3 { margin: 20px 0 8px; color: var(--ink-3); font: 700 calc(8px * var(--font-sc
 ::-webkit-scrollbar-track { background: transparent; }
 
 @media (max-width: 1020px) {
-  .app-shell, .app-shell.sidebar-collapsed { grid-template-columns: 72px minmax(0, 1fr); }
+  .app-shell, .app-shell.sidebar-collapsed { grid-template-columns: 60px minmax(0, 1fr); }
+  .sidebar { padding-left: 10px; padding-right: 10px; }
   .brand-copy, .nav-group, .nav-label > :not(.nav-icon), .nav-count, .system-card > div, .planes-tip { display: none; }
   .brand { justify-content: center; padding-left: 0; padding-right: 0; }
   .sidebar-toggle { display: none; }

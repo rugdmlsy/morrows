@@ -541,6 +541,7 @@ export default function App() {
   const [projectBusy, setProjectBusy] = useState(false);
   const [assignmentModeBusy, setAssignmentModeBusy] = useState(false);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+  const [expandedProjectId, setExpandedProjectId] = useState<string | null>(null);
   const [projectMemories, setProjectMemories] = useState<MemoryEntry[]>([]);
   const [selectedProjectMemoryId, setSelectedProjectMemoryId] = useState<string | null>(null);
   const [projectMemoryLoading, setProjectMemoryLoading] = useState(false);
@@ -1469,7 +1470,12 @@ export default function App() {
                       className={`project-group-head ${
                         selectedProjectId === group.id ? "selected" : ""
                       }`}
-                      onClick={() => group.project ? void openProject(group.project) : openUnclassified()}
+                      onClick={() => {
+                        setExpandedProjectId((current) => current === group.id ? null : group.id);
+                        if (group.project) void openProject(group.project);
+                        else openUnclassified();
+                      }}
+                      aria-expanded={expandedProjectId === group.id}
                     >
                       <div className="project-folder">⌑</div>
                       <div>
@@ -1478,28 +1484,33 @@ export default function App() {
                           {group.project?.description || (group.project ? t("activeProject") : t("unclassifiedHint"))}
                         </small>
                       </div>
-                      <span className="project-task-count">{group.tasks.length}</span>
+                      <div className="project-group-tail">
+                        <span className="project-task-count">{group.tasks.length}</span>
+                        <span className={`project-disclosure${expandedProjectId === group.id ? " expanded" : ""}`} aria-hidden="true">›</span>
+                      </div>
                     </button>
-                    <div className="project-task-items">
-                      {group.tasks.map((task) => (
-                        <button
-                          key={task.id}
-                          className={`task-row ${!selectedProjectId && selectedId === task.id ? "selected" : ""}`}
-                          onClick={() => selectTask(task.id)}
-                        >
-                          <div className="task-row-main">
-                            <strong>{task.title}</strong>
-                            <span className="task-id">{shortId(task.id)}</span>
-                          </div>
-                          <div className="task-meta">
-                            <StateBadge state={task.state} locale={locale} />
-                            {dispatchPolicies.some((policy) => policy.task_id === task.id && policy.role === "executor" && policy.enabled) && <span className="badge state-online">{t("dispatchEnabled")}</span>}
-                            <span>P{task.priority}</span>
-                          </div>
-                        </button>
-                      ))}
-                      {!group.tasks.length && <div className="project-empty">{t("noProjectTasks")}</div>}
-                    </div>
+                    {expandedProjectId === group.id && (
+                      <div className="project-task-items">
+                        {group.tasks.map((task) => (
+                          <button
+                            key={task.id}
+                            className={`task-row ${!selectedProjectId && selectedId === task.id ? "selected" : ""}`}
+                            onClick={() => selectTask(task.id)}
+                          >
+                            <div className="task-row-main">
+                              <strong>{task.title}</strong>
+                              <span className="task-id">{shortId(task.id)}</span>
+                            </div>
+                            <div className="task-meta">
+                              <StateBadge state={task.state} locale={locale} />
+                              {dispatchPolicies.some((policy) => policy.task_id === task.id && policy.role === "executor" && policy.enabled) && <span className="badge state-online">{t("dispatchEnabled")}</span>}
+                              <span>P{task.priority}</span>
+                            </div>
+                          </button>
+                        ))}
+                        {!group.tasks.length && <div className="project-empty">{t("noProjectTasks")}</div>}
+                      </div>
+                    )}
                   </section>
                 ))}
                 {!projectGroups.length && <div className="empty">{t("noTasks")}</div>}
