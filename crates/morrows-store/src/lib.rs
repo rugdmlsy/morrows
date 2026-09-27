@@ -171,6 +171,239 @@ impl Store {
         self.get_task(task_id).await
     }
 
+    pub async fn set_task_project_as_agent(
+        &self,
+        task_id: Id,
+        project_id: Option<Id>,
+        agent_id: Id,
+    ) -> Result<Task, DomainError> {
+        let now = Utc::now();
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(storage)?;
+        let task = memory::task_writer_conn(&mut tx, task_id, agent_id).await?;
+        if task.owner_actor_id != format!("agent:{agent_id}") {
+            return Err(DomainError::Conflict(
+                "only the agent that published the task may change its project".into(),
+            ));
+        }
+        if task.project_id == project_id {
+            tx.commit().await.map_err(storage)?;
+            return Ok(task);
+        }
+        let active_implementation: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM assignments WHERE task_id=? AND status='active' AND role='executor' AND phase='implementing')",
+        )
+        .bind(task_id.to_string())
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(storage)?;
+        if active_implementation {
+            return Err(DomainError::Conflict(
+                "task project cannot change while an executor is implementing it".into(),
+            ));
+        }
+        let published_project_memory: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM memory_entries WHERE task_id=? AND scope_type='project')",
+        )
+        .bind(task_id.to_string())
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(storage)?;
+        if published_project_memory {
+            return Err(DomainError::Conflict(
+                "task project cannot change after project memory has been published from the task"
+                    .into(),
+            ));
+        }
+        if let Some(project_id) = project_id {
+            let exists: bool =
+                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM projects WHERE id=?)")
+                    .bind(project_id.to_string())
+                    .fetch_one(&mut *tx)
+                    .await
+                    .map_err(storage)?;
+            if !exists {
+                return Err(DomainError::NotFound(format!("project {project_id}")));
+            }
+        }
+        sqlx::query("UPDATE tasks SET project_id=?,updated_at=? WHERE id=?")
+            .bind(project_id.map(|id| id.to_string()))
+            .bind(now.to_rfc3339())
+            .bind(task_id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?;
+
+        // Project Memory is part of mandatory executor intake. Moving the task
+        // invalidates any pre-implementation receipts/approval tied to the old
+        // project, so active executors must read/interview again.
+        sqlx::query(
+            "UPDATE assignments SET phase='context_review' WHERE task_id=? AND status='active' AND role='executor' AND phase!='implementing'",
+        )
+        .bind(task_id.to_string())
+        .execute(&mut *tx)
+        .await
+        .map_err(storage)?;
+        sqlx::query(
+            "UPDATE assignment_intakes SET project_id=NULL,project_memory_head=NULL,project_memory_next_offset=NULL,project_memory_complete=0,project_memory_read_at=NULL,context_package_id=NULL,context_revision_id=NULL,context_package_read_at=NULL,understanding='',constraints_json='{}',plan_json='[]',questions_json='[]',unresolved_questions_json='[]',interview_status='not_started',human_response=NULL,approved_by_actor_id=NULL,approved_at=NULL,updated_at=? WHERE task_id=? AND assignment_id IN (SELECT id FROM assignments WHERE task_id=? AND status='active' AND role='executor' AND phase='context_review')",
+        )
+        .bind(now.to_rfc3339())
+        .bind(task_id.to_string())
+        .bind(task_id.to_string())
+        .execute(&mut *tx)
+        .await
+        .map_err(storage)?;
+        append_event_tx(
+            &mut tx,
+            "agent_instance",
+            &agent_id.to_string(),
+            "task",
+            task_id,
+            "task.project_changed",
+            json!({"previous_project_id":task.project_id,"project_id":project_id,"reason":"publisher_reassignment"}),
+            None,
+        )
+        .await?;
+        tx.commit().await.map_err(storage)?;
+        self.get_task(task_id).await
+    }
+
+    pub async fn withdraw_task_as_agent(
+        &self,
+        task_id: Id,
+        agent_id: Id,
+        delete: bool,
+    ) -> Result<Option<Task>, DomainError> {
+        let now = Utc::now();
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(storage)?;
+        let task = memory::task_writer_conn(&mut tx, task_id, agent_id).await?;
+        if task.owner_actor_id != format!("agent:{agent_id}") {
+            return Err(DomainError::Conflict(
+                "only the agent that published the task may withdraw or delete it".into(),
+            ));
+        }
+        let active_implementation: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM assignments WHERE task_id=? AND status='active' AND role='executor' AND phase='implementing')",
+        )
+        .bind(task_id.to_string())
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(storage)?;
+        if active_implementation {
+            return Err(DomainError::Conflict(
+                "task is already being implemented; stop/cancel the active execution before withdrawing it".into(),
+            ));
+        }
+
+        if delete {
+            let assignment_count: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM assignments WHERE task_id=?")
+                    .bind(task_id.to_string())
+                    .fetch_one(&mut *tx)
+                    .await
+                    .map_err(storage)?;
+            let session_count: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM sessions WHERE task_id=?")
+                    .bind(task_id.to_string())
+                    .fetch_one(&mut *tx)
+                    .await
+                    .map_err(storage)?;
+            if assignment_count != 0
+                || session_count != 0
+                || task.current_context_revision_id.is_some()
+            {
+                return Err(DomainError::Conflict(
+                    "hard delete is only allowed for an unstarted published task with no assignment, Task Session, or context history; use withdraw instead".into(),
+                ));
+            }
+            let deleted = sqlx::query("DELETE FROM tasks WHERE id=?")
+                .bind(task_id.to_string())
+                .execute(&mut *tx)
+                .await;
+            match deleted {
+                Ok(result) if result.rows_affected() == 1 => {}
+                Ok(_) => return Err(DomainError::NotFound(format!("task {task_id}"))),
+                Err(_) => {
+                    return Err(DomainError::Conflict(
+                        "hard delete refused because the task has dependent records; use withdraw instead".into(),
+                    ));
+                }
+            }
+            sqlx::query("DELETE FROM events WHERE entity_type='task' AND entity_id=?")
+                .bind(task_id.to_string())
+                .execute(&mut *tx)
+                .await
+                .map_err(storage)?;
+            append_event_tx(
+                &mut tx,
+                "agent_instance",
+                &agent_id.to_string(),
+                "task",
+                task_id,
+                "task.deleted",
+                json!({"title":task.title,"project_id":task.project_id}),
+                None,
+            )
+            .await?;
+            tx.commit().await.map_err(storage)?;
+            return Ok(None);
+        }
+
+        if task.state == TaskState::Cancelled {
+            tx.commit().await.map_err(storage)?;
+            return Ok(Some(task));
+        }
+        if task.state == TaskState::Done {
+            return Err(DomainError::Conflict(
+                "completed tasks cannot be withdrawn".into(),
+            ));
+        }
+        sqlx::query("UPDATE runs SET status='cancelled',stop_reason='task_withdrawn',ended_at=? WHERE task_id=? AND status IN ('running','paused','interrupted','cancelling')")
+            .bind(now.to_rfc3339())
+            .bind(task_id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?;
+        sqlx::query("UPDATE assignments SET status='released',released_at=?,release_reason='task_withdrawn' WHERE task_id=? AND status='active'")
+            .bind(now.to_rfc3339())
+            .bind(task_id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?;
+        sqlx::query("UPDATE assignment_requests SET status='withdrawn',resolved_at=?,resolution='task_withdrawn' WHERE task_id=? AND status='pending'")
+            .bind(now.to_rfc3339())
+            .bind(task_id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?;
+        sqlx::query("UPDATE tasks SET state='cancelled',updated_at=? WHERE id=?")
+            .bind(now.to_rfc3339())
+            .bind(task_id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?;
+        append_event_tx(
+            &mut tx,
+            "agent_instance",
+            &agent_id.to_string(),
+            "task",
+            task_id,
+            "task.withdrawn",
+            json!({"previous_state":task.state}),
+            None,
+        )
+        .await?;
+        tx.commit().await.map_err(storage)?;
+        Ok(Some(self.get_task(task_id).await?))
+    }
+
     pub async fn set_task_assignment_mode(
         &self,
         task_id: Id,

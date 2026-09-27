@@ -334,6 +334,30 @@ pub struct WorkRequestSubmitRequest {
     pub project_id: Option<String>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TaskProjectSetRequest {
+    pub task_id: String,
+    /// Existing Project UUID. Pass null to explicitly unbind the task.
+    pub project_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TaskWithdrawRequest {
+    pub task_id: String,
+    /// Hard-delete only a pristine, unstarted task. Defaults to a durable cancelled withdrawal.
+    #[serde(default)]
+    pub delete: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ArbitraryToolCallRequest {
+    /// Live Morrows employee tool name. Use __list_tools__ to inspect the backend's current tool schemas.
+    pub tool_name: String,
+    /// Arguments for the target tool.
+    #[serde(default)]
+    pub arguments: serde_json::Map<String, Value>,
+}
+
 fn default_lease() -> i64 {
     900
 }
@@ -1172,6 +1196,85 @@ impl MorrowsMcp {
     }
 
     #[tool(
+        description = "Assign, change, or clear the Project of an existing task published by the authenticated agent. Changing Project invalidates any pre-implementation intake/interview receipts tied to the old Project. Reassignment is refused during active implementation or after project memory has been published from the task."
+    )]
+    async fn task_project_set(
+        &self,
+        Parameters(req): Parameters<TaskProjectSetRequest>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<String, String> {
+        let project_id = req.project_id.as_deref().map(parse_id).transpose()?;
+        let task = self
+            .store
+            .set_task_project_as_agent(
+                parse_id(&req.task_id)?,
+                project_id,
+                authenticated_agent(&parts)?,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        serde_json::to_string(&task).map_err(|e| e.to_string())
+    }
+
+    #[tool(
+        description = "Withdraw a task previously published by the authenticated agent. Default behavior is durable cancellation. Set delete=true only for a pristine, unstarted task; hard delete is refused once assignments, Task Sessions, context, or dependent records exist."
+    )]
+    async fn task_withdraw(
+        &self,
+        Parameters(req): Parameters<TaskWithdrawRequest>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<String, String> {
+        let task_id = parse_id(&req.task_id)?;
+        let deleted = req.delete;
+        let task = self
+            .store
+            .withdraw_task_as_agent(task_id, authenticated_agent(&parts)?, deleted)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(json!({"task_id":task_id,"deleted":deleted && task.is_none(),"task":task}).to_string())
+    }
+
+    #[tool(
+        description = "Fallback for stale MCP client tool lists. Call any currently registered Morrows employee tool by its live backend name without waiting for the client to refresh tools/list. Use tool_name=__list_tools__ with empty arguments to retrieve the backend's current tool names and schemas. The fallback cannot invoke itself."
+    )]
+    async fn arbitrary_tool_call(
+        &self,
+        Parameters(req): Parameters<ArbitraryToolCallRequest>,
+        request_context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::CallToolResponse, rmcp::ErrorData> {
+        let name = req.tool_name.trim();
+        if name.is_empty() {
+            return Err(rmcp::ErrorData::invalid_params(
+                "tool_name cannot be empty",
+                None,
+            ));
+        }
+        if name == "__list_tools__" {
+            let serialized = serde_json::to_string(&self.tool_router.list_all()).map_err(|e| {
+                rmcp::ErrorData::internal_error(
+                    format!("failed to serialize live tool list: {e}"),
+                    None,
+                )
+            })?;
+            return Ok(rmcp::model::CallToolResult::success(vec![
+                rmcp::model::ContentBlock::text(serialized),
+            ])
+            .into());
+        }
+        if name == "arbitrary_tool_call" {
+            return Err(rmcp::ErrorData::invalid_params(
+                "arbitrary_tool_call cannot invoke itself",
+                None,
+            ));
+        }
+        let request =
+            rmcp::model::CallToolRequestParams::new(name.to_string()).with_arguments(req.arguments);
+        let context =
+            rmcp::handler::server::tool::ToolCallContext::new(self, request, request_context);
+        self.tool_router.call(context).await
+    }
+
+    #[tool(
         description = "Renew an active assignment lease owned by the authenticated agent instance."
     )]
     async fn assignment_renew(
@@ -1834,6 +1937,9 @@ mod tests {
             "session_get",
             "session_reply",
             "work_request_submit",
+            "task_project_set",
+            "task_withdraw",
+            "arbitrary_tool_call",
             "task_get",
             "whoami",
             "task_list",
@@ -2850,6 +2956,127 @@ mod tests {
         )
         .unwrap();
         assert!(unbound["project_id"].is_null());
+    }
+
+    #[tokio::test]
+    async fn task_project_set_reassigns_only_the_publisher_owned_task() {
+        let store = Store::connect("sqlite::memory:").await.unwrap();
+        let owner = store.register_agent("project-owner", &[]).await.unwrap();
+        let other = store.register_agent("project-other", &[]).await.unwrap();
+        let alpha = store
+            .create_project(serde_json::from_value(json!({"name":"Alpha"})).unwrap())
+            .await
+            .unwrap();
+        let beta = store
+            .create_project(serde_json::from_value(json!({"name":"Beta"})).unwrap())
+            .await
+            .unwrap();
+        let mcp = MorrowsMcp::new(store.clone());
+        let created: Value = serde_json::from_str(
+            &mcp.work_request_submit(
+                Parameters(WorkRequestSubmitRequest {
+                    title: "Move me".into(),
+                    description: String::new(),
+                    project_id: Some(alpha.id.to_string()),
+                }),
+                Extension(parts(Some(owner.id))),
+            )
+            .await
+            .unwrap(),
+        )
+        .unwrap();
+        let task_id = created["id"].as_str().unwrap().to_string();
+
+        let moved: Value = serde_json::from_str(
+            &mcp.task_project_set(
+                Parameters(TaskProjectSetRequest {
+                    task_id: task_id.clone(),
+                    project_id: Some(beta.id.to_string()),
+                }),
+                Extension(parts(Some(owner.id))),
+            )
+            .await
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(moved["project_id"], json!(beta.id));
+
+        let error = mcp
+            .task_project_set(
+                Parameters(TaskProjectSetRequest {
+                    task_id,
+                    project_id: Some(alpha.id.to_string()),
+                }),
+                Extension(parts(Some(other.id))),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.contains("owned") || error.contains("published"));
+    }
+
+    #[tokio::test]
+    async fn task_withdraw_cancels_and_hard_deletes_pristine_published_tasks() {
+        let store = Store::connect("sqlite::memory:").await.unwrap();
+        let owner = store.register_agent("withdraw-owner", &[]).await.unwrap();
+        let mcp = MorrowsMcp::new(store.clone());
+
+        let cancel_task: Value = serde_json::from_str(
+            &mcp.work_request_submit(
+                Parameters(WorkRequestSubmitRequest {
+                    title: "Cancel me".into(),
+                    description: String::new(),
+                    project_id: None,
+                }),
+                Extension(parts(Some(owner.id))),
+            )
+            .await
+            .unwrap(),
+        )
+        .unwrap();
+        let cancel_id = cancel_task["id"].as_str().unwrap().to_string();
+        let cancelled: Value = serde_json::from_str(
+            &mcp.task_withdraw(
+                Parameters(TaskWithdrawRequest {
+                    task_id: cancel_id.clone(),
+                    delete: false,
+                }),
+                Extension(parts(Some(owner.id))),
+            )
+            .await
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(cancelled["deleted"], false);
+        assert_eq!(cancelled["task"]["state"], "cancelled");
+
+        let delete_task: Value = serde_json::from_str(
+            &mcp.work_request_submit(
+                Parameters(WorkRequestSubmitRequest {
+                    title: "Delete me".into(),
+                    description: String::new(),
+                    project_id: None,
+                }),
+                Extension(parts(Some(owner.id))),
+            )
+            .await
+            .unwrap(),
+        )
+        .unwrap();
+        let delete_id = delete_task["id"].as_str().unwrap().to_string();
+        let deleted: Value = serde_json::from_str(
+            &mcp.task_withdraw(
+                Parameters(TaskWithdrawRequest {
+                    task_id: delete_id.clone(),
+                    delete: true,
+                }),
+                Extension(parts(Some(owner.id))),
+            )
+            .await
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(deleted["deleted"], true);
+        assert!(store.get_task(parse_id(&delete_id).unwrap()).await.is_err());
     }
 
     #[tokio::test]
