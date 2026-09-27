@@ -80,6 +80,14 @@ Production is deployed to the OVH VPS by default. After committing and pushing, 
 ./scripts/deploy-vps.sh
 ```
 
+The Mac checkout is the sole production source of truth: edit, test, commit, and
+push there first. The VPS is deploy-only and may only fetch already-pushed
+commits from GitHub. The deploy script rejects non-macOS callers, local/localhost
+targets, uncommitted or unpushed source, and verifies on the VPS that the checked
+out SHA exactly matches the commit selected on the Mac. Do not edit or commit
+production source in VPS worktrees, and do not bypass GitHub with local bare or
+`file://` repositories.
+
 The script synchronizes `main` on the VPS, builds the Web UI and release server, and
 restarts `morrows.service`. Production startup also compares the exact release artifacts retained
 only by this flow (without checksum passes): the Git commit, server binary, `web/dist`, `run-vps.sh`, and installed

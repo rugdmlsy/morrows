@@ -80,6 +80,12 @@ cargo run -p morrows-server
 ./scripts/deploy-vps.sh
 ```
 
+生产源码以 Mac checkout 为唯一真源：修改、测试、commit、push 都必须先在 Mac 完成；
+VPS 只负责从 GitHub 拉取并部署已经 push 的 commit。部署脚本会拒绝在非 macOS 主机运行、
+拒绝 localhost/local 目标、拒绝未提交或未 push 的源码，并在 VPS 上再次核对实际 checkout
+必须与 Mac 发起部署时的 commit SHA 完全一致。不要在 VPS worktree 中修改或提交生产源码，
+也不要用本地 bare repo / `file://` 源绕过 GitHub。
+
 该脚本会在 VPS 上同步 `main`、构建 Web UI 和 release 后端，并通过
 `morrows.service` 重启服务。生产启动还会逐字比较该脚本保留的发布文件（不做 checksum 检查）：Git commit、
 后端二进制、`web/dist`、`run-vps.sh` 和已安装的 systemd unit 必须全部一致。

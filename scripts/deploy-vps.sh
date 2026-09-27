@@ -3,16 +3,50 @@ set -euo pipefail
 
 REMOTE="${MORROWS_VPS_HOST:-ovh-vps}"
 REMOTE_ROOT="${MORROWS_VPS_ROOT:-/srv/morrow/workspaces/morrows}"
-REPO="${MORROWS_GIT_REPO:-https://github.com/rugdmlsy/morrows.git}"
+REPO="https://github.com/rugdmlsy/morrows.git"
 BRANCH="${MORROWS_GIT_BRANCH:-main}"
 HEALTH="${MORROWS_VPS_HEALTH_URL:-http://127.0.0.1:8787/api/health}"
 
-ssh "$REMOTE" bash -s -- "$REMOTE_ROOT" "$REPO" "$BRANCH" "$HEALTH" <<'REMOTE_SCRIPT'
+if [[ "$(uname -s)" != "Darwin" ]]; then
+  echo "Morrows source/deploy orchestration must run from the Mac source checkout; the VPS is deploy-only" >&2
+  exit 1
+fi
+case "$REMOTE" in
+  local|localhost|127.0.0.1|::1)
+    echo "MORROWS_VPS_HOST must name the remote VPS; local deployment is forbidden" >&2
+    exit 1
+    ;;
+esac
+
+repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repository_root"
+test "$(git remote get-url origin)" = "$REPO" || {
+  echo "origin must be $REPO" >&2
+  exit 1
+}
+test "$(git branch --show-current)" = "$BRANCH" || {
+  echo "deploy branch must be checked out locally: $BRANCH" >&2
+  exit 1
+}
+test -z "$(git status --porcelain --untracked-files=no)" || {
+  echo "tracked source changes must be committed on the Mac before deployment" >&2
+  exit 1
+}
+git fetch --quiet origin "$BRANCH"
+expected_commit="$(git rev-parse HEAD)"
+remote_commit="$(git rev-parse "origin/$BRANCH")"
+test "$expected_commit" = "$remote_commit" || {
+  echo "Mac HEAD must be pushed to origin/$BRANCH before deployment" >&2
+  exit 1
+}
+
+ssh "$REMOTE" bash -s -- "$REMOTE_ROOT" "$REPO" "$BRANCH" "$HEALTH" "$expected_commit" <<'REMOTE_SCRIPT'
 set -euo pipefail
 root="$1"
 repo="$2"
 branch="$3"
 health="$4"
+expected_commit="$5"
 
 if [[ ! -x "$HOME/.cargo/bin/cargo" ]]; then
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs |
@@ -28,6 +62,11 @@ else
   git -C "$root" checkout "$branch"
   git -C "$root" reset --hard "origin/$branch"
 fi
+test "$(git -C "$root" remote get-url origin)" = "$repo"
+test "$(git -C "$root" rev-parse HEAD)" = "$expected_commit" || {
+  echo "VPS checkout does not match the pushed Mac commit $expected_commit" >&2
+  exit 1
+}
 
 cd "$root"
 mkdir -p data/launches data/session-runtimes
