@@ -5,6 +5,8 @@ use axum::{
     middleware::Next,
 };
 
+const LSM_OAUTH_CONTROL_HEADER: &str = "x-morrows-lsm-oauth-control";
+
 #[derive(Clone)]
 pub struct OperatorAuthState {
     store: Store,
@@ -58,6 +60,46 @@ pub async fn authenticate_operator_requests(
     }
 
     let required = required_control_role(&method, &path);
+    let lsm_oauth_verified = request
+        .headers()
+        .get(crate::auth::LSM_OAUTH_VERIFIED_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value == "1");
+    let lsm_oauth_control = request
+        .headers()
+        .get(LSM_OAUTH_CONTROL_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value == "1");
+    let lsm_client_id = request
+        .headers()
+        .get(crate::auth::LSM_OAUTH_CLIENT_ID_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let lsm_client_name = request
+        .headers()
+        .get(crate::auth::LSM_OAUTH_CLIENT_NAME_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    request.headers_mut().remove(LSM_OAUTH_CONTROL_HEADER);
+
+    if lsm_oauth_verified && lsm_oauth_control {
+        let Some(client_id) = lsm_client_id else {
+            return unauthorized("LSM OAuth control bridge is missing validated client identity");
+        };
+        request.extensions_mut().insert(OperatorIdentity(json!({
+            "authenticated": true,
+            "role": "admin",
+            "label": lsm_client_name.as_deref().unwrap_or("LSM OAuth"),
+            "expires_at": null,
+            "auth_source": "lsm_oauth",
+            "oauth_client_id": client_id,
+        })));
+        return next.run(request).await;
+    }
     let authorization = request
         .headers()
         .get(AUTHORIZATION)
@@ -275,6 +317,70 @@ mod tests {
             builder = builder.header(AUTHORIZATION, format!("Bearer {token}"));
         }
         builder.body(Body::empty()).unwrap()
+    }
+
+    fn lsm_control_request(
+        method: Method,
+        path: &str,
+        verified: bool,
+        control: bool,
+    ) -> Request<Body> {
+        let mut builder = Request::builder().method(method).uri(path);
+        if verified {
+            builder = builder
+                .header(crate::auth::LSM_OAUTH_VERIFIED_HEADER, "1")
+                .header(crate::auth::LSM_OAUTH_CLIENT_ID_HEADER, "browser-client")
+                .header(crate::auth::LSM_OAUTH_CLIENT_NAME_HEADER, "Morrows WebUI");
+        }
+        if control {
+            builder = builder.header(LSM_OAUTH_CONTROL_HEADER, "1");
+        }
+        builder.body(Body::empty()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn validated_lsm_oauth_control_assertion_is_admin_without_operator_bearer() {
+        let store = Store::connect("sqlite::memory:").await.unwrap();
+        let app = app(store, true, None).await;
+
+        assert_eq!(
+            app.clone()
+                .oneshot(lsm_control_request(
+                    Method::POST,
+                    "/api/agent-profiles",
+                    true,
+                    true,
+                ))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            app.clone()
+                .oneshot(lsm_control_request(
+                    Method::GET,
+                    "/api/tasks",
+                    true,
+                    false,
+                ))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            app.oneshot(lsm_control_request(
+                Method::GET,
+                "/api/tasks",
+                false,
+                true,
+            ))
+            .await
+            .unwrap()
+            .status(),
+            StatusCode::UNAUTHORIZED
+        );
     }
 
     #[tokio::test]

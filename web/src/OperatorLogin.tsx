@@ -1,11 +1,89 @@
 import { useEffect, useState } from "react";
-import { api, ApiError, getOperatorToken, setOperatorToken } from "./api";
+import {
+  api,
+  ApiError,
+  getLsmOAuthToken,
+  getOperatorToken,
+  isHostedUnderMorrows,
+  setLsmOAuthToken,
+  setOperatorToken,
+} from "./api";
 import type { Locale } from "./i18n";
+import { completeLsmOAuthCallback, startLsmOAuth } from "./lsmOAuth";
 
 type Identity = { authenticated: boolean; role: string; label?: string; expires_at?: string };
 type LoginRequest = { id: string; code: string; token: string; expires_at: string };
 
-export default function OperatorLogin({ locale, onLogin }: { locale: Locale; onLogin: () => void }) {
+export default function OperatorLogin(props: { locale: Locale; onLogin: () => void }) {
+  return isHostedUnderMorrows() ? <LsmOAuthLogin {...props} /> : <LegacyOperatorLogin {...props} />;
+}
+
+function LsmOAuthLogin({ locale, onLogin }: { locale: Locale; onLogin: () => void }) {
+  const zh = locale === "zh-CN";
+  const [identity, setIdentity] = useState<Identity | null>(null);
+  const [required, setRequired] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let stopped = false;
+    const verify = () => {
+      void api<Identity>("/api/operator-session").then(value => {
+        if (stopped) return;
+        setIdentity(value); setRequired(false); setError(""); onLogin();
+      }).catch((e: unknown) => {
+        if (stopped) return;
+        setIdentity(null);
+        if (e instanceof ApiError && (e.status === 401 || e.status === 403)) setRequired(true);
+        else setError(e instanceof Error ? e.message : String(e));
+      });
+    };
+    const unauthorized = () => { setIdentity(null); setRequired(true); };
+    const boot = async () => {
+      try { await completeLsmOAuthCallback(); }
+      catch (e) { if (!stopped) setError(e instanceof Error ? e.message : String(e)); }
+      if (!stopped) verify();
+    };
+    window.addEventListener("morrows-operator-token-changed", verify);
+    window.addEventListener("morrows-operator-auth-required", unauthorized);
+    void boot();
+    return () => {
+      stopped = true;
+      window.removeEventListener("morrows-operator-token-changed", verify);
+      window.removeEventListener("morrows-operator-auth-required", unauthorized);
+    };
+  }, []);
+
+  const signIn = async () => {
+    setBusy(true); setError(""); setLsmOAuthToken("");
+    try { await startLsmOAuth(); }
+    catch (e) { setError(e instanceof Error ? e.message : String(e)); setBusy(false); }
+  };
+
+  return <div className="operator-oauth-login">
+    <button
+      type="button"
+      className={`auth-button ${identity ? "auth-configured" : ""}`}
+      disabled={busy || (!required && !error && !identity)}
+      onClick={() => { if (!identity) void signIn(); }}
+    >
+      <span className="auth-dot" />
+      {identity
+        ? `${zh ? "LSM OAuth 已登录" : "LSM OAuth signed in"} · ${identity.role}`
+        : busy
+          ? (zh ? "跳转中" : "Redirecting")
+          : required || error
+            ? (zh ? "使用 LSM OAuth 登录" : "Sign in with LSM OAuth")
+            : (zh ? "检查 LSM OAuth" : "Checking LSM OAuth")}
+    </button>
+    {(required || error) && <div className="operator-signin-hint">
+      <span>{error || (zh ? "Morrows 控制台只使用 LSM OAuth，不再需要 Operator token。" : "Morrows uses LSM OAuth only; no Operator token is required.")}</span>
+      {!!getLsmOAuthToken() && <button type="button" onClick={() => { setLsmOAuthToken(""); setIdentity(null); setRequired(true); onLogin(); }}>{zh ? "清除本标签页 OAuth" : "Clear tab OAuth"}</button>}
+    </div>}
+  </div>;
+}
+
+function LegacyOperatorLogin({ locale, onLogin }: { locale: Locale; onLogin: () => void }) {
   const zh = locale === "zh-CN";
   const [identity, setIdentity] = useState<Identity | null>(null);
   const [required, setRequired] = useState(false);

@@ -49,7 +49,7 @@ Human / Web UI / automation
 - Session WebUI cache: history is fetched only after selection, then incrementally refreshed for the open Session
 - Employee Session inbox/read/reply MCP tools backed by a durable Agent delivery outbox
 - Issued/revocable Agent Bearer credentials; runtime credentials are short-lived and Run-bound, bridge credentials are explicitly issued by the local control plane
-- Issued/revocable control-plane Operator credentials with `viewer` / `operator` / `admin` RBAC; WebUI can persist an Operator token locally
+- Issued/revocable control-plane Operator credentials with `viewer` / `operator` / `admin` RBAC for loopback/CLI compatibility; the public WebUI uses LSM OAuth
 - External handoff adapters for LSM, Antigravity, and Gemini with owned accept/status
 - Startup recovery for interrupted local launch jobs
 - Optional LSM Run integration: one durable Logical Session per Run, scoped Codex MCP access, separate control API, execution evidence, explicit restart and bounded cleanup
@@ -105,7 +105,7 @@ The same instance exposes the WebUI at:
 https://mcp.xycdev.com/morrows/ui/
 ```
 
-Public control-plane API calls require an Operator Bearer credential; the WebUI top bar can persist that token.
+The public WebUI and control-plane API reuse LSM OAuth; the browser no longer stores a second `mrw_operator_*` token.
 
 Local Shell MCP on the VPS moves to `127.0.0.1:8766`. A loopback router owns
 `127.0.0.1:8765`: the public `/morrows` MCP first enters Local Shell MCP and reuses
@@ -116,8 +116,9 @@ Morrows identity headers, then forwards only validated OAuth client provenance
 `127.0.0.1:8787/mcp`. Morrows resolves a stable technical AgentInstance per
 validated `client_id`. Human-readable agent name, account email, platform, and
 device are queried and self-reported by the Agent with `agent_identity_report`;
-they never participate in authorization. WebUI/control-plane paths still go
-directly to Morrows. The existing `https://mcp.xycdev.com/mcp` endpoint is
+they never participate in authorization. Static WebUI assets still go directly
+to Morrows; `/morrows/api/*` first passes through the LSM OAuth bridge, which
+injects a trusted control-plane assertion over loopback. The existing `https://mcp.xycdev.com/mcp` endpoint is
 unchanged. This shared Caddy edge is owned by `deploy/morrow/deploy-vps.sh` in the
 `local-shell-mcp` repository; Morrows does not maintain a second router copy.
 
@@ -218,7 +219,7 @@ Credential management endpoints are:
 - `GET/POST /api/operator-credentials`
 - `POST /api/operator-credentials/{id}/revoke`
 
-Only hashes are stored in SQLite and list responses never return token/hash material. The WebUI top bar can store one Operator token in browser local storage and attaches it to `/api/*` control-plane requests.
+Only hashes are stored in SQLite and list responses never return token/hash material. `mrw_operator_*` remains available for loopback/CLI administration and compatibility, while the public WebUI uses the LSM OAuth PKCE flow and keeps its OAuth token only in the current tab's `sessionStorage`.
 
 Employee MCP tools currently cover:
 

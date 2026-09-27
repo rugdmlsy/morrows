@@ -1413,4 +1413,5 @@ h3 { margin: 20px 0 8px; color: var(--ink-3); font: 700 calc(8px * var(--font-sc
 .operator-dialog details input { width: 100%; margin: 12px 0; }
 .operator-dialog-actions { display: flex; justify-content: flex-end; gap: 12px; }
 .operator-pairing { display: grid; gap: 10px; }
+.operator-oauth-login { display: grid; gap: 4px; justify-items: end; }
 .operator-signin-hint { max-width: 260px; font-size: 12px; text-align: left; }

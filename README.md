@@ -49,7 +49,7 @@ Morrows 是一个本地优先、Agent 原生的工作协作系统，用于协调
 - Session WebUI 缓存：只有选中 Session 后才拉取历史，并仅对当前 Session 增量刷新
 - 基于持久化 Agent delivery outbox 的员工 Session inbox/read/reply MCP 工具
 - 可签发/撤销的 Agent Bearer credential；runtime credential 短期且绑定 Run，bridge credential 由本地控制面显式签发
-- 可签发/撤销的控制平面 Operator credential，支持 `viewer` / `operator` / `admin` RBAC；WebUI 可在本地保存 Operator token
+- 可签发/撤销的控制平面 Operator credential，支持 `viewer` / `operator` / `admin` RBAC，供 loopback/CLI 管理兼容使用；公网 WebUI 使用 LSM OAuth
 - LSM、Antigravity、Gemini 等 external handoff adapter，以及受所有权约束的 accept/status
 - 本地 launch job 中断后的启动恢复
 - 可选 LSM Run 集成：每个 Run 一个持久 Logical Session、作用域化 Codex MCP 权限、独立 control API、执行证据、显式 restart 与有界 cleanup
@@ -103,7 +103,8 @@ WebUI 同一实例暴露在：
 https://mcp.xycdev.com/morrows/ui/
 ```
 
-控制平面 API 在公网模式强制 Operator Bearer 认证；WebUI 顶栏可保存对应 token。
+公网 WebUI / 控制平面 API 复用 LSM OAuth，不再要求浏览器保存第二套
+`mrw_operator_*` token。
 
 VPS 上的 Local Shell MCP 已移到 `127.0.0.1:8766`。本地路由层占用
 `127.0.0.1:8765`：公网 `/morrows` MCP 先进入 Local Shell MCP，复用与
@@ -112,7 +113,8 @@ OAuth token 和调用方伪造的 Morrows 身份头，并只通过 loopback 注�
 OAuth `client_id`（以及可选 `client_name`）作为可信 provenance。Morrows
 按该 `client_id` 自动解析/创建一个稳定的技术 AgentInstance；名称、账号邮箱、
 平台和设备由 Agent 使用 `agent_identity_report` 自行查询并上报，绝不用于授权。
-WebUI / control-plane 路径仍直接进入 Morrows。
+WebUI 静态资源仍直接进入 Morrows；`/morrows/api/*` 控制面请求先经 LSM OAuth
+验证，再由 LSM 通过 loopback 注入可信控制面断言后进入 Morrows。
 原有 `https://mcp.xycdev.com/mcp` 保持不变。这个共享 Caddy 入口由
 `local-shell-mcp` 仓库的 `deploy/morrow/deploy-vps.sh` 统一管理；Morrows
 不再维护第二份路由配置。
@@ -212,7 +214,9 @@ Credential 管理 endpoint：
 - `GET/POST /api/operator-credentials`
 - `POST /api/operator-credentials/{id}/revoke`
 
-SQLite 中只保存 hash，列表响应不会返回 token/hash 原文。WebUI 顶栏可在浏览器 local storage 中保存一个 Operator token，并自动附加到 `/api/*` 控制平面请求。
+SQLite 中只保存 hash，列表响应不会返回 token/hash 原文。`mrw_operator_*` 仍用于
+loopback/CLI 管理与兼容场景；公网 WebUI 不再保存或发送它，而是使用 LSM OAuth
+PKCE，并把 OAuth token 仅保存在当前标签页的 `sessionStorage` 中。
 
 当前员工 MCP 工具包括：
 
@@ -297,21 +301,11 @@ Agent A 创建 typed artifact、decision、directed message 和 pending handoff�
 
 整个过程中，A 与 B 之间没有共享任何 Codex Session/chat history。
 
-### 没有旧 token 时登录控制台
+### WebUI 登录
 
-点击 WebUI 顶栏「登录控制台」→「通过 SSH 批准登录」。浏览器显示一个 10 分钟有效的
-登录码。使用已有的服务器 SSH 访问权限，在 Morrows 服务目录执行：
+公网 `https://mcp.xycdev.com/morrows/ui/` 只使用 LSM OAuth。若当前标签页已经通过 LSM
+WebUI OAuth，Morrows 会直接复用 `lsm.ui.access_token`；否则顶栏会发起同一套 LSM OAuth
+PKCE 授权流程。Morrows 不再要求浏览器粘贴、保存或申请 `mrw_operator_*`。
 
-```sh
-morrows operator-approve --database data/morrows.db --code 页面显示的登录码
-```
-
-必须核对自己页面上的代码，不要批准陌生人发来的代码。命令默认授予 `operator`，有效期
-24 小时；可显式指定 `--role viewer|operator|admin` 和 `--ttl-seconds`。这是真正的本地
-管理操作，要求服务数据库的文件访问权限，没有公开的 HTTP 批准接口。重试同一个代码
-不会扩权、续期或重复签发。批准后原浏览器自动登录，命令和 URL 都不包含 token。
-
-登录请求本身不授予权限。数据库仅保存凭据摘要；批准只把浏览器持有秘密对应的摘要
-登记为凭据。已撤销/到期凭据仍被拒绝，Agent 凭据不能充当 Operator。原有粘贴 token
-登录保留，保存前会验证角色和有效性。默认仅在此标签页保存；勾选「记住登录」才存入
-浏览器持久存储。界面显示实际认证结果、角色和到期时间，不再把任意非空字符串视为登录。
+原有 `morrows operator-approve` 和 `mrw_operator_*` 仍保留给 loopback/CLI 管理与兼容
+场景，不作为公网 WebUI 的认证路径。
