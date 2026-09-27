@@ -52,14 +52,12 @@ impl Store {
         .await
         .map_err(storage)?;
         if input.enabled {
-            sqlx::query(
-                "UPDATE tasks SET assignment_mode='dispatch',updated_at=? WHERE id=?",
-            )
-            .bind(now.to_rfc3339())
-            .bind(task_id.to_string())
-            .execute(&mut *tx)
-            .await
-            .map_err(storage)?;
+            sqlx::query("UPDATE tasks SET assignment_mode='dispatch',updated_at=? WHERE id=?")
+                .bind(now.to_rfc3339())
+                .bind(task_id.to_string())
+                .execute(&mut *tx)
+                .await
+                .map_err(storage)?;
         }
         append_event_tx(
             &mut tx,
@@ -803,13 +801,14 @@ async fn insert_dispatch_assignment_tx(
     let id = Uuid::new_v4();
     let expires = now + Duration::seconds(lease_seconds.max(30));
     let result = sqlx::query(
-        "INSERT INTO assignments(id,task_id,role,agent_instance_id,status,acquired_at,expires_at,renewed_at)
-         SELECT ?,id,?,?,'active',?,?,? FROM tasks
+        "INSERT INTO assignments(id,task_id,role,agent_instance_id,status,phase,acquired_at,expires_at,renewed_at)
+         SELECT ?,id,?,?,'active',?, ?,?,? FROM tasks
          WHERE id=? AND assignment_mode='dispatch' AND state IN ('ready','in_progress')",
     )
     .bind(id.to_string())
     .bind(role)
     .bind(agent_id.to_string())
+    .bind(if role == "executor" { morrows_core::INTAKE_PHASE_CONTEXT_REVIEW } else { morrows_core::INTAKE_PHASE_IMPLEMENTING })
     .bind(now.to_rfc3339())
     .bind(expires.to_rfc3339())
     .bind(now.to_rfc3339())
@@ -825,6 +824,9 @@ async fn insert_dispatch_assignment_tx(
             ));
         }
         Err(e) => return Err(storage(e)),
+    }
+    if role == "executor" {
+        crate::intake::create_assignment_intake_tx(tx, id, task_id, agent_id).await?;
     }
     sqlx::query(
         "UPDATE tasks SET state=CASE WHEN state='ready' THEN 'in_progress' ELSE state END,updated_at=? WHERE id=?",
@@ -851,6 +853,11 @@ async fn insert_dispatch_assignment_tx(
         role: role.into(),
         agent_instance_id: agent_id,
         status: "active".into(),
+        phase: if role == "executor" {
+            morrows_core::INTAKE_PHASE_CONTEXT_REVIEW.into()
+        } else {
+            morrows_core::INTAKE_PHASE_IMPLEMENTING.into()
+        },
         acquired_at: now,
         expires_at: expires,
         renewed_at: now,

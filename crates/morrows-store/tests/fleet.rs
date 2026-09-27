@@ -474,6 +474,14 @@ async fn migration_preserves_m21_uuids_and_references_and_capacity_is_append_onl
                 .map(|row| format!("{row}|assignment_mode:Some(\"open\")"))
                 .collect();
         }
+        if table == "assignments" {
+            // Migration 0031 appends the intake phase. Existing assignments are
+            // already executing work, so they deterministically remain implementing.
+            expected = expected
+                .into_iter()
+                .map(|row| format!("{row}|phase:Some(\"implementing\")"))
+                .collect();
+        }
         if table == "handoffs" {
             // Migration 0028 only appends the nullable milestone_id link to
             // legacy handoffs; every preexisting value must remain byte-for-byte

@@ -409,6 +409,9 @@ impl Store {
                 "launch attempt agent mismatch".into(),
             ));
         }
+        if assignment.role == "executor" && assignment.phase == morrows_core::INTAKE_PHASE_READY {
+            crate::intake::enforce_execution_phase_tx(self, &mut tx, &assignment).await?;
+        }
         let profile = row_to_launch_profile(
             sqlx::query("SELECT * FROM launch_profiles WHERE id=?")
                 .bind(attempt.launch_profile_id.to_string())

@@ -4,6 +4,7 @@ mod collaboration;
 mod delivery;
 mod dispatch;
 mod fleet;
+mod intake;
 mod launch;
 mod lsm;
 mod mcp;
@@ -245,6 +246,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(dispatch::routes())
         .merge(delivery::routes())
         .merge(fleet::routes())
+        .merge(intake::routes())
         .merge(launch::routes())
         .with_state(state);
 
