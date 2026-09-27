@@ -30,6 +30,7 @@ impl Store {
                 "threads",
                 "messages",
                 "dependencies",
+                "relationships",
             ]
             .contains(&s)
         }) {
@@ -76,6 +77,12 @@ impl Store {
             result.insert("dependencies".into(), self.task_records_page(
                 "SELECT * FROM task_dependencies WHERE task_id=? ORDER BY created_at DESC,depends_on_task_id DESC LIMIT ? OFFSET ?",
                 task_id, limit, offset, row_to_dependency).await?);
+        }
+        if section.is_none() || section == Some("relationships") {
+            result.insert(
+                "relationships".into(),
+                self.task_relationships_page(task_id, limit, offset).await?,
+            );
         }
         Ok(Value::Object(result))
     }
@@ -783,6 +790,7 @@ impl Store {
             threads,
             messages,
             dependencies: self.task_dependencies(task_id).await?,
+            relationships: self.task_relationships(task_id).await?,
         })
     }
 }

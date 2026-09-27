@@ -18,6 +18,7 @@ mod git_memory;
 mod identity;
 mod milestone;
 mod runtime;
+mod task_rework;
 
 enum ContextRevisionWrite {
     Replace(CreateContextRevision),

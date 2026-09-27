@@ -100,6 +100,14 @@ type Collaboration = {
     status: string;
   }[];
   dependencies: { depends_on_task_id: string }[];
+  relationships: {
+    source_task_id: string;
+    target_task_id: string;
+    relation_type: string;
+    created_by_actor_id: string;
+    metadata: Record<string, unknown>;
+    created_at: string;
+  }[];
 };
 
 type Agent = {
@@ -611,6 +619,7 @@ export default function App() {
   const [showProjectCreate, setShowProjectCreate] = useState(false);
   const [projectBusy, setProjectBusy] = useState(false);
   const [assignmentModeBusy, setAssignmentModeBusy] = useState(false);
+  const [taskMutationBusy, setTaskMutationBusy] = useState(false);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [expandedProjectId, setExpandedProjectId] = useState<string | null>(null);
   const [projectMemories, setProjectMemories] = useState<MemoryEntry[]>([]);
@@ -1307,6 +1316,49 @@ export default function App() {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setAssignmentModeBusy(false);
+    }
+  }
+
+  async function createSelectedTaskRework() {
+    if (!selectedTask || selectedTask.state !== "done") return;
+    const reason = window.prompt(t("reworkReasonPrompt"));
+    if (!reason?.trim()) return;
+    setTaskMutationBusy(true);
+    try {
+      const created = await api<{ task: Task }>(`/api/tasks/${selectedTask.id}/rework`, {
+        method: "POST",
+        body: JSON.stringify({
+          reason: reason.trim(),
+          title: locale === "zh-CN" ? `返工：${selectedTask.title}` : `Rework: ${selectedTask.title}`,
+        }),
+      });
+      await refreshQueueBase();
+      selectTask(created.task.id);
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setTaskMutationBusy(false);
+    }
+  }
+
+  async function reopenSelectedTask() {
+    if (!selectedTask || selectedTask.state !== "done") return;
+    const reason = window.prompt(t("reopenReasonPrompt"));
+    if (!reason?.trim()) return;
+    setTaskMutationBusy(true);
+    try {
+      const next = await api<Task>(`/api/tasks/${selectedTask.id}/reopen`, {
+        method: "POST",
+        body: JSON.stringify({ reason: reason.trim() }),
+      });
+      setTasks((current) => current.map((task) => task.id === next.id ? next : task));
+      await Promise.all([refreshQueueBase(), refreshDetail()]);
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setTaskMutationBusy(false);
     }
   }
 
@@ -2068,6 +2120,22 @@ export default function App() {
                         <code>{selectedTask.id}</code>
                       </div>
                     </div>
+                    {selectedTask.state === "done" && (
+                      <div className="task-completion-actions">
+                        <div>
+                          <strong>{t("completedTaskActions")}</strong>
+                          <small>{t("completedTaskActionsHint")}</small>
+                        </div>
+                        <div className="task-completion-action-buttons">
+                          <button onClick={() => void createSelectedTaskRework()} disabled={taskMutationBusy}>
+                            {t("createRework")}
+                          </button>
+                          <button className="secondary" onClick={() => void reopenSelectedTask()} disabled={taskMutationBusy}>
+                            {t("reopenTask")}
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </section>
 
                   <div className="detail-columns">
@@ -2446,6 +2514,28 @@ export default function App() {
                           </button>
                         </div>)}
                         {!collaboration.dependencies.length && <div className="empty compact">{t("noPrerequisites")}</div>}
+                        <h3 className="detail-section-title tone-violet">{t("taskRelationships")}</h3>
+                        {collaboration.relationships.map((relationship) => {
+                          const outgoing = relationship.source_task_id === selectedTask.id;
+                          const relatedTaskId = outgoing ? relationship.target_task_id : relationship.source_task_id;
+                          const round = relationship.metadata.rework_round;
+                          const reason = relationship.metadata.reason;
+                          return <div className="context-card" key={`${relationship.source_task_id}:${relationship.target_task_id}:${relationship.relation_type}`}>
+                            <div className="mini-card-row">
+                              <strong>
+                                {relationship.relation_type === "rework_of"
+                                  ? (outgoing ? t("reworkOf") : t("reworkTask"))
+                                  : relationship.relation_type}
+                              </strong>
+                              {typeof round === "number" && <span className="badge">#{round}</span>}
+                            </div>
+                            <button onClick={() => selectTask(relatedTaskId)}>
+                              {tasks.find((task) => task.id === relatedTaskId)?.title || shortId(relatedTaskId)}
+                            </button>
+                            {typeof reason === "string" && <p>{reason}</p>}
+                          </div>;
+                        })}
+                        {!collaboration.relationships.length && <div className="empty compact">{t("noTaskRelationships")}</div>}
                       </>}
                       <h3 className="detail-section-title tone-blue">{t("eventTimeline")}</h3>
                       <div className="timeline">

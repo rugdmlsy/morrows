@@ -733,6 +733,39 @@ button.project-group-head:disabled { cursor: default; opacity: 1; }
 .metadata-project { grid-column: span 2; }
 .metadata-id { grid-column: 1 / -1; }
 .metadata-id code { font-size: calc(8px * var(--font-scale)); }
+.task-completion-actions {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line-soft);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+.task-completion-actions > div:first-child {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+.task-completion-actions strong {
+  color: var(--ink-2);
+  font-size: calc(9px * var(--font-scale));
+}
+.task-completion-actions small {
+  color: var(--muted);
+  font-size: calc(8px * var(--font-scale));
+  line-height: 1.5;
+}
+.task-completion-action-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.task-completion-action-buttons button {
+  padding: 7px 10px;
+  font-size: calc(8px * var(--font-scale));
+}
 .project-metadata-grid .metadata-id { grid-column: span 3; }
 
 .unclassified-task-grid {

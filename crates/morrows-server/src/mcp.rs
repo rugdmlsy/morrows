@@ -95,7 +95,13 @@ impl MorrowsMcp {
             .await
             .map_err(|e| e.to_string())?;
         let mut collaboration = serde_json::Map::new();
-        for section in ["handoffs", "decisions", "artifacts", "dependencies"] {
+        for section in [
+            "handoffs",
+            "decisions",
+            "artifacts",
+            "dependencies",
+            "relationships",
+        ] {
             let page = self
                 .store
                 .task_collaboration_page(task_id, Some(section), 5, 0)
@@ -300,7 +306,7 @@ pub struct MemoryRequest {
 #[derive(Debug, Default, Deserialize, JsonSchema)]
 pub struct CollaborationRequest {
     pub task_id: String,
-    /// handoffs, artifacts, decisions, threads, messages, or dependencies; omitted returns all sections.
+    /// handoffs, artifacts, decisions, threads, messages, dependencies, or relationships; omitted returns all sections.
     pub section: Option<String>,
     #[serde(flatten)]
     pub page: PageRequest,
@@ -332,6 +338,18 @@ pub struct WorkRequestSubmitRequest {
     pub description: String,
     /// Optional existing Project UUID. Omit to create an explicitly unbound work request.
     pub project_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TaskReworkCreateRequest {
+    /// Completed source task. The source remains done.
+    pub task_id: String,
+    /// Why the completed work needs another execution round.
+    pub reason: String,
+    /// Optional title. Defaults to "Rework: <source title>".
+    pub title: Option<String>,
+    /// Optional description. Defaults to a short rework reason/source reference.
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1196,6 +1214,34 @@ impl MorrowsMcp {
     }
 
     #[tool(
+        description = "Create a new first-class rework task for a completed task you own, were assigned to, or can write through an open Task Session. The source task remains done. The new task inherits the source Project, assignment mode and priority (including the dispatch policy when dispatch-managed), records a rework_of relationship/rework round, and its ContextPackage will include the source completion Run/result, latest milestone, artifacts and decisions. Use this for genuine rework; mistaken completion reversal is an operator-only reopen action."
+    )]
+    async fn task_rework_create(
+        &self,
+        Parameters(req): Parameters<TaskReworkCreateRequest>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<String, String> {
+        let agent_id = authenticated_agent(&parts)?;
+        self.store
+            .ensure_task_write_access(parse_id(&req.task_id)?, agent_id)
+            .await
+            .map_err(|e| e.to_string())?;
+        let (task, relationship) = self
+            .store
+            .create_rework_task(
+                parse_id(&req.task_id)?,
+                format!("agent:{agent_id}"),
+                format!("agent:{agent_id}"),
+                req.title,
+                req.description,
+                req.reason,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(json!({"task":task,"relationship":relationship}).to_string())
+    }
+
+    #[tool(
         description = "Assign, change, or clear the Project of an existing task published by the authenticated agent. Changing Project invalidates any pre-implementation intake/interview receipts tied to the old Project. Reassignment is refused during active implementation or after project memory has been published from the task."
     )]
     async fn task_project_set(
@@ -1937,6 +1983,7 @@ mod tests {
             "session_get",
             "session_reply",
             "work_request_submit",
+            "task_rework_create",
             "task_project_set",
             "task_withdraw",
             "arbitrary_tool_call",
@@ -2883,6 +2930,60 @@ mod tests {
             .unwrap();
         assert_eq!(events[0].actor_type, "agent_instance");
         assert_eq!(events[0].actor_id, employee.id.to_string());
+    }
+
+    #[tokio::test]
+    async fn task_rework_create_requires_existing_task_write_access() {
+        let store = Store::connect("sqlite::memory:").await.unwrap();
+        let owner = store.register_agent("rework-owner", &[]).await.unwrap();
+        let other = store.register_agent("rework-other", &[]).await.unwrap();
+        let source = store
+            .create_task(CreateTask {
+                project_id: None,
+                title: "Completed source".into(),
+                description: String::new(),
+                owner_actor_id: format!("agent:{}", owner.id),
+                state: TaskState::Done,
+                priority: 2,
+            })
+            .await
+            .unwrap();
+        let mcp = MorrowsMcp::new(store.clone());
+
+        let denied = mcp
+            .task_rework_create(
+                Parameters(TaskReworkCreateRequest {
+                    task_id: source.id.to_string(),
+                    reason: "Needs correction".into(),
+                    title: None,
+                    description: None,
+                }),
+                Extension(parts(Some(other.id))),
+            )
+            .await
+            .unwrap_err();
+        assert!(denied.contains("not owned by, assigned to, or shared"));
+
+        let created: Value = serde_json::from_str(
+            &mcp.task_rework_create(
+                Parameters(TaskReworkCreateRequest {
+                    task_id: source.id.to_string(),
+                    reason: "Needs correction".into(),
+                    title: None,
+                    description: None,
+                }),
+                Extension(parts(Some(owner.id))),
+            )
+            .await
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(created["relationship"]["target_task_id"], json!(source.id));
+        assert_eq!(created["relationship"]["relation_type"], "rework_of");
+        assert_eq!(
+            store.get_task(source.id).await.unwrap().state,
+            TaskState::Done
+        );
     }
 
     #[tokio::test]
