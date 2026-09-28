@@ -204,7 +204,7 @@ Current summary: {}",
             "missing_context": missing, "persisted_package": package_ref, "execution": execution,
             "acceptance_criteria_paths": acceptance_paths,
             "assignment_requests": requests,
-            "workflow": {"claim_open_task":"task_claim", "request_approval":"task_request_assignment", "request_status":"assignment_request_list", "mandatory_executor_intake":["task_intake_until_project_memory_complete","task_interview_submit","human_operator_approval","task_begin_execution"], "intake_read":"task_intake", "interview_submit":"task_interview_submit", "execution_start":"task_begin_execution", "implementation_authorized_only_when_assignment_phase":"implementing", "persist_milestone":"run_milestone", "handoff_requires_latest_milestone":true, "publish_project_knowledge":"project_memory_publish", "completion_preflight":"run_completion_check", "structured_completion_required_for_executor":context.as_ref().is_some_and(|c| !morrows_core::completion_criteria(&c.constraints).is_empty()), "project_memory_disposition_required_for_executor":task.project_id.is_some()},
+            "workflow": {"claim_open_task":"task_claim", "request_approval":"task_request_assignment", "request_status":"assignment_request_list", "recover_expired_assignment":"assignment_recover", "mandatory_executor_intake":["task_intake_until_project_memory_complete","task_interview_submit","human_operator_approval","task_begin_execution"], "intake_read":"task_intake", "interview_submit":"task_interview_submit", "execution_start":"task_begin_execution", "implementation_authorized_only_when_assignment_phase":"implementing", "persist_milestone":"run_milestone", "handoff_requires_latest_milestone":true, "publish_project_knowledge":"project_memory_publish", "completion_preflight":"run_completion_check", "structured_completion_required_for_executor":context.as_ref().is_some_and(|c| !morrows_core::completion_criteria(&c.constraints).is_empty()), "project_memory_disposition_required_for_executor":task.project_id.is_some()},
             "read_more": {"memory": "memory_get", "memory_search": "memory_search", "instructions": "instructions_get", "collaboration": "task_collaboration", "events": "task_events", "execution": "task_get"},
         }).to_string())
     }
@@ -385,6 +385,16 @@ pub struct RenewAssignmentRequest {
     pub assignment_id: String,
     #[serde(default = "default_lease")]
     pub lease_seconds: i64,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RecoverAssignmentRequest {
+    pub assignment_id: String,
+    pub run_id: String,
+    #[serde(default = "default_lease")]
+    pub lease_seconds: i64,
+    /// Human-readable reason recorded in the immutable task audit event.
+    pub reason: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1338,6 +1348,28 @@ impl MorrowsMcp {
     }
 
     #[tool(
+        description = "Atomically recover the authenticated agent's own expired executor Assignment and its existing non-terminal Run without creating a new Run. Requires the original assignment_id and run_id plus an audit reason. The Task must still be in_progress, the Run must still be running or paused, the lease must actually be expired, and no other active executor Assignment may exist. Concurrent recovery has one winner; use assignment_renew instead when the lease is still live."
+    )]
+    async fn assignment_recover(
+        &self,
+        Parameters(req): Parameters<RecoverAssignmentRequest>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<String, String> {
+        let recovered = self
+            .store
+            .recover_assignment(
+                parse_id(&req.assignment_id)?,
+                parse_id(&req.run_id)?,
+                authenticated_agent(&parts)?,
+                req.lease_seconds,
+                &req.reason,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        serde_json::to_string(&recovered).map_err(|e| e.to_string())
+    }
+
+    #[tool(
         description = "Persist an immutable Run milestone and atomically refresh the Run's latest checkpoint. Use after a substantive subgoal, before a long/risky operation, when provider/token budget is under pressure, and immediately before handoff. Include exact next_step, ordered next_plan, execution_locations, and relevant same-task evidence IDs."
     )]
     async fn run_milestone(
@@ -2007,6 +2039,7 @@ mod tests {
             "handoff_accept",
             "task_collaboration",
             "assignment_renew",
+            "assignment_recover",
             "run_milestone",
             "run_checkpoint",
             "run_complete",
