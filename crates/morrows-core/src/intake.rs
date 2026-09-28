@@ -80,8 +80,10 @@ pub struct InterviewFinalize {
     pub plan: Value,
     #[serde(default)]
     pub unresolved_questions: Vec<String>,
-    pub final_summary_message_id: Id,
-    pub confirmation_message_id: Id,
+    #[serde(default)]
+    pub final_summary_message_id: Option<Id>,
+    #[serde(default)]
+    pub confirmation_message_id: Option<Id>,
 }
 
 fn default_object() -> Value {

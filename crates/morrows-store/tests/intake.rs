@@ -51,9 +51,66 @@ fn finalize(final_summary_message_id: Id, confirmation_message_id: Id) -> Interv
             "verify acceptance criteria"
         ]),
         unresolved_questions: vec![],
-        final_summary_message_id,
-        confirmation_message_id,
+        final_summary_message_id: Some(final_summary_message_id),
+        confirmation_message_id: Some(confirmation_message_id),
     }
+}
+
+fn finalize_attested() -> InterviewFinalize {
+    InterviewFinalize {
+        understanding: "Read current project/task context and reconcile the implementation plan with the Human."
+            .into(),
+        constraints: json!({"preserve_existing_behavior":true}),
+        plan: json!([
+            "inspect current state",
+            "implement the reconciled plan",
+            "verify acceptance criteria"
+        ]),
+        unresolved_questions: vec![],
+        final_summary_message_id: None,
+        confirmation_message_id: None,
+    }
+}
+
+#[tokio::test]
+async fn executor_can_attest_convergence_without_morrows_session_messages() {
+    let (store, _project, agent, task) = fixture().await;
+    let claim = store
+        .claim_task_for_execution(task.id, agent.id, "executor", 300)
+        .await
+        .unwrap();
+    store
+        .task_intake_page(task.id, agent.id, 100, 0)
+        .await
+        .unwrap();
+    let started = store
+        .start_intake_interview(task.id, agent.id)
+        .await
+        .unwrap();
+    let session_id = started.interview_session_id.unwrap();
+    let history = store
+        .agent_session_history(session_id, agent.id, None, None, 20)
+        .await
+        .unwrap();
+    assert!(history.messages.is_empty());
+
+    let converged = store
+        .finalize_intake_interview(task.id, agent.id, finalize_attested())
+        .await
+        .unwrap();
+    assert_eq!(converged.conversation_state, INTERVIEW_STATE_CONVERGED);
+    assert_eq!(converged.final_summary_message_id, None);
+    assert_eq!(converged.confirmation_message_id, None);
+    assert_eq!(
+        store
+            .get_assignment(claim.assignment.id)
+            .await
+            .unwrap()
+            .phase,
+        INTAKE_PHASE_READY
+    );
+    let implementing = store.begin_task_execution(task.id, agent.id).await.unwrap();
+    assert_eq!(implementing.phase, INTAKE_PHASE_IMPLEMENTING);
 }
 
 #[tokio::test]
@@ -100,7 +157,7 @@ async fn open_claim_requires_multi_turn_human_interview_before_implementation() 
         INTAKE_PHASE_HUMAN_INTERVIEW
     );
 
-    let question = store
+    store
         .agent_reply_session(
             session_id,
             agent.id,
@@ -117,7 +174,7 @@ async fn open_claim_requires_multi_turn_human_interview_before_implementation() 
         INTERVIEW_STATE_WAITING_FOR_HUMAN
     );
 
-    let human_answer = store
+    store
         .create_human_session_message(session_id, "Preserve existing operator recovery behavior.")
         .await
         .unwrap();
@@ -130,7 +187,7 @@ async fn open_claim_requires_multi_turn_human_interview_before_implementation() 
         INTERVIEW_STATE_WAITING_FOR_AGENT
     );
 
-    let final_summary = store
+    store
         .agent_reply_session(
             session_id,
             agent.id,
@@ -139,45 +196,17 @@ async fn open_claim_requires_multi_turn_human_interview_before_implementation() 
         .await
         .unwrap();
 
-    let too_early = store
-        .finalize_intake_interview(
-            task.id,
-            agent.id,
-            finalize(final_summary.id, human_answer.id),
-        )
-        .await
-        .unwrap_err();
-    assert!(
-        too_early
-            .to_string()
-            .contains("human confirmation must be sent after")
-    );
-
-    let forged_human = store
-        .finalize_intake_interview(task.id, agent.id, finalize(final_summary.id, question.id))
-        .await
-        .unwrap_err();
-    assert!(
-        forged_human
-            .to_string()
-            .contains("requires a current Human message")
-    );
-
-    let confirmation = store
-        .create_human_session_message(session_id, "没问题，按这个方案做。")
-        .await
-        .unwrap();
     let converged = store
-        .finalize_intake_interview(
-            task.id,
-            agent.id,
-            finalize(final_summary.id, confirmation.id),
-        )
+        .finalize_intake_interview(task.id, agent.id, finalize_attested())
         .await
         .unwrap();
     assert_eq!(converged.conversation_state, INTERVIEW_STATE_CONVERGED);
-    assert_eq!(converged.final_summary_message_id, Some(final_summary.id));
-    assert_eq!(converged.confirmation_message_id, Some(confirmation.id));
+    assert_eq!(converged.final_summary_message_id, None);
+    assert_eq!(converged.confirmation_message_id, None);
+    assert_eq!(
+        converged.approved_by_actor_id,
+        Some(format!("agent_attested:{}", agent.id))
+    );
     assert_eq!(
         store
             .get_assignment(claim.assignment.id)
@@ -211,7 +240,7 @@ async fn open_claim_requires_multi_turn_human_interview_before_implementation() 
         INTAKE_PHASE_HUMAN_INTERVIEW
     );
 
-    let revised_summary = store
+    store
         .agent_reply_session(
             session_id,
             agent.id,
@@ -219,16 +248,8 @@ async fn open_claim_requires_multi_turn_human_interview_before_implementation() 
         )
         .await
         .unwrap();
-    let reconfirm = store
-        .create_human_session_message(session_id, "对，就这样。")
-        .await
-        .unwrap();
     store
-        .finalize_intake_interview(
-            task.id,
-            agent.id,
-            finalize(revised_summary.id, reconfirm.id),
-        )
+        .finalize_intake_interview(task.id, agent.id, finalize_attested())
         .await
         .unwrap();
 

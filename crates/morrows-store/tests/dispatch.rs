@@ -513,8 +513,8 @@ async fn continuation_chain_is_ordered_single_owner_and_recovers_checkpoints() {
                     constraints: json!({}),
                     plan: json!(["resume from durable handoff and checkpoint"]),
                     unresolved_questions: vec![],
-                    final_summary_message_id: summary.id,
-                    confirmation_message_id: confirmation.id,
+                    final_summary_message_id: Some(summary.id),
+                    confirmation_message_id: Some(confirmation.id),
                 },
             )
             .await
