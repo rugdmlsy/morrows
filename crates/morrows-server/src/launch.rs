@@ -727,7 +727,7 @@ async fn execute_codebuddy_with_root(
             binding.logical_session_id,
         ));
     } else {
-        prompt.push_str("\nThis is an intake-only launch. Morrows has not issued LSM execution capability. Complete task_intake, then call task_interview_start and conduct the Human Interview in the returned Task Session using session_reply. Ask every unclear detail, incorporate Human replies, and continue for as many turns as needed. When nothing remains unresolved, send a final synthesis and implementation plan with session_reply, wait for a later Human reply in that Session, then call task_interview_finalize citing both message IDs. There is no separate operator approval step. After finalize, stop this read-only turn; Morrows will relaunch the implementation runtime automatically. Do not implement or modify external state until a new launch has Assignment phase=implementing.\n");
+        prompt.push_str("\nThis is an intake-only launch. Morrows has not issued LSM execution capability. Complete task_intake, then call task_interview_start and resolve material uncertainties with the Human. The discussion may happen in the Morrows Task Session or in your current provider conversation. When nothing material remains unresolved, call task_interview_finalize with the current understanding, implementation plan, and unresolved_questions=[]. Session message IDs are optional audit metadata, not a gate. There is no separate operator approval step. After finalize, stop this read-only turn; Morrows will relaunch the implementation runtime automatically. Do not implement or modify external state until a new launch has Assignment phase=implementing.\n");
     }
 
     if let Some(mut stdin) = child.stdin.take() {
@@ -1034,7 +1034,7 @@ async fn execute_codex_with_root(
             binding.logical_session_id,
         ));
     } else {
-        prompt.push_str("\nThis is an intake-only launch. Morrows has not issued LSM execution capability. Complete task_intake, then call task_interview_start and conduct the Human Interview in the returned Task Session using session_reply. Ask every unclear detail, incorporate Human replies, and continue for as many turns as needed. When nothing remains unresolved, send a final synthesis and implementation plan with session_reply, wait for a later Human reply in that Session, then call task_interview_finalize citing both message IDs. There is no separate operator approval step. After finalize, stop this read-only turn; Morrows will relaunch the implementation runtime automatically. Do not implement or modify external state until a new launch has Assignment phase=implementing.\n");
+        prompt.push_str("\nThis is an intake-only launch. Morrows has not issued LSM execution capability. Complete task_intake, then call task_interview_start and resolve material uncertainties with the Human. The discussion may happen in the Morrows Task Session or in your current provider conversation. When nothing material remains unresolved, call task_interview_finalize with the current understanding, implementation plan, and unresolved_questions=[]. Session message IDs are optional audit metadata, not a gate. There is no separate operator approval step. After finalize, stop this read-only turn; Morrows will relaunch the implementation runtime automatically. Do not implement or modify external state until a new launch has Assignment phase=implementing.\n");
     }
     if let Some(mut stdin) = child.stdin.take() {
         if let Err(err) = stdin.write_all(prompt.as_bytes()).await {

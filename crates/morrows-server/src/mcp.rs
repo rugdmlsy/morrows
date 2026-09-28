@@ -427,8 +427,10 @@ pub struct InterviewFinalizeRequest {
     pub plan: Vec<String>,
     #[serde(default)]
     pub unresolved_questions: Vec<String>,
-    pub final_summary_message_id: String,
-    pub confirmation_message_id: String,
+    #[serde(default)]
+    pub final_summary_message_id: Option<String>,
+    #[serde(default)]
+    pub confirmation_message_id: Option<String>,
 }
 
 fn default_claim_role() -> String {
@@ -1545,7 +1547,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Start or resume the mandatory multi-turn Human Interview after task_intake has fully read current Project Memory and ContextPackage. Morrows binds the Assignment to its durable Task Session and moves it to human_interview. The executor must derive its own questions from the current context: publisher-authored lists of decisions, uncertainties, or preconditions are requirements to resolve, not a preset questionnaire. Ask only material questions that remain unresolved after context/evidence/repo review, skip facts already established, and ask different questions when the actual uncertainty demands it. Use session_reply to incorporate replies and present a final synthesis/implementation plan. There is no separate operator approval step."
+        description = "Start or resume the mandatory Human Interview after task_intake has fully read current Project Memory and ContextPackage. Morrows binds the Assignment to its durable Task Session and moves it to human_interview, but the actual discussion may continue either in that Session or in the Agent's current provider conversation. The executor must derive questions from the current context; publisher-authored uncertainties are requirements to resolve, not a preset questionnaire. Ask only material unresolved details and do not repeat facts already established. When the executor judges the interview converged, use task_interview_finalize; Session message evidence is optional. There is no separate operator approval step."
     )]
     async fn task_interview_start(
         &self,
@@ -1561,7 +1563,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Finalize a conversational Human Interview only after you have sent a final synthesis/implementation plan with session_reply and the human has replied afterward. Cite both Session message IDs. Morrows revalidates current Project Memory/ContextPackage receipts, requires unresolved_questions=[], verifies the final summary is Agent-authored and the cited Human reply is the latest interview message, then marks the interview converged and the Assignment ready. Managed Morrows launches automatically switch runtimes after the intake process exits; do not try to implement inside the read-only intake runtime."
+        description = "Declare the Human Interview converged after you have reconciled the task with the Human and have no unresolved material questions. Morrows revalidates current Project Memory/ContextPackage receipts, requires a non-empty understanding and implementation plan plus unresolved_questions=[], then marks the Assignment ready. final_summary_message_id and confirmation_message_id are optional audit metadata only; they are not required and the discussion may have happened in the current provider chat rather than the Morrows Task Session. Managed Morrows launches automatically switch runtimes after the intake process exits."
     )]
     async fn task_interview_finalize(
         &self,
@@ -1578,8 +1580,16 @@ impl MorrowsMcp {
                     constraints: json!(req.constraints),
                     plan: json!(req.plan),
                     unresolved_questions: req.unresolved_questions,
-                    final_summary_message_id: parse_id(&req.final_summary_message_id)?,
-                    confirmation_message_id: parse_id(&req.confirmation_message_id)?,
+                    final_summary_message_id: req
+                        .final_summary_message_id
+                        .as_deref()
+                        .map(parse_id)
+                        .transpose()?,
+                    confirmation_message_id: req
+                        .confirmation_message_id
+                        .as_deref()
+                        .map(parse_id)
+                        .transpose()?,
                 },
             )
             .await
