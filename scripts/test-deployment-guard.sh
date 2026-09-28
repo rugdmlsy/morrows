@@ -75,3 +75,18 @@ grep -Fq 'EnvironmentFile=-/home/morrow/.config/local-shell-mcp/service.env' "$e
 grep -Fq 'EnvironmentFile=-/home/morrow/.config/local-shell-mcp/service.env' "$runtime_unit"
 ! grep -Eq '^(Requires|BindsTo|PartOf)=.*local-shell-mcp' "$edge_unit"
 printf 'edge ownership tests passed\n'
+
+# Execute the runtime launcher with a fake daemon to verify the environment that
+# reaches exec. Source-text checks cannot catch a later unset of the control key.
+cat > "$fixture/runtime-bin" <<'RUNTIME'
+#!/bin/sh
+set -eu
+test "${LOCAL_SHELL_MCP_CONTROL_API_KEY:-}" = "test-runtime-control-key"
+test -z "${CLOUDFLARE_TUNNEL_TOKEN:-}"
+echo guarded-runtime-started
+RUNTIME
+chmod +x "$fixture/runtime-bin"
+export MORROWS_RUNTIME_BIN="$fixture/runtime-bin"
+export CLOUDFLARE_TUNNEL_TOKEN=test-tunnel-secret
+test "$(bash "$fixture/repo/scripts/run-morrow-runtime-vps.sh")" = guarded-runtime-started
+printf 'runtime control credential propagation passed\n'
