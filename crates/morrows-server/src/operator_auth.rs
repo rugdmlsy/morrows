@@ -53,6 +53,7 @@ pub async fn authenticate_operator_requests(
     if method == Method::OPTIONS
         || !path.starts_with("/api/")
         || path == "/api/health"
+        || path == "/api/internal/lsm/job-events"
         || is_operator_login_route(&method, &path)
         || crate::auth::is_agent_http_surface(&method, &path)
     {

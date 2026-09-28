@@ -16,6 +16,7 @@ mod continuation;
 mod discovery;
 mod git_memory;
 mod identity;
+mod job_wait;
 mod milestone;
 mod runtime;
 mod task_rework;

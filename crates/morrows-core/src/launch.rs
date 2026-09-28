@@ -77,6 +77,54 @@ pub struct RunLsmBinding {
     pub restart_deadline_at: Option<DateTime<Utc>>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LsmJobTerminalEvent {
+    pub event_id: String,
+    pub job_id: String,
+    pub source_machine: String,
+    pub logical_session_id: Option<String>,
+    pub attempt: i64,
+    pub status: String,
+    pub exit_code: Option<i64>,
+    pub completed_at: DateTime<Utc>,
+    pub terminal_reason: String,
+    pub summary_ref: Option<String>,
+    #[serde(default)]
+    pub result: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RegisterRunJobWait {
+    #[schemars(with = "String")]
+    pub run_id: Id,
+    pub source_machine: String,
+    pub job_id: String,
+    pub resume_plan: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunJobWait {
+    pub id: Id,
+    pub run_id: Id,
+    pub source_machine: String,
+    pub job_id: String,
+    pub logical_session_id: String,
+    pub status: String,
+    pub resume_mode: Option<String>,
+    pub resume_plan: String,
+    pub reason: String,
+    pub terminal_event_id: Option<String>,
+    pub terminal_status: Option<String>,
+    pub terminal_reason: Option<String>,
+    pub resume_launch_attempt_id: Option<Id>,
+    pub summary_ref: Option<String>,
+    pub result: Option<Value>,
+    pub registered_at: DateTime<Utc>,
+    pub ready_at: Option<DateTime<Utc>>,
+    pub queued_at: Option<DateTime<Utc>>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct AttachExecutionEvidence {
     #[schemars(with = "Option<String>")]
@@ -143,4 +191,31 @@ pub struct LaunchInstruction {
 
 fn default_enabled() -> bool {
     true
+}
+
+#[cfg(test)]
+mod job_wait_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn lsm_job_terminal_event_http_json_uses_rfc3339_timestamp() {
+        let event: LsmJobTerminalEvent = serde_json::from_value(json!({
+            "event_id": "job-finish:test:1",
+            "job_id": "job-test",
+            "source_machine": "morrow-node-01",
+            "logical_session_id": "s_test",
+            "attempt": 1,
+            "status": "succeeded",
+            "exit_code": 0,
+            "completed_at": "1970-01-01T00:02:03Z",
+            "terminal_reason": "process exited successfully",
+            "summary_ref": "work/report.json",
+            "result": {"records": 147}
+        }))
+        .unwrap();
+
+        assert_eq!(event.completed_at.timestamp(), 123);
+        assert_eq!(event.logical_session_id.as_deref(), Some("s_test"));
+    }
 }

@@ -8,7 +8,8 @@ use morrows_core::{
     CreateThread, SessionHistoryRequest, SessionReply,
 };
 use morrows_core::{
-    CreateTask, Id, ReportAgentIdentity, TaskQuery, TaskState, UpdateContextRevision,
+    CreateTask, Id, RegisterRunJobWait, ReportAgentIdentity, TaskQuery, TaskState,
+    UpdateContextRevision,
 };
 use morrows_store::Store;
 use rmcp::{
@@ -1413,6 +1414,26 @@ impl MorrowsMcp {
             .await
             .map_err(|e| e.to_string())?;
         serde_json::to_string(&run).map_err(|e| e.to_string())
+    }
+
+    #[tool(
+        description = "Put the authenticated caller's current LSM-backed Run into a durable wait for one tracked LSM job. This records the machine, job ID, Run Logical Session, reason, and exact resume plan. After it succeeds, persist any final checkpoint/milestone needed and end this Agent turn without calling run_complete; Morrows will resume the same Run and provider session when the terminal event arrives. lost resumes in reconciliation mode and is never treated as success."
+    )]
+    async fn task_wait_for_job(
+        &self,
+        Parameters(req): Parameters<RegisterRunJobWait>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<String, String> {
+        let wait = self
+            .store
+            .register_run_job_wait(req, authenticated_agent(&parts)?)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(json!({
+            "wait": wait,
+            "next_action": "End the current Agent turn/process without calling run_complete. Morrows will queue a continuation of this same Run after the tracked LSM job reaches a terminal outcome.",
+        })
+        .to_string())
     }
 
     #[tool(

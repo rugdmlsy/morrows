@@ -907,23 +907,49 @@ impl Store {
                     .await
                     .map_err(storage)?;
                     if lsm_bound_or_pending {
-                        let deadline = now + Duration::seconds(agent_restart_grace_seconds());
-                        let reason = error.clone().unwrap_or_else(|| {
-                            format!("launcher_exit_{}", exit_code.unwrap_or(-1))
-                        });
-                        sqlx::query("UPDATE runs SET status='interrupted',stop_reason=?,ended_at=NULL WHERE id=?")
-                        .bind(&reason).bind(run_id.to_string()).execute(&mut *tx).await.map_err(storage)?;
-                        sqlx::query("UPDATE run_lsm_bindings SET restart_deadline_at=?,updated_at=? WHERE run_id=?")
-                        .bind(deadline.to_rfc3339()).bind(now.to_rfc3339()).bind(run_id.to_string())
-                        .execute(&mut *tx).await.map_err(storage)?;
-                        sqlx::query("UPDATE run_lsm_provisioning SET restart_deadline_at=?,updated_at=? WHERE run_id=?")
-                        .bind(deadline.to_rfc3339()).bind(now.to_rfc3339()).bind(run_id.to_string())
-                        .execute(&mut *tx).await.map_err(storage)?;
-                        sqlx::query("UPDATE assignments SET expires_at=MAX(expires_at,?),renewed_at=? WHERE id=? AND status='active'")
-                        .bind(deadline.to_rfc3339()).bind(now.to_rfc3339()).bind(attempt.assignment_id.to_string())
-                        .execute(&mut *tx).await.map_err(storage)?;
-                        append_event_tx(&mut tx,"system","launcher","run",run_id,"run.interrupted",
-                        json!({"launch_attempt_id":id,"restart_deadline_at":deadline,"reason":reason}),None).await?;
+                        let active_wait: Option<String> = sqlx::query_scalar(
+                            "SELECT id FROM run_job_waits WHERE run_id=? AND status IN ('pending','ready')",
+                        )
+                        .bind(run_id.to_string())
+                        .fetch_optional(&mut *tx)
+                        .await
+                        .map_err(storage)?;
+                        if let Some(wait_id) = active_wait {
+                            sqlx::query("UPDATE runs SET status='interrupted',stop_reason='waiting_for_lsm_job',ended_at=NULL WHERE id=?")
+                                .bind(run_id.to_string()).execute(&mut *tx).await.map_err(storage)?;
+                            sqlx::query("UPDATE run_lsm_bindings SET restart_deadline_at=NULL,updated_at=? WHERE run_id=?")
+                                .bind(now.to_rfc3339()).bind(run_id.to_string())
+                                .execute(&mut *tx).await.map_err(storage)?;
+                            append_event_tx(
+                                &mut tx,
+                                "system",
+                                "launcher",
+                                "run",
+                                run_id,
+                                "run.waiting_for_lsm_job",
+                                json!({"launch_attempt_id":id,"wait_id":wait_id}),
+                                None,
+                            )
+                            .await?;
+                        } else {
+                            let deadline = now + Duration::seconds(agent_restart_grace_seconds());
+                            let reason = error.clone().unwrap_or_else(|| {
+                                format!("launcher_exit_{}", exit_code.unwrap_or(-1))
+                            });
+                            sqlx::query("UPDATE runs SET status='interrupted',stop_reason=?,ended_at=NULL WHERE id=?")
+                            .bind(&reason).bind(run_id.to_string()).execute(&mut *tx).await.map_err(storage)?;
+                            sqlx::query("UPDATE run_lsm_bindings SET restart_deadline_at=?,updated_at=? WHERE run_id=?")
+                            .bind(deadline.to_rfc3339()).bind(now.to_rfc3339()).bind(run_id.to_string())
+                            .execute(&mut *tx).await.map_err(storage)?;
+                            sqlx::query("UPDATE run_lsm_provisioning SET restart_deadline_at=?,updated_at=? WHERE run_id=?")
+                            .bind(deadline.to_rfc3339()).bind(now.to_rfc3339()).bind(run_id.to_string())
+                            .execute(&mut *tx).await.map_err(storage)?;
+                            sqlx::query("UPDATE assignments SET expires_at=MAX(expires_at,?),renewed_at=? WHERE id=? AND status='active'")
+                            .bind(deadline.to_rfc3339()).bind(now.to_rfc3339()).bind(attempt.assignment_id.to_string())
+                            .execute(&mut *tx).await.map_err(storage)?;
+                            append_event_tx(&mut tx,"system","launcher","run",run_id,"run.interrupted",
+                            json!({"launch_attempt_id":id,"restart_deadline_at":deadline,"reason":reason}),None).await?;
+                        }
                     } else {
                         let new_run_status = if success { "paused" } else { "failed" };
                         let stop_reason = if success {
@@ -1484,7 +1510,7 @@ impl Store {
     }
 }
 
-fn agent_restart_grace_seconds() -> i64 {
+pub(crate) fn agent_restart_grace_seconds() -> i64 {
     std::env::var("MORROWS_AGENT_RESTART_GRACE_SECONDS")
         .ok()
         .and_then(|value| value.parse::<i64>().ok())

@@ -10,6 +10,7 @@ use tokio::{fs, io::AsyncWriteExt, process::Command};
 
 pub fn routes() -> Router<AppState> {
     Router::new()
+        .route("/internal/lsm/job-events", post(ingest_lsm_job_event))
         .route("/launch-profiles", get(profile_list).post(profile_create))
         .route("/launch-profiles/{id}", get(profile_get))
         .route("/launch-attempts/enqueue", post(launch_enqueue))
@@ -34,6 +35,32 @@ pub fn routes() -> Router<AppState> {
         )
         .route("/tasks/{id}/launch-attempts", get(task_launches))
         .route("/tasks/{id}/launch-instructions", get(task_instructions))
+}
+
+async fn ingest_lsm_job_event(
+    State(s): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(event): Json<LsmJobTerminalEvent>,
+) -> Result<Json<Value>, ApiError> {
+    let configured = std::env::var("MORROWS_LSM_CONTROL_KEY")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            ApiError(DomainError::Storage(
+                "LSM event ingest is not configured".into(),
+            ))
+        })?;
+    let supplied = headers
+        .get("x-lsm-control-key")
+        .and_then(|value| value.to_str().ok());
+    if supplied != Some(configured.as_str()) {
+        return Err(ApiError(DomainError::InvalidInput(
+            "valid LSM control credential required".into(),
+        )));
+    }
+    let inserted = s.store.ingest_lsm_job_terminal_event(event).await?;
+    Ok(Json(json!({"accepted":true,"duplicate":!inserted})))
 }
 
 async fn profile_list(State(s): State<AppState>) -> Result<Json<Value>, ApiError> {
@@ -401,6 +428,26 @@ pub async fn delivery_worker_loop(store: Store) {
                 Err(err) => tracing::error!(%run_id, %err, "failed to queue delivery continuation"),
             }
         }
+        let wait_candidates = match store.run_job_wait_resume_candidates().await {
+            Ok(value) => value,
+            Err(err) => {
+                tracing::error!(%err, "LSM job wait resume scan failed");
+                continue;
+            }
+        };
+        for outbox_id in wait_candidates {
+            match store.enqueue_run_job_wait_resume(outbox_id).await {
+                Ok(attempt) => tracing::info!(
+                    %outbox_id,
+                    launch_attempt_id = %attempt.id,
+                    "queued same-Run continuation for LSM job terminal event"
+                ),
+                Err(DomainError::Conflict(_)) => {}
+                Err(err) => {
+                    tracing::error!(%outbox_id, %err, "failed to queue LSM job continuation")
+                }
+            }
+        }
         let intake_candidates = match store.intake_delivery_resume_candidates().await {
             Ok(value) => value,
             Err(err) => {
@@ -717,6 +764,9 @@ async fn execute_codebuddy_with_root(
         .claim_agent_deliveries_for_launch(execution.attempt.id, 50)
         .await?;
     let mut prompt = build_prompt(&execution);
+    prompt.push_str(
+        &build_job_wait_resume_prompt(&store, execution.run.id, execution.attempt.id).await?,
+    );
     let delivery_prompt = build_delivery_prompt(&execution, &claimed_deliveries);
     if !delivery_prompt.is_empty() {
         prompt.push_str(&delivery_prompt);
@@ -1024,6 +1074,9 @@ async fn execute_codex_with_root(
         .claim_agent_deliveries_for_launch(execution.attempt.id, 50)
         .await?;
     let mut prompt = build_prompt(&execution);
+    prompt.push_str(
+        &build_job_wait_resume_prompt(&store, execution.run.id, execution.attempt.id).await?,
+    );
     let delivery_prompt = build_delivery_prompt(&execution, &claimed_deliveries);
     if !delivery_prompt.is_empty() {
         prompt.push_str(&delivery_prompt);
@@ -1290,6 +1343,38 @@ Morrows Session ID: {session_id}\n\
             .unwrap_or_default(),
         instructions = clip(&instructions, 6000),
     )
+}
+
+async fn build_job_wait_resume_prompt(
+    store: &Store,
+    run_id: Id,
+    launch_attempt_id: Id,
+) -> anyhow::Result<String> {
+    let Some(wait) = store
+        .run_job_wait_for_launch(run_id, launch_attempt_id)
+        .await?
+    else {
+        return Ok(String::new());
+    };
+    if wait.status != "queued" {
+        return Ok(String::new());
+    }
+    let mode = wait.resume_mode.as_deref().unwrap_or("continue");
+    let directive = if mode == "reconcile" {
+        "The LSM outcome is lost, not success. Reconcile the referenced job and its durable output/status evidence before deciding whether to retry, fail, or continue; do not represent the awaited work as completed."
+    } else {
+        "Continue this same Run from the saved resume plan. Treat the terminal status as an observed job outcome, not as proof that the overall Task is complete."
+    };
+    Ok(format!(
+        "\nLSM job wait resumed: machine={machine}; job_id={job_id}; terminal_status={status}; terminal_reason={terminal_reason}; resume_mode={mode}. Saved reason: {reason}. Saved resume plan: {plan}. {directive} Summary/result reference: {summary}.\n",
+        machine = wait.source_machine,
+        job_id = wait.job_id,
+        status = wait.terminal_status.as_deref().unwrap_or("unknown"),
+        terminal_reason = wait.terminal_reason.as_deref().unwrap_or("unspecified"),
+        reason = wait.reason,
+        plan = wait.resume_plan,
+        summary = wait.summary_ref.as_deref().unwrap_or("none"),
+    ))
 }
 
 fn build_delivery_prompt(execution: &LaunchExecution, deliveries: &[AgentDelivery]) -> String {

@@ -722,3 +722,270 @@ async fn abrupt_failure_retains_checkpoint_for_successor() {
             .is_err()
     );
 }
+
+#[tokio::test]
+async fn lsm_job_wait_terminal_event_resumes_same_run_without_new_run() {
+    let (store, assignment_id, profile_id) = prepared().await;
+    let assignment = store.get_assignment(assignment_id).await.unwrap();
+    let first = store
+        .enqueue_launch(input(json!({
+            "assignment_id": assignment_id,
+            "launch_profile_id": profile_id
+        })))
+        .await
+        .unwrap();
+    store.claim_launch_job().await.unwrap().unwrap();
+    let execution = store.begin_launch_attempt(first.id).await.unwrap();
+    let run_id = execution.run.id;
+    store.bind_run_lsm(run_id, "s_job_wait").await.unwrap();
+
+    let wait = store
+        .register_run_job_wait(
+            RegisterRunJobWait {
+                run_id,
+                source_machine: "morrow-node-01".into(),
+                job_id: "job-long".into(),
+                resume_plan: "Read the experiment report and continue the same task.".into(),
+                reason: "Long experiment is still running.".into(),
+            },
+            assignment.agent_instance_id,
+        )
+        .await
+        .unwrap();
+    assert_eq!(wait.status, "pending");
+
+    store
+        .finish_launch_attempt(first.id, Some(0), Some("codex-wait-session".into()), None)
+        .await
+        .unwrap();
+    assert_eq!(store.get_run(run_id).await.unwrap().status, "interrupted");
+    assert_eq!(
+        store
+            .run_lsm_binding(run_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .restart_deadline_at,
+        None,
+        "an intentional long wait must not start the short crash-restart timer"
+    );
+
+    let event = LsmJobTerminalEvent {
+        event_id: "job-finish:job-long:1".into(),
+        job_id: "job-long".into(),
+        source_machine: "morrow-node-01".into(),
+        logical_session_id: Some("s_job_wait".into()),
+        attempt: 1,
+        status: "succeeded".into(),
+        exit_code: Some(0),
+        completed_at: chrono::Utc::now(),
+        terminal_reason: "process exited successfully".into(),
+        summary_ref: Some("work/report.json".into()),
+        result: Some(json!({"rows": 147})),
+    };
+    assert!(
+        store
+            .ingest_lsm_job_terminal_event(event.clone())
+            .await
+            .unwrap()
+    );
+    assert!(
+        !store.ingest_lsm_job_terminal_event(event).await.unwrap(),
+        "duplicate terminal events must be idempotent"
+    );
+
+    let ready = store.get_run_job_wait(wait.id).await.unwrap();
+    assert_eq!(ready.status, "ready");
+    assert_eq!(ready.resume_mode.as_deref(), Some("continue"));
+    assert_eq!(ready.terminal_status.as_deref(), Some("succeeded"));
+    assert_eq!(ready.summary_ref.as_deref(), Some("work/report.json"));
+
+    let candidates = store.run_job_wait_resume_candidates().await.unwrap();
+    assert_eq!(candidates.len(), 1);
+    let resumed = store
+        .enqueue_run_job_wait_resume(candidates[0])
+        .await
+        .unwrap();
+    assert_eq!(resumed.restart_run_id, Some(run_id));
+    assert_eq!(resumed.resume_from_attempt_id, Some(first.id));
+    assert!(
+        store
+            .run_job_wait_resume_candidates()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let binding = store.run_lsm_binding(run_id).await.unwrap().unwrap();
+    assert!(
+        binding.restart_deadline_at.is_some(),
+        "the short restart window starts only after the awaited event arrives"
+    );
+    assert!(
+        store
+            .get_assignment(assignment_id)
+            .await
+            .unwrap()
+            .expires_at
+            > chrono::Utc::now(),
+        "wake-up must refresh the Assignment before relaunch"
+    );
+
+    store.claim_launch_job().await.unwrap().unwrap();
+    let next = store.begin_launch_attempt(resumed.id).await.unwrap();
+    assert_eq!(next.run.id, run_id);
+    assert_eq!(store.get_run(run_id).await.unwrap().status, "running");
+    assert_eq!(
+        store
+            .run_lsm_binding(run_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .logical_session_id,
+        "s_job_wait"
+    );
+}
+
+#[tokio::test]
+async fn lsm_terminal_event_before_wait_registration_is_not_lost() {
+    let (store, assignment_id, profile_id) = prepared().await;
+    let assignment = store.get_assignment(assignment_id).await.unwrap();
+    let first = store
+        .enqueue_launch(input(json!({
+            "assignment_id": assignment_id,
+            "launch_profile_id": profile_id
+        })))
+        .await
+        .unwrap();
+    store.claim_launch_job().await.unwrap().unwrap();
+    let execution = store.begin_launch_attempt(first.id).await.unwrap();
+    let run_id = execution.run.id;
+    store.bind_run_lsm(run_id, "s_event_first").await.unwrap();
+
+    assert!(
+        store
+            .ingest_lsm_job_terminal_event(LsmJobTerminalEvent {
+                event_id: "job-finish:event-first:1".into(),
+                job_id: "job-event-first".into(),
+                source_machine: "morrow-node-01".into(),
+                logical_session_id: Some("s_event_first".into()),
+                attempt: 1,
+                status: "failed".into(),
+                exit_code: Some(2),
+                completed_at: chrono::Utc::now(),
+                terminal_reason: "process exited with code 2".into(),
+                summary_ref: None,
+                result: None,
+            })
+            .await
+            .unwrap()
+    );
+
+    let wait = store
+        .register_run_job_wait(
+            RegisterRunJobWait {
+                run_id,
+                source_machine: "morrow-node-01".into(),
+                job_id: "job-event-first".into(),
+                resume_plan: "Inspect the failed job and decide the next action.".into(),
+                reason: "The external job may have finished while the Agent was exiting.".into(),
+            },
+            assignment.agent_instance_id,
+        )
+        .await
+        .unwrap();
+    assert_eq!(wait.status, "ready");
+    assert_eq!(wait.terminal_status.as_deref(), Some("failed"));
+
+    store
+        .finish_launch_attempt(first.id, Some(0), Some("event-first-session".into()), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        store.run_job_wait_resume_candidates().await.unwrap().len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn lost_lsm_job_wakes_same_run_in_reconciliation_mode() {
+    let (store, assignment_id, profile_id) = prepared().await;
+    let assignment = store.get_assignment(assignment_id).await.unwrap();
+    let first = store
+        .enqueue_launch(input(json!({
+            "assignment_id": assignment_id,
+            "launch_profile_id": profile_id
+        })))
+        .await
+        .unwrap();
+    store.claim_launch_job().await.unwrap().unwrap();
+    let execution = store.begin_launch_attempt(first.id).await.unwrap();
+    let run_id = execution.run.id;
+    store.bind_run_lsm(run_id, "s_lost_wait").await.unwrap();
+
+    let wait = store
+        .register_run_job_wait(
+            RegisterRunJobWait {
+                run_id,
+                source_machine: "morrow-node-01".into(),
+                job_id: "job-lost".into(),
+                resume_plan: "Reconcile durable outputs before deciding whether to retry.".into(),
+                reason: "Wait for a long-running job.".into(),
+            },
+            assignment.agent_instance_id,
+        )
+        .await
+        .unwrap();
+    store
+        .finish_launch_attempt(first.id, Some(0), Some("lost-session".into()), None)
+        .await
+        .unwrap();
+
+    store
+        .ingest_lsm_job_terminal_event(LsmJobTerminalEvent {
+            event_id: "job-finish:lost:1".into(),
+            job_id: "job-lost".into(),
+            source_machine: "morrow-node-01".into(),
+            logical_session_id: Some("s_lost_wait".into()),
+            attempt: 1,
+            status: "lost".into(),
+            exit_code: None,
+            completed_at: chrono::Utc::now(),
+            terminal_reason: "job session disappeared without a durable completion record".into(),
+            summary_ref: None,
+            result: None,
+        })
+        .await
+        .unwrap();
+
+    let ready = store.get_run_job_wait(wait.id).await.unwrap();
+    assert_eq!(ready.status, "ready");
+    assert_eq!(ready.resume_mode.as_deref(), Some("reconcile"));
+    assert_eq!(ready.terminal_status.as_deref(), Some("lost"));
+    assert_eq!(
+        store.run_job_wait_resume_candidates().await.unwrap().len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn unrelated_lsm_terminal_events_are_accepted_but_not_persisted_in_morrows() {
+    let (store, _assignment_id, _profile_id) = prepared().await;
+    let inserted = store
+        .ingest_lsm_job_terminal_event(LsmJobTerminalEvent {
+            event_id: "job-finish:unrelated:1".into(),
+            job_id: "job-unrelated".into(),
+            source_machine: "some-node".into(),
+            logical_session_id: Some("s_not_a_morrows_run".into()),
+            attempt: 1,
+            status: "succeeded".into(),
+            exit_code: Some(0),
+            completed_at: chrono::Utc::now(),
+            terminal_reason: "process exited successfully".into(),
+            summary_ref: None,
+            result: None,
+        })
+        .await
+        .unwrap();
+    assert!(!inserted);
+}

@@ -242,7 +242,7 @@ impl Store {
     /// Explicit restart creates a new process attempt while preserving the Run and
     /// its LSM Session. The transaction prevents two restarts claiming one window.
     pub async fn enqueue_run_restart(&self, run_id: Id) -> Result<LaunchAttempt, DomainError> {
-        self.enqueue_run_restart_with_actor(run_id, "human", "local", "run.restart_requested")
+        self.enqueue_run_restart_with_actor(run_id, "human", "local", "run.restart_requested", None)
             .await
     }
 
@@ -255,6 +255,32 @@ impl Store {
             "system",
             "delivery",
             "run.delivery_resume_requested",
+            None,
+        )
+        .await
+    }
+
+    pub async fn enqueue_run_job_wait_resume(
+        &self,
+        outbox_id: Id,
+    ) -> Result<LaunchAttempt, DomainError> {
+        let row = sqlx::query(
+            "SELECT w.run_id FROM outbox o JOIN run_job_waits w
+               ON json_extract(o.payload_json,'$.wait_id')=w.id
+             WHERE o.id=? AND o.topic='run.wait_resume' AND o.status='pending' AND w.status='ready'",
+        )
+        .bind(outbox_id.to_string())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage)?
+        .ok_or_else(|| DomainError::Conflict("wait resume is no longer pending".into()))?;
+        let run_id = parse_id(row.try_get("run_id").map_err(storage)?)?;
+        self.enqueue_run_restart_with_actor(
+            run_id,
+            "system",
+            "lsm-job-event",
+            "run.job_wait_resume_requested",
+            Some(outbox_id),
         )
         .await
     }
@@ -265,6 +291,7 @@ impl Store {
         actor_type: &str,
         actor_id: &str,
         event_type: &str,
+        wait_outbox_id: Option<Id>,
     ) -> Result<LaunchAttempt, DomainError> {
         let now = Utc::now();
         let mut tx = self
@@ -283,15 +310,39 @@ impl Store {
         if run.status != "interrupted" {
             return Err(DomainError::Conflict(format!("run is {}", run.status)));
         }
-        let deadline: String =
-            sqlx::query_scalar("SELECT restart_deadline_at FROM run_lsm_bindings WHERE run_id=?")
-                .bind(run_id.to_string())
-                .fetch_optional(&mut *tx)
+        let deadline = if wait_outbox_id.is_some() {
+            let deadline =
+                now + chrono::Duration::seconds(crate::launch::agent_restart_grace_seconds());
+            sqlx::query(
+                "UPDATE run_lsm_bindings SET restart_deadline_at=?,updated_at=? WHERE run_id=?",
+            )
+            .bind(deadline.to_rfc3339())
+            .bind(now.to_rfc3339())
+            .bind(run_id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?;
+            sqlx::query("UPDATE assignments SET expires_at=MAX(expires_at,?),renewed_at=? WHERE id=? AND status='active'")
+                .bind(deadline.to_rfc3339())
+                .bind(now.to_rfc3339())
+                .bind(run.assignment_id.to_string())
+                .execute(&mut *tx)
                 .await
-                .map_err(storage)?
-                .flatten()
-                .ok_or_else(|| DomainError::Conflict("Run has no restart deadline".into()))?;
-        if parse_dt(deadline)? <= now {
+                .map_err(storage)?;
+            deadline
+        } else {
+            let deadline: String = sqlx::query_scalar(
+                "SELECT restart_deadline_at FROM run_lsm_bindings WHERE run_id=?",
+            )
+            .bind(run_id.to_string())
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(storage)?
+            .flatten()
+            .ok_or_else(|| DomainError::Conflict("Run has no restart deadline".into()))?;
+            parse_dt(deadline)?
+        };
+        if deadline <= now {
             return Err(DomainError::Conflict(
                 "Run restart window has expired".into(),
             ));
@@ -303,6 +354,19 @@ impl Store {
         .fetch_one(&mut *tx).await.map_err(storage)?;
         if !assignment_active {
             return Err(DomainError::Conflict("Run Assignment is not active".into()));
+        }
+        let active_launch: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM launch_attempts WHERE run_id=?
+             AND status IN ('queued','starting','running'))",
+        )
+        .bind(run_id.to_string())
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(storage)?;
+        if active_launch {
+            return Err(DomainError::Conflict(
+                "Run already has an active launch attempt".into(),
+            ));
         }
         let previous = sqlx::query(
             "SELECT id,launch_profile_id,cwd,external_session_ref,session_id FROM launch_attempts
@@ -357,6 +421,30 @@ impl Store {
             None,
         )
         .await?;
+        if let Some(outbox_id) = wait_outbox_id {
+            let wait_id: String = sqlx::query_scalar(
+                "SELECT json_extract(payload_json,'$.wait_id') FROM outbox
+                 WHERE id=? AND topic='run.wait_resume' AND status='pending'",
+            )
+            .bind(outbox_id.to_string())
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(storage)?
+            .ok_or_else(|| DomainError::Conflict("wait resume is no longer pending".into()))?;
+            sqlx::query("UPDATE run_job_waits SET status='queued',queued_at=?,resume_launch_attempt_id=? WHERE id=? AND status='ready'")
+                .bind(now.to_rfc3339())
+                .bind(attempt_id.to_string())
+                .bind(&wait_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(storage)?;
+            sqlx::query("UPDATE outbox SET status='delivered',delivered_at=? WHERE id=? AND status='pending'")
+                .bind(now.to_rfc3339())
+                .bind(outbox_id.to_string())
+                .execute(&mut *tx)
+                .await
+                .map_err(storage)?;
+        }
         tx.commit().await.map_err(storage)?;
         self.get_launch_attempt(attempt_id).await
     }
