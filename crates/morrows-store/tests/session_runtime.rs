@@ -360,3 +360,68 @@ async fn restart_preserves_morrow_runtime_session_attempt_and_remote_paths() {
     assert_eq!(active.len(), 1);
     assert_eq!(active[0].id, runtime.id);
 }
+
+#[tokio::test]
+async fn queued_remote_session_runtime_can_claim_deliveries_before_launch() {
+    let store = Store::connect("sqlite::memory:").await.unwrap();
+    let agent = store
+        .register_agent("queued-remote-session-runtime", &[])
+        .await
+        .unwrap();
+    let session = store
+        .create_session(CreateSession {
+            agent_instance_id: agent.id,
+            title: "Queued remote runtime".into(),
+        })
+        .await
+        .unwrap();
+    let message = store
+        .create_human_session_message(session.id, "deliver before remote launch")
+        .await
+        .unwrap();
+    let profile = store
+        .register_launch_profile(
+            serde_json::from_value::<RegisterLaunchProfile>(json!({
+                "name": "queued remote runtime",
+                "adapter": "codex_cli",
+                "agent_instance_id": agent.id,
+                "program": "/remote/codex",
+                "default_cwd": "/remote/workspace",
+                "enabled": true,
+                "metadata": {"execution_backend": "morrow_runtime"}
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let runtime = store
+        .create_session_runtime_attempt(
+            session.id,
+            StartSessionRuntime {
+                launch_profile_id: Some(profile.id),
+                model: None,
+                reasoning_effort: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(runtime.status, "queued");
+
+    let claimed = store
+        .claim_session_deliveries_for_runtime(runtime.id, 10)
+        .await
+        .unwrap();
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].source_id, message.id);
+
+    store
+        .finish_session_runtime_attempt(runtime.id, None, None, Some("remote launch failed".into()))
+        .await
+        .unwrap();
+    assert!(matches!(
+        store
+            .claim_session_deliveries_for_runtime(runtime.id, 10)
+            .await,
+        Err(morrows_core::DomainError::Conflict(_))
+    ));
+}

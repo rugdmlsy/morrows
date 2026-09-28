@@ -263,7 +263,7 @@ impl Store {
         .map_err(storage)?
         .ok_or_else(|| DomainError::NotFound(format!("session runtime attempt {runtime_id}")))?;
         let status: String = runtime.try_get("status").map_err(storage)?;
-        if status != "running" {
+        if !matches!(status.as_str(), "queued" | "running") {
             return Err(DomainError::Conflict(format!(
                 "session runtime attempt is {status}"
             )));
