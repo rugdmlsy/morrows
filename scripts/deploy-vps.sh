@@ -53,6 +53,10 @@ if [[ ! -x "$HOME/.cargo/bin/cargo" ]]; then
     sh -s -- -y --profile minimal --default-toolchain stable
 fi
 source "$HOME/.cargo/env"
+if ! command -v uv >/dev/null 2>&1; then
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+  export PATH="$HOME/.local/bin:$PATH"
+fi
 
 if [[ ! -d "$root/.git" ]]; then
   mkdir -p "$(dirname "$root")"
@@ -70,7 +74,8 @@ test "$(git -C "$root" rev-parse HEAD)" = "$expected_commit" || {
 
 cd "$root"
 mkdir -p data/launches data/session-runtimes
-chmod 755 scripts/run-vps.sh
+chmod 755 scripts/run-vps.sh scripts/run-morrow-runtime-vps.sh
+uv sync --project morrow-runtime --frozen --no-dev
 (
   cd web
   npm ci
@@ -88,12 +93,24 @@ git diff --cached --quiet --
 # Keep exact deployed artifacts for byte comparison. No digest/checksum pass.
 commit="$(git rev-parse HEAD)"
 sudo install -m 0644 deploy/morrows.service /etc/systemd/system/morrows.service
+sudo install -m 0644 deploy/morrow-runtime.service /etc/systemd/system/morrow-runtime.service
 cmp -s deploy/morrows.service /etc/systemd/system/morrows.service
+cmp -s deploy/morrow-runtime.service /etc/systemd/system/morrow-runtime.service
 
 guard_dir=/home/morrow/.config/morrows
 guard_file="$guard_dir/DEPLOYED_RELEASE"
 mkdir -p "$guard_dir"
 chmod 700 "$guard_dir"
+runtime_env="$guard_dir/runtime.env"
+if [[ ! -s "$runtime_env" ]] || ! grep -q '^MORROWS_RUNTIME_CONTROL_KEY=.' "$runtime_env"; then
+  runtime_key="$(python3 -c 'import secrets; print("mrw_runtime_ctl_"+secrets.token_urlsafe(36))')"
+  runtime_env_tmp="$(mktemp "$guard_dir/.runtime.env.XXXXXX")"
+  printf 'MORROWS_RUNTIME_CONTROL_KEY=%s\n' "$runtime_key" > "$runtime_env_tmp"
+  chmod 0600 "$runtime_env_tmp"
+  mv -f "$runtime_env_tmp" "$runtime_env"
+  unset runtime_key
+fi
+chmod 0600 "$runtime_env"
 
 # Preserve the currently active release as the one-step rollback/forensics copy.
 # Older snapshots are pruned only after the replacement is healthy.
@@ -113,7 +130,9 @@ esac
 release_dir="$(mktemp -d "$guard_dir/release.XXXXXX")"
 install -m 0444 target/release/morrows-server "$release_dir/server"
 install -m 0444 scripts/run-vps.sh "$release_dir/launcher"
+install -m 0444 scripts/run-morrow-runtime-vps.sh "$release_dir/runtime-launcher"
 install -m 0444 deploy/morrows.service "$release_dir/unit"
+install -m 0444 deploy/morrow-runtime.service "$release_dir/runtime-unit"
 cp -R web/dist "$release_dir/web"
 chmod -R a-w "$release_dir"
 guard_tmp="$(mktemp "$guard_dir/.DEPLOYED_RELEASE.XXXXXX")"
@@ -122,6 +141,16 @@ chmod 0444 "$guard_tmp"
 mv -f "$guard_tmp" "$guard_file"
 
 sudo systemctl daemon-reload
+sudo systemctl enable --now morrow-runtime.service
+sudo systemctl restart morrow-runtime.service
+runtime_deadline=$((SECONDS + 45))
+while (( SECONDS < runtime_deadline )); do
+  if curl -fsS http://127.0.0.1:8790/healthz >/dev/null 2>&1; then
+    break
+  fi
+  sleep 1
+done
+curl -fsS http://127.0.0.1:8790/healthz >/dev/null
 sudo systemctl enable --now morrows.service
 sudo systemctl restart morrows.service
 
@@ -132,8 +161,13 @@ while (( SECONDS < deadline )); do
     test -n "$pid"
     test "$pid" != 0
     env_names="$(tr '\0' '\n' < "/proc/$pid/environ")"
-    grep -q '^MORROWS_LSM_CONTROL_URL=http://127.0.0.1:8766$' <<<"$env_names"
-    grep -q '^MORROWS_LSM_CONTROL_KEY=.' <<<"$env_names"
+    grep -q '^MORROWS_RUNTIME_CONTROL_URL=http://127.0.0.1:8790$' <<<"$env_names"
+    grep -q '^MORROWS_RUNTIME_PROXY_URL=http://127.0.0.1:8790$' <<<"$env_names"
+    grep -q '^MORROWS_RUNTIME_CONTROL_KEY=.' <<<"$env_names"
+    grep -q '^MORROWS_RUNTIME_MCP_URL=https://mcp.xycdev.com/morrows/ui/runtime/mcp$' <<<"$env_names"
+    grep -q '^MORROWS_AGENT_MCP_URL=https://mcp.xycdev.com/morrows/ui/agent-mcp$' <<<"$env_names"
+    test "$(systemctl is-active morrow-runtime.service)" = active
+    curl -fsS http://127.0.0.1:8790/healthz >/dev/null
     python3 -c 'import json,sys; data=json.loads(sys.stdin.read()); assert data["memory_search"]["enabled"] is True and data["memory_search"]["engine"] == "ripgrep"' <<<"$body"
     ! grep -q '^CLOUDFLARE_TUNNEL_TOKEN=' <<<"$env_names"
     ! grep -q '^LOCAL_SHELL_MCP_OAUTH_ADMIN_PIN=' <<<"$env_names"
@@ -153,5 +187,6 @@ while (( SECONDS < deadline )); do
   sleep 1
 done
 sudo journalctl -u morrows.service -n 120 --no-pager >&2 || true
+sudo journalctl -u morrow-runtime.service -n 120 --no-pager >&2 || true
 exit 1
 REMOTE_SCRIPT

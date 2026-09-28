@@ -12,3 +12,8 @@
 .env
 
 /data/*.knowledge.git/
+# Python runtime build/test artifacts
+**/.venv/
+**/.pytest_cache/
+**/__pycache__/
+**/*.pyc

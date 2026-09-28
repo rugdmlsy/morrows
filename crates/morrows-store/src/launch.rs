@@ -29,6 +29,16 @@ impl Store {
             if let Some(value) = &input.default_cwd {
                 validate_absolute("default_cwd", value)?;
             }
+            if let Some(backend) = input
+                .metadata
+                .get("execution_backend")
+                .and_then(|value| value.as_str())
+                && !matches!(backend, "local" | "morrow_runtime")
+            {
+                return Err(DomainError::InvalidInput(format!(
+                    "unsupported execution_backend {backend}"
+                )));
+            }
         } else if !input.program.is_empty() || input.default_cwd.is_some() || input.model.is_some()
         {
             return Err(DomainError::InvalidInput(
@@ -159,7 +169,12 @@ impl Store {
                 ));
             }
             validate_absolute("cwd", &cwd)?;
-            if !Path::new(&cwd).is_dir() {
+            let remote_runtime = profile
+                .metadata
+                .get("execution_backend")
+                .and_then(|value| value.as_str())
+                == Some("morrow_runtime");
+            if !remote_runtime && !Path::new(&cwd).is_dir() {
                 return Err(DomainError::InvalidInput(format!(
                     "launch cwd does not exist or is not a directory: {cwd}"
                 )));
@@ -465,12 +480,34 @@ impl Store {
         self.begin_launch_attempt_with_lsm(id, None).await
     }
 
-    /// Persist the LSM provisioning intent in the same transaction that creates
-    /// the Run, before any external Session request can succeed or be lost.
+    /// Backward-compatible entry point for the standalone LSM integration. Intake
+    /// turns intentionally do not provision LSM execution state through this API.
     pub async fn begin_launch_attempt_with_lsm(
         &self,
         id: Id,
         lsm_subject: Option<&str>,
+    ) -> Result<LaunchExecution, DomainError> {
+        self.begin_launch_attempt_with_runtime_mode(id, lsm_subject, false)
+            .await
+    }
+
+    /// A managed morrow-runtime worker needs a transport Session even for an
+    /// intake-only provider process. This does not grant the Agent execution
+    /// capability; capability issuance remains gated on Assignment phase.
+    pub async fn begin_launch_attempt_with_runtime(
+        &self,
+        id: Id,
+        runtime_subject: Option<&str>,
+    ) -> Result<LaunchExecution, DomainError> {
+        self.begin_launch_attempt_with_runtime_mode(id, runtime_subject, true)
+            .await
+    }
+
+    async fn begin_launch_attempt_with_runtime_mode(
+        &self,
+        id: Id,
+        lsm_subject: Option<&str>,
+        provision_intake_transport: bool,
     ) -> Result<LaunchExecution, DomainError> {
         let now = Utc::now();
         let mut tx = self
@@ -619,7 +656,8 @@ impl Store {
                 .map_err(storage)?;
             }
             if let Some(subject) = lsm_subject
-                && assignment.phase == morrows_core::INTAKE_PHASE_IMPLEMENTING
+                && (provision_intake_transport
+                    || assignment.phase == morrows_core::INTAKE_PHASE_IMPLEMENTING)
             {
                 sqlx::query(
                     "INSERT INTO run_lsm_provisioning(run_id,subject,created_at,updated_at)
@@ -1479,18 +1517,32 @@ impl Store {
         Ok(changed)
     }
 
-    /// A claimed job has no surviving in-process child handle after a daemon restart.
-    /// Fail started attempts and requeue jobs that never reached Run creation.
+    /// A local child process cannot survive Morrows daemon restart with a usable
+    /// in-process handle. Managed morrow-runtime processes are different: their
+    /// runtime_id is durable on the worker, so the server restores a monitor
+    /// instead of terminalizing the Run here.
     pub async fn recover_launch_jobs_after_restart(&self) -> Result<usize, DomainError> {
         let rows = sqlx::query(
-            "SELECT a.id FROM launch_attempts a JOIN launch_profiles p ON p.id=a.launch_profile_id
+            "SELECT a.id,a.launch_profile_id FROM launch_attempts a
+             JOIN launch_profiles p ON p.id=a.launch_profile_id
              WHERE p.adapter IN ('codex_cli','codebuddy_cli') AND a.status IN ('starting','running')",
         )
         .fetch_all(&self.pool)
         .await
         .map_err(storage)?;
+        let mut local_recovered = 0;
         for row in &rows {
             let id = parse_id(row.try_get("id").map_err(storage)?)?;
+            let profile_id = parse_id(row.try_get("launch_profile_id").map_err(storage)?)?;
+            let profile = self.get_launch_profile(profile_id).await?;
+            let backend = profile
+                .metadata
+                .get("execution_backend")
+                .and_then(Value::as_str)
+                .unwrap_or("local");
+            if backend == "morrow_runtime" {
+                continue;
+            }
             self.finish_launch_attempt(
                 id,
                 None,
@@ -1498,6 +1550,7 @@ impl Store {
                 Some("launcher daemon restarted before process reconciliation".into()),
             )
             .await?;
+            local_recovered += 1;
         }
         sqlx::query(
             "UPDATE jobs SET status='pending',claimed_at=NULL WHERE kind='launch_executor' AND status='running'
@@ -1506,7 +1559,36 @@ impl Store {
         .execute(&self.pool)
         .await
         .map_err(storage)?;
-        Ok(rows.len())
+        Ok(local_recovered)
+    }
+
+    pub async fn active_morrow_runtime_launch_attempts(
+        &self,
+    ) -> Result<Vec<LaunchAttempt>, DomainError> {
+        let rows = sqlx::query(
+            "SELECT a.id,a.launch_profile_id FROM launch_attempts a
+             JOIN launch_profiles p ON p.id=a.launch_profile_id
+             WHERE p.adapter IN ('codex_cli','codebuddy_cli') AND a.status IN ('starting','running')
+             ORDER BY a.created_at,a.id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage)?;
+        let mut attempts = Vec::new();
+        for row in rows {
+            let id = parse_id(row.try_get("id").map_err(storage)?)?;
+            let profile_id = parse_id(row.try_get("launch_profile_id").map_err(storage)?)?;
+            let profile = self.get_launch_profile(profile_id).await?;
+            if profile
+                .metadata
+                .get("execution_backend")
+                .and_then(Value::as_str)
+                == Some("morrow_runtime")
+            {
+                attempts.push(self.get_launch_attempt(id).await?);
+            }
+        }
+        Ok(attempts)
     }
 }
 

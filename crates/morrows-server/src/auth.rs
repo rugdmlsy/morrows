@@ -142,7 +142,11 @@ pub async fn authenticate_agent_requests(
 }
 
 pub(crate) fn is_agent_http_surface(method: &Method, path: &str) -> bool {
-    if path == "/mcp" || path.starts_with("/mcp/") {
+    if path == "/mcp"
+        || path.starts_with("/mcp/")
+        || path == "/agent-mcp"
+        || path.starts_with("/agent-mcp/")
+    {
         return true;
     }
     if path == "/api/agent-deliveries" && method == Method::GET {

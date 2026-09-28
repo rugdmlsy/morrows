@@ -275,3 +275,88 @@ async fn next_session_runtime_inherits_model_and_reasoning_effort() {
     assert_eq!(second.model.as_deref(), Some("gpt-5.6-sol"));
     assert_eq!(second.reasoning_effort.as_deref(), Some("high"));
 }
+
+#[tokio::test]
+async fn restart_preserves_morrow_runtime_session_attempt_and_remote_paths() {
+    let store = Store::connect("sqlite::memory:").await.unwrap();
+    let agent = store
+        .register_agent("remote-session-runtime", &[])
+        .await
+        .unwrap();
+    let session = store
+        .create_session(CreateSession {
+            agent_instance_id: agent.id,
+            title: "Remote Session".into(),
+        })
+        .await
+        .unwrap();
+    let profile = store
+        .register_launch_profile(
+            serde_json::from_value::<RegisterLaunchProfile>(json!({
+                "name":"remote session runtime",
+                "adapter":"codex_cli",
+                "agent_instance_id":agent.id,
+                "program":"/opt/codex/bin/codex",
+                "default_cwd":"/srv/remote-only-worktree",
+                "enabled":true,
+                "metadata":{"execution_backend":"morrow_runtime"}
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let runtime = store
+        .create_session_runtime_attempt(
+            session.id,
+            StartSessionRuntime {
+                launch_profile_id: Some(profile.id),
+                model: None,
+                reasoning_effort: None,
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .mark_session_runtime_running(
+            runtime.id,
+            None,
+            "morrow-runtime://node/stdout".into(),
+            "morrow-runtime://node/stderr".into(),
+        )
+        .await
+        .unwrap();
+    let credential = store
+        .issue_session_runtime_credential(agent.id, session.id, "remote recovery", 600)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        store
+            .recover_session_runtime_attempts_after_restart()
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        store
+            .get_session_runtime_attempt(runtime.id)
+            .await
+            .unwrap()
+            .status,
+        "running"
+    );
+    assert!(
+        store
+            .get_agent_credential(credential.credential.id)
+            .await
+            .unwrap()
+            .revoked_at
+            .is_none()
+    );
+    let active = store
+        .active_morrow_runtime_session_attempts()
+        .await
+        .unwrap();
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].id, runtime.id);
+}

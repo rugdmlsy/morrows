@@ -517,3 +517,68 @@ async fn restart_reconciles_unfinished_local_launcher() {
         "released"
     );
 }
+
+#[tokio::test]
+async fn morrow_runtime_profiles_validate_paths_on_the_target_worker() {
+    let store = Store::connect("sqlite::memory:").await.unwrap();
+    let worker = agent(&store, "remote-worker").await;
+    let mut remote = profile_input(worker.id);
+    remote.default_cwd = Some("/path/that/exists-only-on-the-target-worker".into());
+    remote.metadata = json!({"execution_backend":"morrow_runtime"});
+    let profile = store.register_launch_profile(remote).await.unwrap();
+    let assignment = assignment(&store, worker.id, "remote launch paths").await;
+    let attempt = store
+        .enqueue_launch(input(json!({
+            "assignment_id":assignment.id,
+            "launch_profile_id":profile.id
+        })))
+        .await
+        .unwrap();
+    assert_eq!(
+        attempt.cwd.as_deref(),
+        Some("/path/that/exists-only-on-the-target-worker")
+    );
+
+    let mut invalid = profile_input(worker.id);
+    invalid.metadata = json!({"execution_backend":"ssh"});
+    assert!(matches!(
+        store.register_launch_profile(invalid).await,
+        Err(DomainError::InvalidInput(_))
+    ));
+}
+
+#[tokio::test]
+async fn restart_preserves_managed_morrow_runtime_launcher() {
+    let store = Store::connect("sqlite::memory:").await.unwrap();
+    let worker = agent(&store, "remote-restart-worker").await;
+    let mut remote = profile_input(worker.id);
+    remote.metadata = json!({"execution_backend":"morrow_runtime"});
+    let profile = store.register_launch_profile(remote).await.unwrap();
+    let work = assignment(&store, worker.id, "remote interrupted launch").await;
+    let attempt = store
+        .enqueue_launch(input(json!({
+            "assignment_id":work.id,
+            "launch_profile_id":profile.id
+        })))
+        .await
+        .unwrap();
+    store.claim_launch_job().await.unwrap().unwrap();
+    let execution = store
+        .begin_launch_attempt_with_runtime(attempt.id, Some("morrow-runtime"))
+        .await
+        .unwrap();
+
+    assert_eq!(execution.attempt.status, "starting");
+    assert_eq!(store.recover_launch_jobs_after_restart().await.unwrap(), 0);
+    assert_eq!(
+        store.get_launch_attempt(attempt.id).await.unwrap().status,
+        "starting"
+    );
+    assert_eq!(
+        store.get_assignment(work.id).await.unwrap().status,
+        "active"
+    );
+    let active = store.active_morrow_runtime_launch_attempts().await.unwrap();
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].id, attempt.id);
+}

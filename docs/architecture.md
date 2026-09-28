@@ -15,8 +15,8 @@ Morrows separates the system into three decoupled planes with explicit boundarie
                      /api/control    │ (trusted loopback HTTP)
                      scoped token    ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
-│ 2. LSM Runtime Plane (运行平面)                                         │
-│    执行证据与运行资源的 Source of Truth                                     │
+│ 2. morrow-runtime Execution Plane (执行平面)                            │
+│    Morrows 专用执行证据与运行资源的 Source of Truth                          │
 │    负责：运行空间 (RuntimeScope)、执行任务 (RuntimeJob)、持久终端 (Shell)、    │
 │          浏览器实例、文件系统/远程机器操作、底层审计日志 (Audit) 等             │
 └────────────────────────────────────┬────────────────────────────────────┘
@@ -32,6 +32,8 @@ Morrows separates the system into three decoupled planes with explicit boundarie
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
+Standalone LSM is not the managed execution plane. It remains an independent service for ChatGPT/WebUI OAuth, administration, repair and ARP. The managed provider execution path uses the forked `morrow-runtime`; see [morrow-runtime.md](morrow-runtime.md).
+
 ## Terminology Normalization & Naming Model (去歧义术语规范)
 
 To prevent severe ambiguity caused by bare usages of common words like `session` and `run`, Morrows defines a two-layer naming model:
@@ -44,8 +46,8 @@ To prevent severe ambiguity caused by bare usages of common words like `session`
 | **工作分配** | `WorkAssignment` | `Assignment` | 某个 Agent 实例对工作项中某特定角色的有期限责任（带租约 Lease） |
 | **工作执行**（前端：执行记录） | `WorkExecution` | `Run` | 某个 Agent 对一次工作分配的具体逻辑执行过程 |
 | **启动记录 / 启动尝试** | `AgentLaunch` | `LaunchAttempt` | 系统为推进工作执行，实际启动一次具体 Agent 进程的记录 |
-| **运行空间** | `RuntimeScope` | LSM `Logical Session` | LSM 运行时为一次工作执行划定的安全隔离执行范围与权限作用域 |
-| **执行任务** | `RuntimeJob` | LSM `Job` | 在运行空间内异步执行的具体机器任务（如 `cargo test`） |
+| **运行空间** | `RuntimeScope` | morrow-runtime `Logical Session` | morrow-runtime 为一次工作执行划定的安全隔离执行范围与权限作用域 |
+| **执行任务** | `RuntimeJob` | morrow-runtime `Job` | 在运行空间内异步执行的具体机器任务（如 `cargo test`） |
 | **持久终端 / 终端** | `PersistentShell` | `shell session` | 运行空间内维持环境与状态的常驻命令行交互终端 |
 | **浏览器实例** | `BrowserInstance` | `browser session` | 运行空间内受控的有状态浏览器实例 |
 | **模型会话** | `ProviderThread` | `Provider Session` | Codex / Claude / Gemini 模型自身的连续私有对话流 |

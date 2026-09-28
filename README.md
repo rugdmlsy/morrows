@@ -51,8 +51,8 @@ Morrows 是一个本地优先、Agent 原生的工作协作系统，用于协调
 - 可签发/撤销的 Agent Bearer credential；runtime credential 短期且绑定 Run，bridge credential 由本地控制面显式签发
 - 可签发/撤销的控制平面 Operator credential，支持 `viewer` / `operator` / `admin` RBAC，供 loopback/CLI 管理兼容使用；公网 WebUI 使用 LSM OAuth
 - LSM、Antigravity、Gemini 等 external handoff adapter，以及受所有权约束的 accept/status
-- 本地 launch job 中断后的启动恢复
-- 可选 LSM Run 集成：每个 Run 一个持久 Logical Session、作用域化 Codex MCP 权限、独立 control API、执行证据、显式 restart 与有界 cleanup
+- 本地 launch job 中断后的启动恢复；`morrow_runtime` 远端 launch 在 Morrows 重启后恢复对同一 durable runtime 的监控
+- 内置 `morrow-runtime` 执行平面：Machine 绑定的远端 worker、持久 Logical Session、作用域化 runtime capability、Task/direct Session provider 进程监督与有界 cleanup；独立 LSM 保留为 OAuth/管理/修复/ARP 服务
 - 中英文 Web UI，首次访问默认中文
 - SQLite 持久化 launcher job 与支持 provider resume 的事务型 Agent delivery outbox
 - Agent Fleet 可手动添加 Codex Agent：填写账号邮箱与目标机器上的凭据引用（如 `~/.codex`、`~/.codex-personal`）；Morrows 不上传、不复制、不保存 Codex `auth.json` 或 Provider 登录 token
@@ -146,13 +146,17 @@ MORROWS_MCP_URL=https://mcp.xycdev.com/morrows
 # 如需额外 Host，可用逗号分隔：
 # MORROWS_MCP_ALLOWED_HOSTS=internal.example:9443
 
-# 可选：loopback LSM 集成
-MORROWS_LSM_CONTROL_URL=http://127.0.0.1:8766
-MORROWS_LSM_SUBJECT=local-mcp-client
+# Provider Agent 使用直连 Morrows MCP；不要经过 ChatGPT/WebUI 的 LSM OAuth bridge
+MORROWS_AGENT_MCP_URL=https://mcp.xycdev.com/morrows/ui/agent-mcp
+
+# 内置 morrow-runtime sidecar（生产默认 loopback :8790）
+MORROWS_RUNTIME_CONTROL_URL=http://127.0.0.1:8790
+MORROWS_RUNTIME_PROXY_URL=http://127.0.0.1:8790
+MORROWS_RUNTIME_MCP_URL=https://mcp.xycdev.com/morrows/ui/runtime/mcp
+MORROWS_RUNTIME_SUBJECT=morrows-runtime
 MORROWS_AGENT_RESTART_GRACE_SECONDS=600
-# VPS 上无需复制 MORROWS_LSM_CONTROL_KEY：
-# scripts/run-vps.sh 只从 LSM 的私密 service.env 读取
-# LOCAL_SHELL_MCP_CONTROL_API_KEY，并在进程启动时映射。
+# MORROWS_RUNTIME_CONTROL_KEY 保存在 /home/morrow/.config/morrows/runtime.env，
+# 由 scripts/deploy-vps.sh 创建；不会复用 standalone LSM 的 control key。
 
 # loopback 上可选；任何面向远程的部署都要求开启
 MORROWS_REQUIRE_AGENT_AUTH=1
@@ -265,7 +269,7 @@ WebUI 可以为某个 Session 显式启动/恢复本地 Agent CLI。专用 Sessi
 Morrows 明确拆分为三个平面：
 
 1. **Morrows Control Plane**：工作语义、工作分配、上下文快照、长期记忆、决策和成果物的事实来源。
-2. **LSM Runtime Plane**：主机执行资源、隔离运行空间、Job、Shell 和执行审计的事实来源。
+2. **morrow-runtime Execution Plane**：Morrows 专用的主机执行资源、隔离运行空间、Job、Shell 和执行审计事实来源；standalone LSM 仍独立用于 OAuth/管理/修复/ARP。
 3. **Provider Plane**：模型私有 rollout Session、工具表示和 reasoning trace 的事实来源。Provider Session 属于私有状态，不直接在 Agent 之间共享。
 
 > **终极恢复原则（Ultimate Recovery Invariant）**
@@ -299,6 +303,7 @@ Morrows 明确拆分为三个平面：
 
 - [docs/agent-work-and-context-spec.md](docs/agent-work-and-context-spec.md)
 - [docs/architecture.md](docs/architecture.md)
+- [docs/morrow-runtime.md](docs/morrow-runtime.md)
 
 ## 实际 Handoff 验证
 

@@ -11,6 +11,7 @@ anyhow.workspace = true
 base64 = "0.22"
 axum.workspace = true
 rmcp.workspace = true
+reqwest.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -1,5 +1,6 @@
 use super::*;
-use crate::lsm::{AgentBinding, LsmControl};
+use crate::morrow_runtime::{MorrowRuntimeControl, RuntimeAgentBinding};
+use crate::runtime_executor::{self, RuntimeExecutorTarget};
 use axum::extract::Query;
 use morrows_core::*;
 use std::{
@@ -121,7 +122,7 @@ async fn run_restart(
         ))));
     }
     if s.store.run_lsm_binding(id).await?.is_none() && s.store.has_lsm_runtime(id).await? {
-        let control = LsmControl::from_env()
+        let control = MorrowRuntimeControl::from_env()
             .map_err(|err| ApiError(DomainError::Storage(err.to_string())))?
             .ok_or_else(|| {
                 ApiError(DomainError::Conflict(
@@ -144,7 +145,7 @@ async fn run_cancel(
     // Persist cancellation first. Revocation and cleanup are retryable side effects
     // of that durable intent, including when LSM is temporarily unavailable.
     let run = s.store.request_run_cancel(id).await?;
-    match LsmControl::from_env() {
+    match MorrowRuntimeControl::from_env() {
         Ok(Some(control)) => {
             if let Err(err) = control.revoke_for_run(&s.store, id).await {
                 tracing::warn!(%id, %err, "capability revocation pending after Run cancel");
@@ -164,7 +165,7 @@ async fn run_execution(
     let Some(binding) = binding else {
         return Ok(Json(json!({"binding":null,"observation":null})));
     };
-    let observation = match LsmControl::from_env() {
+    let observation = match MorrowRuntimeControl::from_env() {
         Ok(Some(control)) => match control.observe(&binding.logical_session_id).await {
             Ok(data) => data,
             Err(err) => json!({"error":err.to_string()}),
@@ -210,7 +211,7 @@ async fn run_job_output(
         .run_lsm_binding(id)
         .await?
         .ok_or_else(|| ApiError(DomainError::NotFound("Run LSM binding".into())))?;
-    let control = LsmControl::from_env()
+    let control = MorrowRuntimeControl::from_env()
         .map_err(|err| ApiError(DomainError::Storage(err.to_string())))?
         .ok_or_else(|| {
             ApiError(DomainError::Conflict(
@@ -229,7 +230,7 @@ async fn run_job_output(
 }
 
 pub async fn runtime_sweep(store: Store) {
-    let Some(control) = (match LsmControl::from_env() {
+    let Some(control) = (match MorrowRuntimeControl::from_env() {
         Ok(control) => control,
         Err(err) => {
             tracing::error!(%err, "LSM control configuration is invalid");
@@ -515,11 +516,26 @@ pub async fn worker_loop(store: Store) {
 }
 
 async fn execute_claimed_launch(store: Store, job: ClaimedLaunchJob) -> anyhow::Result<()> {
-    let control = LsmControl::from_env()?;
-    let execution = match store
-        .begin_launch_attempt_with_lsm(job.attempt.id, control.as_ref().map(LsmControl::subject))
-        .await
-    {
+    let target =
+        runtime_executor::resolve(&store, &job.profile, job.attempt.agent_instance_id).await?;
+    let control = MorrowRuntimeControl::from_env()?;
+    if matches!(target, RuntimeExecutorTarget::MorrowRuntime { .. }) && control.is_none() {
+        anyhow::bail!("morrow_runtime execution_backend requires MORROWS_RUNTIME_CONTROL_URL/KEY");
+    }
+    let subject = control.as_ref().map(MorrowRuntimeControl::subject);
+    let execution_result = match &target {
+        RuntimeExecutorTarget::Local => {
+            store
+                .begin_launch_attempt_with_lsm(job.attempt.id, subject)
+                .await
+        }
+        RuntimeExecutorTarget::MorrowRuntime { .. } => {
+            store
+                .begin_launch_attempt_with_runtime(job.attempt.id, subject)
+                .await
+        }
+    };
+    let execution = match execution_result {
         Ok(value) => value,
         Err(err) => {
             let _ = store
@@ -533,10 +549,28 @@ async fn execute_claimed_launch(store: Store, job: ClaimedLaunchJob) -> anyhow::
             return Err(anyhow::anyhow!(err));
         }
     };
-    match execution.profile.adapter.as_str() {
-        "codex_cli" => execute_codex(store, execution).await,
-        "codebuddy_cli" => execute_codebuddy(store, execution).await,
-        other => {
+    match (target, execution.profile.adapter.as_str()) {
+        (RuntimeExecutorTarget::Local, "codex_cli") => execute_codex(store, execution).await,
+        (RuntimeExecutorTarget::Local, "codebuddy_cli") => {
+            execute_codebuddy(store, execution).await
+        }
+        (
+            RuntimeExecutorTarget::MorrowRuntime {
+                machine,
+                worker_name,
+            },
+            "codex_cli" | "codebuddy_cli",
+        ) => {
+            execute_remote_agent(
+                store,
+                execution,
+                control.expect("remote target checked runtime control"),
+                &machine.name,
+                &worker_name,
+            )
+            .await
+        }
+        (_, other) => {
             let message = format!("unsupported launch adapter at runtime: {other}");
             store
                 .finish_launch_attempt(execution.attempt.id, None, None, Some(message.clone()))
@@ -544,6 +578,428 @@ async fn execute_claimed_launch(store: Store, job: ClaimedLaunchJob) -> anyhow::
             Err(anyhow::anyhow!(message))
         }
     }
+}
+
+pub(crate) fn remote_codex_home(account: Option<&Account>) -> anyhow::Result<Option<String>> {
+    let Some(account) = account else {
+        return Ok(None);
+    };
+    match (
+        account.credential_kind.as_deref(),
+        account.credential_ref.as_deref(),
+    ) {
+        (None, None) => Ok(None),
+        (Some("codex_home"), Some(reference)) if reference == "~" => Ok(Some("{home}".into())),
+        (Some("codex_home"), Some(reference)) if reference.starts_with("~/") => {
+            Ok(Some(format!("{{home}}/{}", &reference[2..])))
+        }
+        (Some("codex_home"), Some(reference)) if std::path::Path::new(reference).is_absolute() => {
+            Ok(Some(reference.to_owned()))
+        }
+        (Some("codex_home"), Some(reference)) => anyhow::bail!(
+            "codex_home credential_ref must be absolute or start with ~/: {reference}"
+        ),
+        (Some(kind), Some(_)) => anyhow::bail!("unsupported credential kind for Codex: {kind}"),
+        _ => anyhow::bail!("Account credential_kind and credential_ref must be set together"),
+    }
+}
+
+pub(crate) fn remote_output_text(runtime: &Value) -> String {
+    let head = runtime
+        .get("stdout_head")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let tail = runtime
+        .get("stdout_tail")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if head == tail || tail.is_empty() {
+        head.to_owned()
+    } else if head.is_empty() {
+        tail.to_owned()
+    } else {
+        format!("{head}\n{tail}")
+    }
+}
+
+pub(crate) fn runtime_terminal(status: &str) -> bool {
+    matches!(
+        status,
+        "succeeded" | "failed" | "exited" | "stopped" | "lost"
+    )
+}
+
+async fn execute_remote_agent(
+    store: Store,
+    execution: LaunchExecution,
+    control: MorrowRuntimeControl,
+    machine_name: &str,
+    worker_name: &str,
+) -> anyhow::Result<()> {
+    let cwd = execution
+        .attempt
+        .cwd
+        .clone()
+        .or_else(|| execution.profile.default_cwd.clone())
+        .ok_or_else(|| anyhow::anyhow!("launch cwd missing"))?;
+    let execution_authorized = store
+        .get_assignment(execution.run.assignment_id)
+        .await?
+        .phase
+        == INTAKE_PHASE_IMPLEMENTING;
+    let agent_binding = if execution_authorized {
+        Some(
+            control
+                .provision_agent(&store, execution.run.id, &execution.task.title)
+                .await?,
+        )
+    } else {
+        None
+    };
+    let runtime_session_id = match agent_binding.as_ref() {
+        Some(binding) => binding.logical_session_id.clone(),
+        None => {
+            control
+                .provision_run(&store, execution.run.id, &execution.task.title)
+                .await?
+        }
+    };
+    let morrows_credential = store
+        .issue_runtime_credential(
+            execution.attempt.agent_instance_id,
+            execution.run.id,
+            &format!("remote launch {}", execution.attempt.id),
+            3600,
+        )
+        .await?;
+
+    let claimed_deliveries = store
+        .claim_agent_deliveries_for_launch(execution.attempt.id, 50)
+        .await?;
+    let mut prompt = build_prompt(&execution);
+    let delivery_prompt = build_delivery_prompt(&execution, &claimed_deliveries);
+    if !delivery_prompt.is_empty() {
+        prompt.push_str(&delivery_prompt);
+    }
+    if let Some(binding) = &agent_binding {
+        prompt.push_str(&format!(
+            "\nmorrow-runtime execution context: {}. Use only this Logical Session for runtime calls. Morrows owns Session lifecycle; do not start, finish, cancel, or delete it.\n",
+            binding.logical_session_id,
+        ));
+    } else {
+        prompt.push_str("\nThis is an intake-only launch. Morrows has not issued morrow-runtime execution capability. Complete task_intake, then call task_interview_start and resolve material uncertainties with the Human. When nothing material remains unresolved, call task_interview_finalize. Do not implement or modify external state until a later launch has Assignment phase=implementing.\n");
+    }
+
+    let resume_session = resolve_launch_provider_ref(&store, &execution).await?;
+    let mut files = Vec::<Value>::new();
+    let mut env = serde_json::Map::new();
+    env.insert(
+        "MORROWS_AGENT_AUTHORIZATION".into(),
+        Value::String(format!("Bearer {}", morrows_credential.token)),
+    );
+    env.insert(
+        "MORROWS_AGENT_INSTANCE_ID".into(),
+        Value::String(execution.attempt.agent_instance_id.to_string()),
+    );
+    if let Some(session_id) = execution.attempt.session_id {
+        env.insert(
+            "MORROWS_SESSION_ID".into(),
+            Value::String(session_id.to_string()),
+        );
+    }
+    if let Some(binding) = &agent_binding {
+        env.insert(
+            "MORROWS_RUNTIME_CAPABILITY".into(),
+            Value::String(binding.capability.clone()),
+        );
+    }
+
+    let (args, known_session_ref) = match execution.profile.adapter.as_str() {
+        "codex_cli" => {
+            if let Some(home) = remote_codex_home(execution.account.as_ref())? {
+                env.insert("CODEX_HOME".into(), Value::String(home));
+            }
+            let mut args = codex_args(
+                &execution.profile,
+                &cwd,
+                "{runtime_dir}/last-message.txt",
+                resume_session.as_deref(),
+                !execution_authorized,
+            );
+            inject_morrows_config(&mut args);
+            if let Some(binding) = &agent_binding {
+                inject_runtime_config(&mut args, binding);
+            }
+            (args, None)
+        }
+        "codebuddy_cli" => {
+            let session_ref = resume_session
+                .clone()
+                .unwrap_or_else(|| format!("morrows-{}", execution.attempt.id));
+            let config = codebuddy_mcp_config(
+                &execution,
+                agent_binding.as_ref(),
+                &morrows_credential.token,
+            )?;
+            files.push(json!({
+                "name":"codebuddy-mcp.json",
+                "content": serde_json::to_string_pretty(&config)?,
+                "mode": 384,
+            }));
+            let args = codebuddy_args(
+                &execution.profile,
+                "{runtime_dir}/codebuddy-mcp.json",
+                &session_ref,
+                resume_session.is_some(),
+            );
+            (args, Some(session_ref))
+        }
+        other => anyhow::bail!("unsupported remote provider adapter: {other}"),
+    };
+
+    let spec = json!({
+        "provider": execution.profile.adapter,
+        "program": execution.profile.program,
+        "cwd": cwd,
+        "args": args,
+        "env": env,
+        "files": files,
+        "stdin_text": prompt,
+    });
+    if let Err(err) = control
+        .launch_agent(&runtime_session_id, worker_name, execution.attempt.id, spec)
+        .await
+    {
+        let _ = store
+            .release_claimed_agent_deliveries(execution.attempt.id)
+            .await;
+        if agent_binding.is_some() {
+            let _ = control.revoke_for_run(&store, execution.run.id).await;
+        }
+        return Err(err);
+    }
+
+    let stdout_uri = format!(
+        "morrow-runtime://{worker_name}/{}/stdout",
+        execution.attempt.id
+    );
+    let stderr_uri = format!(
+        "morrow-runtime://{worker_name}/{}/stderr",
+        execution.attempt.id
+    );
+    if let Err(err) = store
+        .mark_launch_running(execution.attempt.id, None, stdout_uri, stderr_uri)
+        .await
+    {
+        let _ = control
+            .stop_agent(&runtime_session_id, worker_name, execution.attempt.id)
+            .await;
+        if agent_binding.is_some() {
+            let _ = control.revoke_for_run(&store, execution.run.id).await;
+        }
+        return Err(err.into());
+    }
+    if !claimed_deliveries.is_empty()
+        && let Err(err) = store
+            .complete_claimed_agent_deliveries(
+                execution.attempt.id,
+                &format!("{}:{}", execution.profile.adapter, execution.attempt.id),
+            )
+            .await
+    {
+        tracing::warn!(
+            launch_attempt_id = %execution.attempt.id,
+            %err,
+            "remote provider received delivery prompt but acknowledgement could not be persisted"
+        );
+    }
+    tracing::info!(
+        launch_attempt_id = %execution.attempt.id,
+        %machine_name,
+        %worker_name,
+        "Agent runtime launched on morrow-runtime worker"
+    );
+
+    monitor_remote_agent(
+        store,
+        execution.attempt,
+        execution.profile,
+        execution.run.id,
+        control,
+        worker_name.to_owned(),
+        runtime_session_id,
+        known_session_ref,
+    )
+    .await
+}
+
+async fn monitor_remote_agent(
+    store: Store,
+    attempt: LaunchAttempt,
+    profile: LaunchProfile,
+    run_id: Id,
+    control: MorrowRuntimeControl,
+    worker_name: String,
+    runtime_session_id: String,
+    known_session_ref: Option<String>,
+) -> anyhow::Result<()> {
+    let mut observed_running = attempt.status == "running";
+    let mut poll = tokio::time::interval(std::time::Duration::from_millis(750));
+    let runtime = loop {
+        poll.tick().await;
+        if store.launch_stop_requested(attempt.id).await? {
+            let _ = control
+                .stop_agent(&runtime_session_id, &worker_name, attempt.id)
+                .await;
+            let _ = control.revoke_for_run(&store, run_id).await;
+            store
+                .finish_launch_attempt(
+                    attempt.id,
+                    None,
+                    known_session_ref.clone(),
+                    Some("run_cancel_requested".into()),
+                )
+                .await?;
+            return Ok(());
+        }
+        match control
+            .agent_status(&runtime_session_id, &worker_name, attempt.id)
+            .await
+        {
+            Ok(value) => {
+                let runtime = value.get("runtime").cloned().unwrap_or(Value::Null);
+                if !observed_running {
+                    let stdout_uri =
+                        format!("morrow-runtime://{worker_name}/{}/stdout", attempt.id);
+                    let stderr_uri =
+                        format!("morrow-runtime://{worker_name}/{}/stderr", attempt.id);
+                    match store
+                        .mark_launch_running(attempt.id, None, stdout_uri, stderr_uri)
+                        .await
+                    {
+                        Ok(_) => observed_running = true,
+                        Err(morrows_core::DomainError::Conflict(_)) => {
+                            observed_running =
+                                store.get_launch_attempt(attempt.id).await?.status == "running";
+                        }
+                        Err(err) => return Err(err.into()),
+                    }
+                }
+                let status = runtime
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown");
+                if runtime_terminal(status) {
+                    break runtime;
+                }
+            }
+            Err(err) if crate::morrow_runtime::runtime_not_found(&err) => {
+                let message = format!(
+                    "morrow-runtime durable runtime {} is missing on worker {}",
+                    attempt.id, worker_name
+                );
+                let _ = control.revoke_for_run(&store, run_id).await;
+                store
+                    .finish_launch_attempt(
+                        attempt.id,
+                        None,
+                        known_session_ref.clone(),
+                        Some(message),
+                    )
+                    .await?;
+                return Ok(());
+            }
+            Err(err) => {
+                tracing::warn!(
+                    launch_attempt_id = %attempt.id,
+                    %worker_name,
+                    %err,
+                    "morrow-runtime status temporarily unavailable; preserving Run"
+                );
+            }
+        }
+    };
+
+    let status = runtime
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("failed");
+    let exit_code = runtime.get("exit_code").and_then(Value::as_i64);
+    let stdout = remote_output_text(&runtime);
+    let stderr = runtime
+        .get("stderr_tail")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let provider_ref = known_session_ref.or_else(|| extract_external_session_ref(&stdout));
+    let success = status == "succeeded" || (status == "exited" && exit_code == Some(0));
+    let error = if success {
+        None
+    } else {
+        extract_codex_error(&stdout)
+            .or_else(|| {
+                let value = stderr.trim();
+                (!value.is_empty()).then(|| clip(value, 2000))
+            })
+            .map(|message| format!("{}: {message}", profile.adapter))
+            .or_else(|| Some(format!("remote runtime ended with status {status}")))
+    };
+    control.revoke_for_run(&store, run_id).await?;
+    store
+        .finish_launch_attempt(attempt.id, exit_code, provider_ref, error)
+        .await?;
+    Ok(())
+}
+
+pub async fn recover_remote_launch_monitors(store: Store) -> anyhow::Result<usize> {
+    let attempts = store.active_morrow_runtime_launch_attempts().await?;
+    if attempts.is_empty() {
+        return Ok(0);
+    }
+    let control = MorrowRuntimeControl::from_env()?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "active morrow-runtime launches exist but runtime control is not configured"
+        )
+    })?;
+    let count = attempts.len();
+    for attempt in attempts {
+        let Some(run_id) = attempt.run_id else {
+            tracing::error!(launch_attempt_id=%attempt.id, "remote launch is missing Run id during restart recovery");
+            continue;
+        };
+        let profile = store.get_launch_profile(attempt.launch_profile_id).await?;
+        let target = runtime_executor::resolve(&store, &profile, attempt.agent_instance_id).await?;
+        let RuntimeExecutorTarget::MorrowRuntime { worker_name, .. } = target else {
+            tracing::error!(launch_attempt_id=%attempt.id, "remote launch resolved to non-runtime target during recovery");
+            continue;
+        };
+        let Some(binding) = store.run_lsm_binding(run_id).await? else {
+            tracing::error!(launch_attempt_id=%attempt.id, %run_id, "remote launch has no runtime Session binding during recovery");
+            continue;
+        };
+        let child_store = store.clone();
+        let child_control = control.clone();
+        tokio::spawn(async move {
+            if let Err(err) = monitor_remote_agent(
+                child_store,
+                attempt.clone(),
+                profile,
+                run_id,
+                child_control,
+                worker_name,
+                binding.logical_session_id,
+                attempt.external_session_ref.clone(),
+            )
+            .await
+            {
+                tracing::error!(
+                    launch_attempt_id = %attempt.id,
+                    %err,
+                    "recovered remote launch monitor failed"
+                );
+            }
+        });
+    }
+    Ok(count)
 }
 
 async fn execute_codex(store: Store, execution: LaunchExecution) -> anyhow::Result<()> {
@@ -564,15 +1020,12 @@ impl Drop for SecretFileGuard {
     }
 }
 
-async fn write_codebuddy_mcp_config(
-    path: &FsPath,
+fn codebuddy_mcp_config(
     execution: &LaunchExecution,
-    agent_binding: Option<&AgentBinding>,
+    agent_binding: Option<&RuntimeAgentBinding>,
     morrows_token: &str,
-) -> anyhow::Result<SecretFileGuard> {
-    let morrows_url = std::env::var("MORROWS_MCP_URL")
-        .or_else(|_| std::env::var("AC_MCP_URL"))
-        .unwrap_or_else(|_| "http://127.0.0.1:8787/mcp".into());
+) -> anyhow::Result<Value> {
+    let morrows_url = morrows_mcp_url();
     let mut servers = serde_json::Map::new();
     servers.insert(
         "morrows".into(),
@@ -588,21 +1041,30 @@ async fn write_codebuddy_mcp_config(
     );
     if let Some(binding) = agent_binding {
         servers.insert(
-            "lsm".into(),
+            "morrow-runtime".into(),
             json!({
                 "type": "http",
                 "url": binding.mcp_url,
                 "headers": {
-                    "X-LSM-Session-Capability": binding.capability,
+                    "X-Morrow-Runtime-Capability": binding.capability,
                 },
-                "description": "LSM execution interface",
+                "description": "morrow-runtime execution interface",
             }),
         );
     }
-    let config = json!({
+    Ok(json!({
         "mcpServers": servers,
         "disabledMcpServers": [],
-    });
+    }))
+}
+
+async fn write_codebuddy_mcp_config(
+    path: &FsPath,
+    execution: &LaunchExecution,
+    agent_binding: Option<&RuntimeAgentBinding>,
+    morrows_token: &str,
+) -> anyhow::Result<SecretFileGuard> {
+    let config = codebuddy_mcp_config(execution, agent_binding, morrows_token)?;
     fs::write(path, serde_json::to_vec_pretty(&config)?).await?;
     #[cfg(unix)]
     {
@@ -663,7 +1125,7 @@ async fn execute_codebuddy_with_root(
         );
     }
 
-    let control = LsmControl::from_env()?;
+    let control = MorrowRuntimeControl::from_env()?;
     let execution_authorized = store
         .get_assignment(execution.run.assignment_id)
         .await?
@@ -726,7 +1188,7 @@ async fn execute_codebuddy_with_root(
         .stdout(Stdio::from(stdout_file))
         .stderr(Stdio::from(stderr_file))
         .kill_on_drop(true);
-    command.env_remove("MORROWS_LSM_CONTROL_KEY");
+    command.env_remove("MORROWS_RUNTIME_CONTROL_KEY");
     command.env_remove("LOCAL_SHELL_MCP_CONTROL_API_KEY");
 
     crate::configure_memory_cli(&mut command);
@@ -773,11 +1235,11 @@ async fn execute_codebuddy_with_root(
     }
     if let Some(binding) = &agent_binding {
         prompt.push_str(&format!(
-            "\nLSM execution context: {}. Use only this Logical Session for LSM calls. Morrows owns Session lifecycle; do not start, finish, cancel, or delete it.\n",
+            "\nmorrow-runtime execution context: {}. Use only this Logical Session for runtime calls. Morrows owns Session lifecycle; do not start, finish, cancel, or delete it.\n",
             binding.logical_session_id,
         ));
     } else {
-        prompt.push_str("\nThis is an intake-only launch. Morrows has not issued LSM execution capability. Complete task_intake, then call task_interview_start and resolve material uncertainties with the Human. The discussion may happen in the Morrows Task Session or in your current provider conversation. When nothing material remains unresolved, call task_interview_finalize with the current understanding, implementation plan, and unresolved_questions=[]. Session message IDs are optional audit metadata, not a gate. There is no separate operator approval step. After finalize, stop this read-only turn; Morrows will relaunch the implementation runtime automatically. Do not implement or modify external state until a new launch has Assignment phase=implementing.\n");
+        prompt.push_str("\nThis is an intake-only launch. Morrows has not issued morrow-runtime execution capability. Complete task_intake, then call task_interview_start and resolve material uncertainties with the Human. The discussion may happen in the Morrows Task Session or in your current provider conversation. When nothing material remains unresolved, call task_interview_finalize with the current understanding, implementation plan, and unresolved_questions=[]. Session message IDs are optional audit metadata, not a gate. There is no separate operator approval step. After finalize, stop this read-only turn; Morrows will relaunch the implementation runtime automatically. Do not implement or modify external state until a new launch has Assignment phase=implementing.\n");
     }
 
     if let Some(mut stdin) = child.stdin.take() {
@@ -970,7 +1432,7 @@ async fn execute_codex_with_root(
         );
     }
 
-    let control = LsmControl::from_env()?;
+    let control = MorrowRuntimeControl::from_env()?;
     let execution_authorized = store
         .get_assignment(execution.run.assignment_id)
         .await?
@@ -1017,7 +1479,7 @@ async fn execute_codex_with_root(
     );
     inject_morrows_config(&mut args);
     if let Some(binding) = &agent_binding {
-        inject_lsm_config(&mut args, binding);
+        inject_runtime_config(&mut args, binding);
     }
     let mut command = Command::new(&execution.profile.program);
     command
@@ -1027,7 +1489,7 @@ async fn execute_codex_with_root(
         .stdout(Stdio::from(stdout_file))
         .stderr(Stdio::from(stderr_file))
         .kill_on_drop(true);
-    command.env_remove("MORROWS_LSM_CONTROL_KEY");
+    command.env_remove("MORROWS_RUNTIME_CONTROL_KEY");
     command.env_remove("LOCAL_SHELL_MCP_CONTROL_API_KEY");
     command.env_remove("MORROWS_AGENT_AUTHORIZATION");
     command.env_remove("MORROWS_AGENT_INSTANCE_ID");
@@ -1044,7 +1506,7 @@ async fn execute_codex_with_root(
         command.env("MORROWS_SESSION_ID", session_id.to_string());
     }
     if let Some(binding) = &agent_binding {
-        command.env("MORROWS_LSM_CAPABILITY", &binding.capability);
+        command.env("MORROWS_RUNTIME_CAPABILITY", &binding.capability);
     }
     if let Some(home) = codex_home.as_deref() {
         command.env("CODEX_HOME", home);
@@ -1083,11 +1545,11 @@ async fn execute_codex_with_root(
     }
     if let Some(binding) = &agent_binding {
         prompt.push_str(&format!(
-            "\nLSM execution context: {}. Use only this Logical Session for LSM calls. Morrows owns Session lifecycle; do not start, finish, cancel, or delete it. LSM will reject old Session IDs from resumed Session history.\n",
+            "\nmorrow-runtime execution context: {}. Use only this Logical Session for runtime calls. Morrows owns Session lifecycle; do not start, finish, cancel, or delete it. morrow-runtime will reject old Session IDs from resumed Session history.\n",
             binding.logical_session_id,
         ));
     } else {
-        prompt.push_str("\nThis is an intake-only launch. Morrows has not issued LSM execution capability. Complete task_intake, then call task_interview_start and resolve material uncertainties with the Human. The discussion may happen in the Morrows Task Session or in your current provider conversation. When nothing material remains unresolved, call task_interview_finalize with the current understanding, implementation plan, and unresolved_questions=[]. Session message IDs are optional audit metadata, not a gate. There is no separate operator approval step. After finalize, stop this read-only turn; Morrows will relaunch the implementation runtime automatically. Do not implement or modify external state until a new launch has Assignment phase=implementing.\n");
+        prompt.push_str("\nThis is an intake-only launch. Morrows has not issued morrow-runtime execution capability. Complete task_intake, then call task_interview_start and resolve material uncertainties with the Human. The discussion may happen in the Morrows Task Session or in your current provider conversation. When nothing material remains unresolved, call task_interview_finalize with the current understanding, implementation plan, and unresolved_questions=[]. Session message IDs are optional audit metadata, not a gate. There is no separate operator approval step. After finalize, stop this read-only turn; Morrows will relaunch the implementation runtime automatically. Do not implement or modify external state until a new launch has Assignment phase=implementing.\n");
     }
     if let Some(mut stdin) = child.stdin.take() {
         if let Err(err) = stdin.write_all(prompt.as_bytes()).await {
@@ -1181,10 +1643,15 @@ async fn execute_codex_with_root(
     Ok(())
 }
 
-pub(crate) fn inject_morrows_config(args: &mut Vec<String>) {
-    let morrows_url = std::env::var("MORROWS_MCP_URL")
+pub(crate) fn morrows_mcp_url() -> String {
+    std::env::var("MORROWS_AGENT_MCP_URL")
+        .or_else(|_| std::env::var("MORROWS_MCP_URL"))
         .or_else(|_| std::env::var("AC_MCP_URL"))
-        .unwrap_or_else(|_| "http://127.0.0.1:8787/mcp".into());
+        .unwrap_or_else(|_| "http://127.0.0.1:8787/mcp".into())
+}
+
+pub(crate) fn inject_morrows_config(args: &mut Vec<String>) {
+    let morrows_url = morrows_mcp_url();
     let overrides = [
         format!("mcp_servers.morrows.url=\"{morrows_url}\""),
         "mcp_servers.morrows.env_http_headers.Authorization=\"MORROWS_AGENT_AUTHORIZATION\""
@@ -1198,10 +1665,10 @@ pub(crate) fn inject_morrows_config(args: &mut Vec<String>) {
     }
 }
 
-fn inject_lsm_config(args: &mut Vec<String>, binding: &AgentBinding) {
+pub(crate) fn inject_runtime_config(args: &mut Vec<String>, binding: &RuntimeAgentBinding) {
     let overrides = [
-        format!("mcp_servers.lsm.url=\"{}\"", binding.mcp_url),
-        "mcp_servers.lsm.env_http_headers.X-LSM-Session-Capability=\"MORROWS_LSM_CAPABILITY\""
+        format!("mcp_servers.morrow_runtime.url=\"{}\"", binding.mcp_url),
+        "mcp_servers.morrow_runtime.env_http_headers.X-Morrow-Runtime-Capability=\"MORROWS_RUNTIME_CAPABILITY\""
             .to_owned(),
     ];
     for value in overrides.into_iter().rev() {

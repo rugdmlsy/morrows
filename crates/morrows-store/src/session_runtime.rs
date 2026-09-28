@@ -5,45 +5,96 @@ use std::path::Path;
 impl Store {
     pub async fn recover_session_runtime_attempts_after_restart(&self) -> Result<u64, DomainError> {
         let now = Utc::now();
+        let rows = sqlx::query(
+            "SELECT id,session_id,launch_profile_id FROM session_runtime_attempts
+             WHERE status IN ('queued','running')",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage)?;
+        let mut local_attempts = Vec::new();
+        let mut local_session_ids = Vec::new();
+        for row in rows {
+            let id = parse_id(row.try_get("id").map_err(storage)?)?;
+            let session_id = parse_id(row.try_get("session_id").map_err(storage)?)?;
+            let profile_id = parse_id(row.try_get("launch_profile_id").map_err(storage)?)?;
+            let profile = self.get_launch_profile(profile_id).await?;
+            let backend = profile
+                .metadata
+                .get("execution_backend")
+                .and_then(Value::as_str)
+                .unwrap_or("local");
+            if backend != "morrow_runtime" {
+                local_attempts.push(id);
+                local_session_ids.push(session_id);
+            }
+        }
+        if local_attempts.is_empty() {
+            return Ok(0);
+        }
+
         let mut tx = self
             .pool
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(storage)?;
-        let session_ids: Vec<String> = sqlx::query_scalar(
-            "SELECT DISTINCT session_id FROM session_runtime_attempts
-             WHERE status IN ('queued','running')",
-        )
-        .fetch_all(&mut *tx)
-        .await
-        .map_err(storage)?;
-
-        let result = sqlx::query(
-            "UPDATE session_runtime_attempts
-             SET status='failed',
-                 error=COALESCE(error,'morrows_server_restarted'),
-                 ended_at=COALESCE(ended_at,?)
-             WHERE status IN ('queued','running')",
-        )
-        .bind(now.to_rfc3339())
-        .execute(&mut *tx)
-        .await
-        .map_err(storage)?;
-
-        for session_id in session_ids {
+        for id in &local_attempts {
+            sqlx::query(
+                "UPDATE session_runtime_attempts
+                 SET status='failed',
+                     error=COALESCE(error,'morrows_server_restarted'),
+                     ended_at=COALESCE(ended_at,?)
+                 WHERE id=? AND status IN ('queued','running')",
+            )
+            .bind(now.to_rfc3339())
+            .bind(id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?;
+        }
+        local_session_ids.sort_unstable();
+        local_session_ids.dedup();
+        for session_id in local_session_ids {
             sqlx::query(
                 "UPDATE agent_credentials
                  SET revoked_at=COALESCE(revoked_at,?)
                  WHERE kind='session_runtime' AND session_id=? AND revoked_at IS NULL",
             )
             .bind(now.to_rfc3339())
-            .bind(session_id)
+            .bind(session_id.to_string())
             .execute(&mut *tx)
             .await
             .map_err(storage)?;
         }
         tx.commit().await.map_err(storage)?;
-        Ok(result.rows_affected())
+        Ok(local_attempts.len() as u64)
+    }
+
+    pub async fn active_morrow_runtime_session_attempts(
+        &self,
+    ) -> Result<Vec<SessionRuntimeAttempt>, DomainError> {
+        let rows = sqlx::query(
+            "SELECT id,launch_profile_id FROM session_runtime_attempts
+             WHERE status IN ('queued','running') ORDER BY created_at,id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage)?;
+        let mut attempts = Vec::new();
+        for row in rows {
+            let id = parse_id(row.try_get("id").map_err(storage)?)?;
+            let profile_id = parse_id(row.try_get("launch_profile_id").map_err(storage)?)?;
+            let profile = self.get_launch_profile(profile_id).await?;
+            if profile
+                .metadata
+                .get("execution_backend")
+                .and_then(Value::as_str)
+                == Some("morrow_runtime")
+            {
+                attempts.push(self.get_session_runtime_attempt(id).await?);
+            }
+        }
+        Ok(attempts)
     }
 
     pub async fn create_session_runtime_attempt(
@@ -99,7 +150,12 @@ impl Store {
             }
         };
 
-        if !Path::new(&profile.program).is_file() {
+        let execution_backend = profile
+            .metadata
+            .get("execution_backend")
+            .and_then(Value::as_str)
+            .unwrap_or("local");
+        if execution_backend == "local" && !Path::new(&profile.program).is_file() {
             return Err(DomainError::InvalidInput(format!(
                 "launch program does not exist or is not a file: {}",
                 profile.program
@@ -108,7 +164,7 @@ impl Store {
         let cwd = profile.default_cwd.clone().ok_or_else(|| {
             DomainError::InvalidInput("session CLI launch profile must define default_cwd".into())
         })?;
-        if !Path::new(&cwd).is_dir() {
+        if execution_backend == "local" && !Path::new(&cwd).is_dir() {
             return Err(DomainError::InvalidInput(format!(
                 "launch cwd does not exist or is not a directory: {cwd}"
             )));

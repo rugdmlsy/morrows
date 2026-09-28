@@ -1,7 +1,7 @@
 [Unit]
 Description=Morrows Agent Work OS
-After=network-online.target local-shell-mcp.service
-Wants=network-online.target
+After=network-online.target local-shell-mcp.service morrow-runtime.service
+Wants=network-online.target morrow-runtime.service
 
 [Service]
 Type=simple

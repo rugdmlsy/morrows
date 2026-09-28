@@ -1,0 +1,844 @@
+from __future__ import annotations
+
+import contextlib
+import errno
+import hashlib
+import json
+import os
+import platform
+import plistlib
+import posixpath
+import re
+import shlex
+import shutil
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+from .process_utils import managed_process_kwargs
+from .remote_worker_state import (
+    ensure_user_bin_on_path,
+    install_launcher,
+    user_home,
+    worker_launcher_path,
+    worker_lock_path,
+    worker_log_path,
+    worker_pid_path,
+    worker_runtime_dir,
+    worker_state_dir,
+)
+
+_SERVICE_NAME = "morrow-runtime-worker"
+_LAUNCHD_LABEL = "com.fwerkor.morrow-runtime-worker"
+_WINDOWS_TASK_NAME = "morrow-runtime-worker"
+_WINDOWS_TASK_STATE_RUNNING = 4
+_WORKER_MANAGED_ENV = "LOCAL_SHELL_MCP_WORKER_MANAGED"
+_LAUNCHD_PATH_SEPARATOR = ":"
+_LAUNCHD_HOMEBREW_DIRS = (
+    "/opt/homebrew/bin",
+    "/opt/homebrew/sbin",
+    "/usr/local/bin",
+    "/usr/local/sbin",
+)
+_LAUNCHD_SYSTEM_DIRS = (
+    "/usr/bin",
+    "/bin",
+    "/usr/sbin",
+    "/sbin",
+)
+_WORKER_LOCK_FD_ENV = "LOCAL_SHELL_MCP_WORKER_LOCK_FD"
+_WORKER_LOCK_RETRY_S = 5.0
+_WORKER_LOCK_HANDOFF_RETRY_S = 0.1
+_active_worker_lock_handle: Any | None = None
+
+
+class WorkerAlreadyRunningError(RuntimeError):
+    pass
+
+
+def _lock_worker_file(handle: Any) -> None:
+    if os.name == "nt":
+        import msvcrt
+
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        return
+
+    import fcntl
+
+    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _unlock_worker_file(handle: Any) -> None:
+    if os.name == "nt":
+        import msvcrt
+
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        return
+
+    import fcntl
+
+    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _worker_lock_is_contended(exc: OSError) -> bool:
+    if isinstance(exc, BlockingIOError) or exc.errno in {errno.EACCES, errno.EAGAIN}:
+        return True
+    return os.name == "nt" and getattr(exc, "winerror", None) in {32, 33}
+
+
+def _managed_service_pid() -> int | None:
+    system = platform.system()
+    if system == "Linux" and _systemd_unit_path().exists() and shutil.which("systemctl"):
+        result = _run(
+            [
+                "systemctl",
+                "--user",
+                "show",
+                "--property",
+                "MainPID",
+                "--value",
+                f"{_SERVICE_NAME}.service",
+            ],
+            check=False,
+        )
+        value = result.stdout.strip()
+        if result.returncode == 0 and value.isdigit() and int(value) > 0:
+            return int(value)
+    if system == "Darwin" and _launchd_plist_path().exists() and shutil.which("launchctl"):
+        result = _run(
+            ["launchctl", "print", f"gui/{_user_id()}/{_LAUNCHD_LABEL}"],
+            check=False,
+        )
+        if result.returncode == 0:
+            match = re.search(r"(?m)^\s*pid\s*=\s*(\d+)\s*$", result.stdout)
+            if match and int(match.group(1)) > 0:
+                return int(match.group(1))
+    return None
+
+
+def _current_worker_is_managed() -> bool:
+    if os.getenv(_WORKER_MANAGED_ENV) == "1":
+        return True
+    return _managed_service_pid() == os.getpid()
+
+
+def prepare_worker_lock_reexec() -> int | None:
+    handle = _active_worker_lock_handle
+    if handle is None:
+        return None
+    fd = handle.fileno()
+    os.set_inheritable(fd, True)
+    os.environ[_WORKER_LOCK_FD_ENV] = str(fd)
+    return fd
+
+
+def cancel_worker_lock_reexec(fd: int | None) -> None:
+    if fd is None:
+        return
+    os.environ.pop(_WORKER_LOCK_FD_ENV, None)
+    with contextlib.suppress(OSError):
+        os.set_inheritable(fd, False)
+
+
+def _adopt_worker_lock_handle() -> Any | None:
+    raw_fd = os.environ.pop(_WORKER_LOCK_FD_ENV, "")
+    if not raw_fd:
+        return None
+    try:
+        fd = int(raw_fd)
+        os.fstat(fd)
+    except (OSError, ValueError):
+        return None
+    return os.fdopen(fd, "r+b", buffering=0)
+
+
+@contextlib.contextmanager
+def worker_run_lock():  # noqa: ANN201
+    global _active_worker_lock_handle
+
+    path = worker_lock_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = _adopt_worker_lock_handle()
+    inherited = handle is not None
+    windows_handoff = inherited and os.name == "nt"
+    locked = inherited and not windows_handoff
+    if handle is None:
+        fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+        handle = os.fdopen(fd, "r+b", buffering=0)
+    try:
+        if path.stat().st_size == 0:
+            handle.write(b"\0")
+        waiting = False
+        while not locked:
+            try:
+                _lock_worker_file(handle)
+                locked = True
+            except OSError as exc:
+                if not _worker_lock_is_contended(exc):
+                    raise
+                managed = _current_worker_is_managed()
+                if not managed and not windows_handoff:
+                    raise WorkerAlreadyRunningError(
+                        "remote worker is already running; stop the existing process or use "
+                        "`morrow-runtime worker restart`"
+                    ) from exc
+                if managed and not waiting:
+                    print(
+                        "Status: another worker process is active; managed worker is waiting...",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    waiting = True
+                retry_s = (
+                    _WORKER_LOCK_HANDOFF_RETRY_S if windows_handoff else _WORKER_LOCK_RETRY_S
+                )
+                time.sleep(retry_s)
+        with contextlib.suppress(OSError):
+            os.chmod(path, 0o600)
+        _active_worker_lock_handle = handle
+        yield
+    finally:
+        if _active_worker_lock_handle is handle:
+            _active_worker_lock_handle = None
+        if locked:
+            with contextlib.suppress(OSError):
+                _unlock_worker_file(handle)
+        handle.close()
+
+
+def _systemd_unit_path() -> Path:
+    return user_home() / ".config" / "systemd" / "user" / f"{_SERVICE_NAME}.service"
+
+
+def _launchd_plist_path() -> Path:
+    return user_home() / "Library" / "LaunchAgents" / f"{_LAUNCHD_LABEL}.plist"
+
+
+def _windows_task_launcher_path() -> Path:
+    return worker_state_dir() / "worker-service.pyw"
+
+
+def _run(command: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        command, check=check, capture_output=True, text=True, **managed_process_kwargs()
+    )  # noqa: S603
+
+
+def _powershell_executable() -> str | None:
+    return shutil.which("pwsh") or shutil.which("powershell")
+
+
+def _powershell_literal(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _run_powershell(script: str, *, check: bool = True) -> subprocess.CompletedProcess[str]:
+    shell = _powershell_executable()
+    if not shell:
+        raise RuntimeError("PowerShell is required to manage the Windows remote worker task")
+    return _run([shell, "-NoProfile", "-NonInteractive", "-Command", script], check=check)
+
+
+def _user_id() -> int:
+    getuid = getattr(os, "getuid", None)
+    return int(getuid()) if getuid else 0
+
+
+def _systemd_user_available() -> bool:
+    if not shutil.which("systemctl"):
+        return False
+    result = _run(["systemctl", "--user", "show-environment"], check=False)
+    return result.returncode == 0
+
+
+def service_kind() -> str:
+    system = platform.system()
+    if system == "Linux" and _systemd_user_available():
+        return "systemd"
+    if system == "Darwin" and shutil.which("launchctl"):
+        return "launchd"
+    if system == "Windows" and _powershell_executable():
+        return "scheduled-task"
+    return "process"
+
+
+def _write_systemd_unit() -> Path:
+    path = _systemd_unit_path()
+    launcher = shlex.quote(str(worker_launcher_path()))
+    content = f"""[Unit]
+Description=morrow-runtime remote worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart={launcher} worker run
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+Environment=LOCAL_SHELL_MCP_WORKER_MANAGED=1
+
+[Install]
+WantedBy=default.target
+"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    return path
+
+
+def _launchd_session_path_entries() -> tuple[str, ...]:
+    if platform.system() != "Darwin" or not shutil.which("launchctl"):
+        return ()
+    result = _run(["launchctl", "getenv", "PATH"], check=False)
+    if result.returncode:
+        return ()
+    return tuple(
+        entry
+        for entry in result.stdout.strip().split(_LAUNCHD_PATH_SEPARATOR)
+        if entry and posixpath.isabs(entry)
+    )
+
+
+def _installed_launchd_launcher_path() -> Path | None:
+    try:
+        payload = plistlib.loads(_launchd_plist_path().read_bytes())
+    except (OSError, TypeError, ValueError, plistlib.InvalidFileException):
+        return None
+    arguments = payload.get("ProgramArguments")
+    if not isinstance(arguments, list) or not arguments:
+        return None
+    launcher = arguments[0]
+    if not isinstance(launcher, str):
+        return None
+    path = Path(launcher)
+    return path if path.is_absolute() else None
+
+
+def _launchd_path(launcher: Path | None = None) -> str:
+    launcher = launcher or worker_launcher_path()
+    directories = (
+        str(launcher.parent),
+        *_LAUNCHD_HOMEBREW_DIRS,
+        *_launchd_session_path_entries(),
+        *_LAUNCHD_SYSTEM_DIRS,
+    )
+    return _LAUNCHD_PATH_SEPARATOR.join(dict.fromkeys(directories))
+
+
+def _write_launchd_plist(launcher: Path | None = None) -> Path:
+    launcher = launcher or worker_launcher_path()
+    path = _launchd_plist_path()
+    payload = {
+        "Label": _LAUNCHD_LABEL,
+        "ProgramArguments": [str(launcher), "worker", "run"],
+        "RunAtLoad": True,
+        "KeepAlive": True,
+        "EnvironmentVariables": {
+            _WORKER_MANAGED_ENV: "1",
+            "PATH": _launchd_path(launcher),
+        },
+        "StandardOutPath": str(worker_log_path()),
+        "StandardErrorPath": str(worker_log_path()),
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(plistlib.dumps(payload, fmt=plistlib.FMT_XML, sort_keys=False))
+    return path
+
+
+def _write_windows_task_launcher() -> Path:
+    path = _windows_task_launcher_path()
+    state_dir = str(worker_state_dir().resolve())
+    runtime_dir = str(worker_runtime_dir().resolve())
+    vendor_dir = str((worker_runtime_dir() / "vendor").resolve())
+    log_path = str(worker_log_path().resolve())
+    content = f'''from __future__ import annotations
+
+import os
+import sys
+import traceback
+
+STATE_DIR = {state_dir!r}
+RUNTIME_DIR = {runtime_dir!r}
+VENDOR_DIR = {vendor_dir!r}
+LOG_PATH = {log_path!r}
+
+os.environ["PYTHONUNBUFFERED"] = "1"
+os.environ[{_WORKER_MANAGED_ENV!r}] = "1"
+os.environ["LOCAL_SHELL_MCP_WORKER_STATE_DIR"] = STATE_DIR
+existing_pythonpath = os.environ.get("PYTHONPATH")
+runtime_pythonpath = os.pathsep.join((RUNTIME_DIR, VENDOR_DIR))
+os.environ["PYTHONPATH"] = (
+    runtime_pythonpath
+    if not existing_pythonpath
+    else runtime_pythonpath + os.pathsep + existing_pythonpath
+)
+sys.path[:0] = [RUNTIME_DIR, VENDOR_DIR]
+
+with open(LOG_PATH, "a", encoding="utf-8", buffering=1) as worker_log:
+    sys.stdout = worker_log
+    sys.stderr = worker_log
+    try:
+        from morrow_runtime.main import main
+
+        main(["worker", "run"])
+    except BaseException:
+        traceback.print_exc()
+        raise
+'''
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    return path
+
+
+def _windows_pythonw_executable() -> Path:
+    executable = Path(sys.executable).resolve()
+    pythonw = executable.with_name("pythonw.exe")
+    if pythonw.is_file():
+        return pythonw
+    raise RuntimeError(
+        f"pythonw.exe is required for the Windows remote worker service: {pythonw}"
+    )
+
+
+def _register_windows_task(service_file: Path) -> None:
+    action_arguments = f'"{service_file.resolve()}"'
+    script = "\n".join(
+        [
+            "$ErrorActionPreference = 'Stop'",
+            "$user = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name",
+            (
+                "$action = New-ScheduledTaskAction "
+                f"-Execute {_powershell_literal(str(_windows_pythonw_executable()))} "
+                f"-Argument {_powershell_literal(action_arguments)} "
+                f"-WorkingDirectory {_powershell_literal(str(worker_state_dir().resolve()))}"
+            ),
+            "$trigger = New-ScheduledTaskTrigger -AtLogOn -User $user",
+            (
+                "$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries "
+                "-DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) "
+                "-MultipleInstances IgnoreNew -RestartCount 999 "
+                "-RestartInterval (New-TimeSpan -Minutes 1) -StartWhenAvailable"
+            ),
+            (
+                "$principal = New-ScheduledTaskPrincipal -UserId $user "
+                "-LogonType Interactive -RunLevel Limited"
+            ),
+            (
+                f"Register-ScheduledTask -TaskName {_powershell_literal(_WINDOWS_TASK_NAME)} "
+                "-Action $action -Trigger $trigger -Settings $settings -Principal $principal "
+                f"-Description {_powershell_literal('morrow-runtime remote worker')} "
+                "-Force | Out-Null"
+            ),
+        ]
+    )
+    _run_powershell(script)
+
+
+def _windows_task_status() -> dict[str, Any] | None:
+    script = "\n".join(
+        [
+            "$ErrorActionPreference = 'Stop'",
+            (
+                "$tasks = @(Get-ScheduledTask -TaskPath '\\' -ErrorAction Stop | "
+                f"Where-Object {{ $_.TaskName -eq {_powershell_literal(_WINDOWS_TASK_NAME)} }})"
+            ),
+            "if ($tasks.Count -eq 0) { exit 3 }",
+            "if ($tasks.Count -ne 1) { throw 'multiple matching scheduled tasks found' }",
+            "$task = $tasks[0]",
+            (
+                "[Console]::Out.Write(([pscustomobject]@{state=[int]$task.State; "
+                "state_name=$task.State.ToString()} | ConvertTo-Json -Compress))"
+            ),
+        ]
+    )
+    result = _run_powershell(script, check=False)
+    if result.returncode == 3:
+        return None
+    if result.returncode:
+        detail = result.stderr.strip() or result.stdout.strip() or f"exit code {result.returncode}"
+        raise RuntimeError(f"failed to query Windows remote worker task: {detail}")
+    try:
+        payload = json.loads(result.stdout)
+        return {
+            "state": int(payload["state"]),
+            "state_name": str(payload["state_name"]),
+        }
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError("Windows remote worker task returned invalid status data") from exc
+
+
+def _start_windows_task() -> None:
+    _run_powershell(
+        f"Start-ScheduledTask -TaskName {_powershell_literal(_WINDOWS_TASK_NAME)}"
+    )
+
+
+def _stop_windows_task() -> None:
+    _run_powershell(
+        f"Stop-ScheduledTask -TaskName {_powershell_literal(_WINDOWS_TASK_NAME)} "
+        "-ErrorAction SilentlyContinue",
+        check=False,
+    )
+
+
+def _unregister_windows_task() -> None:
+    _run_powershell(
+        f"Unregister-ScheduledTask -TaskName {_powershell_literal(_WINDOWS_TASK_NAME)} "
+        "-Confirm:$false -ErrorAction SilentlyContinue",
+        check=False,
+    )
+
+
+def refresh_installed_service_definition() -> Path | None:
+    kind = service_kind()
+    if kind == "launchd" and _launchd_plist_path().exists():
+        launcher = _installed_launchd_launcher_path() or worker_launcher_path()
+        return _write_launchd_plist(launcher)
+    if kind == "scheduled-task" and _windows_task_status() is not None:
+        service_file = _write_windows_task_launcher()
+        _register_windows_task(service_file)
+        return service_file
+    return None
+
+
+def prepare_worker_service_environment() -> Path | None:
+    if (
+        platform.system() != "Darwin"
+        or service_kind() != "launchd"
+        or not _launchd_plist_path().exists()
+        or not _current_worker_is_managed()
+    ):
+        return None
+    launcher = _installed_launchd_launcher_path() or worker_launcher_path()
+    os.environ["PATH"] = _launchd_path(launcher)
+    return _write_launchd_plist(launcher)
+
+
+def _pid_is_running(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def _is_worker_command(command: str) -> bool:
+    normalized = command.replace("\\", "/")
+    module = "morrow_runtime.main" in normalized or "morrow_runtime.remote_worker" in normalized
+    return module and "worker" in normalized and "run" in normalized
+
+
+def _linux_process_identity(pid: int) -> str | None:
+    proc = Path("/proc") / str(pid)
+    try:
+        stat_text = (proc / "stat").read_text(encoding="utf-8")
+        command = (proc / "cmdline").read_bytes().replace(b"\0", b" ").decode(
+            "utf-8", errors="replace"
+        )
+    except OSError:
+        return None
+    closing = stat_text.rfind(")")
+    if closing < 0 or not _is_worker_command(command):
+        return None
+    fields = stat_text[closing + 2 :].split()
+    if len(fields) <= 19:
+        return None
+    start_ticks = fields[19]
+    digest = hashlib.sha256(command.encode("utf-8")).hexdigest()
+    return f"linux:{start_ticks}:{digest}"
+
+
+def _windows_process_identity(pid: int) -> str | None:
+    shell = _powershell_executable()
+    if not shell:
+        return None
+    script = (
+        f'$p=Get-CimInstance Win32_Process -Filter "ProcessId = {pid}"; '
+        'if ($p) { Write-Output ($p.CreationDate + "|" + $p.CommandLine) }'
+    )
+    result = _run([shell, "-NoProfile", "-NonInteractive", "-Command", script], check=False)
+    value = result.stdout.strip()
+    if result.returncode or "|" not in value:
+        return None
+    created, command = value.split("|", 1)
+    if not created or not _is_worker_command(command):
+        return None
+    digest = hashlib.sha256(command.encode("utf-8")).hexdigest()
+    return f"windows:{created}:{digest}"
+
+
+def _posix_process_identity(pid: int) -> str | None:
+    result = _run(["ps", "-p", str(pid), "-o", "lstart=", "-o", "command="], check=False)
+    value = result.stdout.strip()
+    if result.returncode or not value or not _is_worker_command(value):
+        return None
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
+    return f"posix:{digest}"
+
+
+def _process_identity(pid: int) -> str | None:
+    if not _pid_is_running(pid):
+        return None
+    system = platform.system()
+    if system == "Linux" and Path("/proc").is_dir():
+        return _linux_process_identity(pid)
+    if system == "Windows":
+        return _windows_process_identity(pid)
+    return _posix_process_identity(pid)
+
+
+def _write_pid(pid: int, identity: str) -> None:
+    worker_pid_path().parent.mkdir(parents=True, exist_ok=True)
+    worker_pid_path().write_text(
+        json.dumps({"version": 1, "pid": pid, "identity": identity}, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    with contextlib.suppress(OSError):
+        worker_pid_path().chmod(0o600)
+
+
+def _read_pid() -> int | None:
+    path = worker_pid_path()
+    try:
+        raw = path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return None
+    expected = ""
+    try:
+        data = json.loads(raw)
+        if not isinstance(data, dict) or data.get("version") != 1:
+            raise ValueError
+        pid = int(data["pid"])
+        expected = str(data.get("identity") or "")
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+        try:
+            pid = int(raw)
+        except ValueError:
+            path.unlink(missing_ok=True)
+            return None
+    actual = _process_identity(pid)
+    if not actual or (expected and actual != expected):
+        path.unlink(missing_ok=True)
+        return None
+    if not expected:
+        _write_pid(pid, actual)
+    return pid
+
+
+def _process_environment() -> dict[str, str]:
+    env = os.environ.copy()
+    env.pop("LOCAL_SHELL_MCP_WORKSPACE_ROOT", None)
+    env.pop("LOCAL_SHELL_MCP_ALLOW_FULL_CONTAINER", None)
+    runtime = worker_runtime_dir()
+    current = env.get("PYTHONPATH", "")
+    pythonpath = os.pathsep.join((str(runtime), str(runtime / "vendor")))
+    env["PYTHONPATH"] = pythonpath + (os.pathsep + current if current else "")
+    env["LOCAL_SHELL_MCP_WORKER_STATE_DIR"] = str(worker_state_dir().resolve())
+    env[_WORKER_MANAGED_ENV] = "1"
+    return env
+
+
+def _start_process() -> None:
+    if _read_pid():
+        return
+    worker_state_dir().mkdir(parents=True, exist_ok=True)
+    command = [sys.executable, "-m", "morrow_runtime.main", "worker", "run"]
+    with worker_log_path().open("ab") as log:
+        if os.name == "nt":
+            flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(
+                subprocess, "DETACHED_PROCESS", 0
+            )
+            process = subprocess.Popen(  # noqa: S603
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                creationflags=flags,
+                env=_process_environment(),
+            )
+        else:
+            process = subprocess.Popen(  # noqa: S603
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+                env=_process_environment(),
+            )
+    identity = None
+    for _ in range(40):
+        identity = _process_identity(process.pid)
+        if identity:
+            break
+        time.sleep(0.05)
+    if not identity:
+        with contextlib.suppress(OSError):
+            process.terminate()
+        raise RuntimeError("worker process started but its identity could not be verified")
+    _write_pid(process.pid, identity)
+
+
+def _stop_process() -> None:
+    pid = _read_pid()
+    if not pid:
+        worker_pid_path().unlink(missing_ok=True)
+        return
+    os.kill(pid, signal.SIGTERM)
+    for _ in range(50):
+        if not _pid_is_running(pid):
+            break
+        time.sleep(0.1)
+    else:
+        if _read_pid() == pid:
+            force_signal = getattr(signal, "SIGKILL", signal.SIGTERM)
+            os.kill(pid, force_signal)
+    worker_pid_path().unlink(missing_ok=True)
+
+
+def install_service(*, start: bool = True) -> dict[str, Any]:
+    launcher = install_launcher()
+    changed_path_files = ensure_user_bin_on_path()
+    worker_state_dir().mkdir(parents=True, exist_ok=True)
+    kind = service_kind()
+    if kind == "systemd":
+        _stop_process()
+        service_file = _write_systemd_unit()
+        _run(["systemctl", "--user", "daemon-reload"])
+        command = ["systemctl", "--user", "enable"]
+        if start:
+            command.append("--now")
+        command.append(f"{_SERVICE_NAME}.service")
+        _run(command)
+    elif kind == "launchd":
+        _stop_process()
+        service_file = _write_launchd_plist(launcher)
+        domain = f"gui/{_user_id()}"
+        _run(["launchctl", "bootout", domain, str(service_file)], check=False)
+        if start:
+            _run(["launchctl", "bootstrap", domain, str(service_file)])
+    elif kind == "scheduled-task":
+        _stop_process()
+        if _windows_task_status() is not None:
+            _stop_windows_task()
+        service_file = _write_windows_task_launcher()
+        _register_windows_task(service_file)
+        if start:
+            _start_windows_task()
+    else:
+        service_file = None
+        if start:
+            _start_process()
+    return {
+        "kind": kind,
+        "launcher": str(launcher),
+        "service_file": str(service_file) if service_file else None,
+        "path_files": [str(path) for path in changed_path_files],
+        "started": start,
+    }
+
+
+def uninstall_service() -> dict[str, Any]:
+    kind = service_kind()
+    stop_service()
+    if _systemd_unit_path().exists():
+        _run(["systemctl", "--user", "disable", f"{_SERVICE_NAME}.service"], check=False)
+        _systemd_unit_path().unlink(missing_ok=True)
+        _run(["systemctl", "--user", "daemon-reload"], check=False)
+    if _launchd_plist_path().exists():
+        _launchd_plist_path().unlink(missing_ok=True)
+    if platform.system() == "Windows" and (
+        kind == "scheduled-task" or _windows_task_launcher_path().exists()
+    ):
+        if _powershell_executable():
+            _unregister_windows_task()
+        _windows_task_launcher_path().unlink(missing_ok=True)
+    return {"kind": kind, "uninstalled": True}
+
+
+def start_service() -> dict[str, Any]:
+    kind = service_kind()
+    if kind == "systemd" and _systemd_unit_path().exists():
+        _run(["systemctl", "--user", "start", f"{_SERVICE_NAME}.service"])
+    elif kind == "launchd" and _launchd_plist_path().exists():
+        domain = f"gui/{_user_id()}"
+        result = _run(["launchctl", "kickstart", "-k", f"{domain}/{_LAUNCHD_LABEL}"], check=False)
+        if result.returncode:
+            _run(["launchctl", "bootstrap", domain, str(_launchd_plist_path())])
+    elif kind == "scheduled-task" and _windows_task_status() is not None:
+        _start_windows_task()
+    else:
+        _start_process()
+    return service_status()
+
+
+def stop_service() -> dict[str, Any]:
+    kind = service_kind()
+    if kind == "systemd" and _systemd_unit_path().exists():
+        _run(["systemctl", "--user", "stop", f"{_SERVICE_NAME}.service"], check=False)
+    elif kind == "launchd" and _launchd_plist_path().exists():
+        _run(
+            ["launchctl", "bootout", f"gui/{_user_id()}", str(_launchd_plist_path())],
+            check=False,
+        )
+    elif kind == "scheduled-task" and _windows_task_status() is not None:
+        _stop_windows_task()
+    else:
+        _stop_process()
+    return service_status()
+
+
+def service_status() -> dict[str, Any]:
+    native_kind = service_kind()
+    pid = None
+    installed = False
+    running = False
+    detail = ""
+    kind = native_kind
+    if native_kind == "systemd" and _systemd_unit_path().exists():
+        installed = True
+        result = _run(
+            ["systemctl", "--user", "is-active", f"{_SERVICE_NAME}.service"],
+            check=False,
+        )
+        running = result.returncode == 0 and result.stdout.strip() == "active"
+        detail = result.stdout.strip() or result.stderr.strip()
+    elif native_kind == "launchd" and _launchd_plist_path().exists():
+        installed = True
+        result = _run(
+            ["launchctl", "print", f"gui/{_user_id()}/{_LAUNCHD_LABEL}"],
+            check=False,
+        )
+        running = result.returncode == 0
+        detail = result.stdout.strip() or result.stderr.strip()
+    elif native_kind == "scheduled-task":
+        task = _windows_task_status()
+        if task is not None:
+            installed = True
+            running = task["state"] == _WINDOWS_TASK_STATE_RUNNING
+            detail = task["state_name"]
+        else:
+            kind = "process"
+            installed = worker_launcher_path().exists()
+            pid = _read_pid()
+            running = pid is not None
+    else:
+        kind = "process"
+        installed = worker_launcher_path().exists()
+        pid = _read_pid()
+        running = pid is not None
+    return {
+        "kind": kind,
+        "installed": installed,
+        "running": running,
+        "pid": pid,
+        "detail": detail,
+        "launcher": str(worker_launcher_path()),
+        "log": str(worker_log_path()),
+    }

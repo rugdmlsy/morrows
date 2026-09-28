@@ -70,12 +70,15 @@ pub struct LaunchAttempt {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RunLsmBinding {
+pub struct RunRuntimeBinding {
     pub run_id: Id,
     pub logical_session_id: String,
     pub capability_id: Option<String>,
     pub restart_deadline_at: Option<DateTime<Utc>>,
 }
+
+/// Backward-compatible Rust name for databases and callers created before the morrow-runtime rename.
+pub type RunLsmBinding = RunRuntimeBinding;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LsmJobTerminalEvent {

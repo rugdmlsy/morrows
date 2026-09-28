@@ -1,0 +1,1538 @@
+import asyncio
+import json
+import os
+import shutil
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+
+import pytest
+
+import morrow_runtime.jobs as jobs_module
+from morrow_runtime.jobs import (
+    list_jobs,
+    register_managed_job_handler,
+    retry_job,
+    start_job,
+    start_managed_job,
+    stop_job,
+    tail_job,
+)
+from morrow_runtime.settings import get_settings
+
+
+async def _wait_for_shell_job_completion(job_id: str, timeout_s: float = 15.0):
+    deadline = time.monotonic() + timeout_s
+    while True:
+        row = next(
+            job for job in (await list_jobs())["jobs"] if job["job_id"] == job_id
+        )
+        if row["status"] != "running" or time.monotonic() >= deadline:
+            return row
+        await asyncio.sleep(0.1)
+
+
+def test_job_store_lock_retries_then_succeeds(tmp_path, monkeypatch):
+    lock_path = tmp_path / "jobs.lock"
+    attempts = 0
+
+    def fake_try_lock(handle):  # noqa: ARG001
+        nonlocal attempts
+        attempts += 1
+        return attempts == 3
+
+    monkeypatch.setattr(jobs_module, "_try_lock_store_file", fake_try_lock)
+    monkeypatch.setattr(jobs_module.time, "sleep", lambda _seconds: None)
+
+    with lock_path.open("a+b") as handle:
+        jobs_module._lock_store_file(handle, timeout_s=1)
+
+    assert attempts == 3
+
+
+def test_job_store_lock_timeout_is_actionable(tmp_path, monkeypatch):
+    state_dir = tmp_path / ".state"
+    monkeypatch.setenv("LOCAL_SHELL_MCP_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setenv("LOCAL_SHELL_MCP_STATE_DIR", str(state_dir))
+    monkeypatch.setattr(jobs_module, "JOB_STORE_LOCK_TIMEOUT_S", 0.0)
+    monkeypatch.setattr(jobs_module, "_try_lock_store_file", lambda _handle: False)
+    get_settings.cache_clear()
+
+    with (
+        pytest.raises(
+            TimeoutError, match="another morrow-runtime operation or process"
+        ),
+        jobs_module._store_transaction(),
+    ):
+        raise AssertionError("transaction body must not run")
+
+
+def test_job_store_thread_lock_timeout_is_actionable(tmp_path, monkeypatch):
+    state_dir = tmp_path / ".state"
+    acquired = threading.Event()
+    release = threading.Event()
+
+    def hold_lock():
+        with jobs_module._JOB_STORE_THREAD_LOCK:
+            acquired.set()
+            release.wait(timeout=5)
+
+    holder = threading.Thread(target=hold_lock)
+    holder.start()
+    assert acquired.wait(timeout=1)
+    monkeypatch.setenv("LOCAL_SHELL_MCP_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setenv("LOCAL_SHELL_MCP_STATE_DIR", str(state_dir))
+    monkeypatch.setattr(jobs_module, "JOB_STORE_LOCK_TIMEOUT_S", 0.01)
+    get_settings.cache_clear()
+
+    try:
+        with (
+            pytest.raises(
+                TimeoutError, match="another morrow-runtime operation or process"
+            ),
+            jobs_module._store_transaction(),
+        ):
+            raise AssertionError("transaction body must not run")
+    finally:
+        release.set()
+        holder.join(timeout=1)
+
+    assert not holder.is_alive()
+
+
+def test_runner_command_invokes_powershell_executable_and_quotes_arguments():
+    command = jobs_module._runner_command(
+        [
+            r"C:\Program Files\Python\python.exe",
+            "-m",
+            "morrow_runtime.main",
+            "--status-file",
+            r"C:\state dir\job's-status.json",
+        ],
+        "powershell.exe",
+    )
+
+    assert command == (
+        "& 'C:\\Program Files\\Python\\python.exe' '-m' "
+        "'morrow_runtime.main' '--status-file' "
+        "'C:\\state dir\\job''s-status.json'"
+    )
+
+
+def test_runner_environment_policy_is_shell_neutral_and_round_trips(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCAL_SHELL_MCP_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setenv("LOCAL_SHELL_MCP_STATE_DIR", str(tmp_path / ".morrow-runtime"))
+    monkeypatch.setenv("LOCAL_SHELL_MCP_SHELL_ENV_BLOCKLIST", "TOKEN_ONE,TOKEN_TWO")
+    monkeypatch.setenv("LOCAL_SHELL_MCP_SHELL_ENV_BLOCKED_PREFIXES", "PRIVATE_,SERVICE_")
+    get_settings.cache_clear()
+
+    paths = jobs_module._attempt_paths("job_test", 1)
+    argv = jobs_module._runner_argv(paths, tmp_path)
+    blocklist_index = argv.index("--env-blocklist-b64") + 1
+    prefixes_index = argv.index("--env-blocked-prefixes-b64") + 1
+    blocklist_payload = argv[blocklist_index]
+    prefixes_payload = argv[prefixes_index]
+
+    assert '"' not in blocklist_payload
+    assert "'" not in blocklist_payload
+    assert '"' not in prefixes_payload
+    assert "'" not in prefixes_payload
+    assert jobs_module._parse_runner_env_policy(blocklist_payload, "env blocklist") == [
+        "TOKEN_ONE",
+        "TOKEN_TWO",
+    ]
+    assert jobs_module._parse_runner_env_policy(prefixes_payload, "env blocked prefixes") == [
+        "PRIVATE_",
+        "SERVICE_",
+    ]
+
+    powershell_command = jobs_module._runner_command(argv, "powershell.exe")
+    assert blocklist_payload in powershell_command
+    assert prefixes_payload in powershell_command
+
+
+@pytest.mark.asyncio
+async def test_jobs_track_tail_stop_and_retry(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCAL_SHELL_MCP_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setenv("LOCAL_SHELL_MCP_STATE_DIR", str(tmp_path / ".morrow-runtime"))
+    get_settings.cache_clear()
+
+    active_sessions = set()
+    outputs = {}
+
+    async def fake_start_shell(cwd=".", name=None, command=None):
+        session_id = name or f"session-{len(active_sessions) + 1}"
+        active_sessions.add(session_id)
+        outputs[session_id] = f"started: {command}"
+        return {"session_id": session_id, "cwd": cwd, "command": command, "backend": "fake"}
+
+    async def fake_list_shells():
+        return {"sessions": [{"session_id": session_id} for session_id in sorted(active_sessions)]}
+
+    async def fake_read_shell(session_id, lines=200):  # noqa: ARG001
+        return {"session_id": session_id, "output": outputs[session_id]}
+
+    async def fake_kill_shell(session_id):
+        active_sessions.discard(session_id)
+        return {"session_id": session_id, "killed": True, "stderr": ""}
+
+    monkeypatch.setattr(jobs_module, "start_shell", fake_start_shell)
+    monkeypatch.setattr(jobs_module, "list_shells", fake_list_shells)
+    monkeypatch.setattr(jobs_module, "read_shell", fake_read_shell)
+    monkeypatch.setattr(jobs_module, "kill_shell", fake_kill_shell)
+
+    job = await start_job("python -m http.server", cwd=".", name="server")
+    assert job["status"] == "running"
+    assert job["attempts"] == 1
+    assert job["shell_session_id"] == job["session_id"]
+    assert jobs_module._load_store()["jobs"][0]["shell_session_id"] == job["session_id"]
+
+    listed = await list_jobs()
+    assert listed["counts"] == {"running": 1}
+    assert listed["jobs"][0]["job_id"] == job["job_id"]
+
+    tail = await tail_job(job["job_id"], lines=20)
+    assert tail["job"]["status"] == "running"
+    assert "job-runner" in tail["output"]
+    assert tail["job"]["command"] == "python -m http.server"
+
+    stopped = await stop_job(job["job_id"])
+    assert stopped["killed"] is True
+    assert stopped["job"]["status"] == "stopped"
+
+    retried = await retry_job(job["job_id"])
+    assert retried["status"] == "running"
+    assert retried["attempts"] == 2
+    assert retried["session_id"] != job["session_id"]
+    assert jobs_module._load_store()["jobs"][0]["shell_session_id"] == retried["session_id"]
+
+
+
+
+def test_managed_job_state_updates_retry_store_contention(tmp_path, monkeypatch):
+    state_dir = tmp_path / ".state"
+    runtime_dir = state_dir / "jobs"
+    runtime_dir.mkdir(parents=True)
+    monkeypatch.setenv("LOCAL_SHELL_MCP_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setenv("LOCAL_SHELL_MCP_STATE_DIR", str(state_dir))
+    get_settings.cache_clear()
+    job_id = "job_managed_retry"
+    log_path = runtime_dir / f"{job_id}-attempt-1.log"
+    row = {
+        "job_id": job_id,
+        "kind": "managed",
+        "name": "managed-retry",
+        "status": "running",
+        "command": "managed retry",
+        "cwd": ".",
+        "created_at": time.time(),
+        "updated_at": time.time(),
+        "attempts": 1,
+        "log_path": str(log_path),
+        "output_bytes": 0,
+        "log_truncated": False,
+    }
+    (state_dir / jobs_module.JOB_STORE_FILE_NAME).write_text(
+        json.dumps({"version": jobs_module.JOB_STORE_VERSION, "jobs": [row]}),
+        encoding="utf-8",
+    )
+    original_transaction = jobs_module._store_transaction
+    failures = 0
+
+    @jobs_module.contextlib.contextmanager
+    def flaky_transaction():
+        nonlocal failures
+        if failures > 0:
+            failures -= 1
+            raise TimeoutError("busy")
+        with original_transaction() as store:
+            yield store
+
+    monkeypatch.setattr(jobs_module, "_store_transaction", flaky_transaction)
+    monkeypatch.setattr(jobs_module.time, "sleep", lambda _seconds: None)
+
+    failures = 1
+    jobs_module._append_managed_log(str(log_path), "hello")
+    failures = 1
+    jobs_module._update_managed_progress(job_id, {"phase": "copying"})
+    failures = 1
+    jobs_module._finish_managed_job(
+        job_id,
+        status="succeeded",
+        exit_code=0,
+        error=None,
+        result={"copied": True},
+    )
+
+    stored = json.loads(
+        (state_dir / jobs_module.JOB_STORE_FILE_NAME).read_text(encoding="utf-8")
+    )["jobs"][0]
+    assert stored["output_bytes"] == len(b"hello\n")
+    assert stored["progress"] == {"phase": "copying"}
+    assert stored["status"] == "succeeded"
+    assert stored["result"] == {"copied": True}
+
+
+def test_managed_job_state_updates_defer_after_bounded_contention(tmp_path, monkeypatch):
+    state_dir = tmp_path / ".state"
+    runtime_dir = state_dir / "jobs"
+    runtime_dir.mkdir(parents=True)
+    monkeypatch.setenv("LOCAL_SHELL_MCP_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setenv("LOCAL_SHELL_MCP_STATE_DIR", str(state_dir))
+    get_settings.cache_clear()
+    job_id = "job_managed_deferred"
+    log_path = runtime_dir / f"{job_id}-attempt-1.log"
+    row = {
+        "job_id": job_id,
+        "kind": "managed",
+        "name": "managed-deferred",
+        "status": "running",
+        "command": "managed deferred",
+        "cwd": ".",
+        "created_at": time.time(),
+        "updated_at": time.time(),
+        "attempts": 1,
+        "log_path": str(log_path),
+        "output_bytes": 0,
+        "log_truncated": False,
+    }
+    (state_dir / jobs_module.JOB_STORE_FILE_NAME).write_text(
+        json.dumps({"version": jobs_module.JOB_STORE_VERSION, "jobs": [row]}),
+        encoding="utf-8",
+    )
+    original_transaction = jobs_module._store_transaction
+    attempts = 0
+
+    @jobs_module.contextlib.contextmanager
+    def busy_transaction():
+        nonlocal attempts
+        attempts += 1
+        raise TimeoutError("busy")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(jobs_module, "_store_transaction", busy_transaction)
+    monkeypatch.setattr(jobs_module.time, "sleep", lambda _seconds: None)
+    wall_clock = iter([3, 2, 1])
+    monkeypatch.setattr(jobs_module.time, "time_ns", lambda: next(wall_clock))
+
+    jobs_module._append_managed_log(str(log_path), "hello")
+    jobs_module._update_managed_progress(job_id, {"phase": "copying"})
+    jobs_module._finish_managed_job(
+        job_id,
+        status="succeeded",
+        exit_code=0,
+        error=None,
+        result={"copied": True},
+    )
+
+    assert attempts == jobs_module.MANAGED_JOB_STORE_RETRY_ATTEMPTS * 3
+    deferred_dir = runtime_dir / "deferred"
+    deferred_paths = sorted(deferred_dir.glob("*.json"))
+    assert len(deferred_paths) == 3
+    assert [
+        json.loads(path.read_text(encoding="utf-8"))["operation"]
+        for path in deferred_paths
+    ] == ["append_log", "update_progress", "finish"]
+
+    monkeypatch.setattr(jobs_module, "_store_transaction", original_transaction)
+    original_remove = jobs_module._remove_managed_deferred_updates
+    monkeypatch.setattr(
+        jobs_module,
+        "_remove_managed_deferred_updates",
+        lambda _paths: None,
+    )
+    with original_transaction():
+        pass
+    assert len(list(deferred_dir.glob("*.json"))) == 3
+
+    stored_after_interrupted_cleanup = json.loads(
+        (state_dir / jobs_module.JOB_STORE_FILE_NAME).read_text(encoding="utf-8")
+    )["jobs"][0]
+    assert stored_after_interrupted_cleanup["output_bytes"] == len(b"hello\n")
+
+    monkeypatch.setattr(
+        jobs_module,
+        "_remove_managed_deferred_updates",
+        original_remove,
+    )
+    with original_transaction():
+        pass
+    assert deferred_dir.is_dir()
+    assert not list(deferred_dir.iterdir())
+    with original_transaction():
+        pass
+
+    stored = json.loads((state_dir / jobs_module.JOB_STORE_FILE_NAME).read_text(encoding="utf-8"))[
+        "jobs"
+    ][0]
+    assert stored["output_bytes"] == len(b"hello\n")
+    assert stored["progress"] == {"phase": "copying"}
+    assert stored["status"] == "succeeded"
+    assert stored["result"] == {"copied": True}
+    assert jobs_module.MANAGED_DEFERRED_APPLIED_KEY not in stored
+
+
+def test_managed_deferred_update_records_are_validated(tmp_path, monkeypatch):
+    state_dir = tmp_path / ".state"
+    deferred_dir = state_dir / "jobs" / "deferred"
+    deferred_dir.mkdir(parents=True)
+    monkeypatch.setenv("LOCAL_SHELL_MCP_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setenv("LOCAL_SHELL_MCP_STATE_DIR", str(state_dir))
+    get_settings.cache_clear()
+
+    def write_record(name, record):
+        (deferred_dir / f"{name}.json").write_text(
+            json.dumps(record), encoding="utf-8"
+        )
+
+    write_record("not-object", [])
+    write_record(
+        "bad-version",
+        {
+            "version": 99,
+            "update_id": "bad-version",
+            "job_id": "job_test",
+            "operation": "append_log",
+            "payload": {},
+        },
+    )
+    write_record(
+        "missing-update-id",
+        {
+            "version": jobs_module.MANAGED_DEFERRED_UPDATE_VERSION,
+            "job_id": "job_test",
+            "operation": "append_log",
+            "payload": {},
+        },
+    )
+    write_record(
+        "mismatched-update-id",
+        {
+            "version": jobs_module.MANAGED_DEFERRED_UPDATE_VERSION,
+            "update_id": "different-id",
+            "job_id": "job_test",
+            "operation": "append_log",
+            "payload": {},
+        },
+    )
+    write_record(
+        "missing-job-id",
+        {
+            "version": jobs_module.MANAGED_DEFERRED_UPDATE_VERSION,
+            "update_id": "missing-job-id",
+            "operation": "append_log",
+            "payload": {},
+        },
+    )
+    write_record(
+        "bad-operation",
+        {
+            "version": jobs_module.MANAGED_DEFERRED_UPDATE_VERSION,
+            "update_id": "bad-operation",
+            "job_id": "job_test",
+            "operation": "unknown",
+            "payload": {},
+        },
+    )
+    write_record(
+        "bad-payload",
+        {
+            "version": jobs_module.MANAGED_DEFERRED_UPDATE_VERSION,
+            "update_id": "bad-payload",
+            "job_id": "job_test",
+            "operation": "append_log",
+            "payload": [],
+        },
+    )
+    (deferred_dir / "invalid-json.json").write_text("{", encoding="utf-8")
+    (deferred_dir / "unreadable.json").mkdir()
+
+    rows = jobs_module._read_managed_deferred_updates()
+    records = {path.name: (record, removable) for path, record, removable in rows}
+
+    assert len(records) == 9
+    assert records["unreadable.json"] == (None, False)
+    assert all(
+        record is None and removable
+        for name, (record, removable) in records.items()
+        if name != "unreadable.json"
+    )
+
+
+def test_managed_deferred_reconciliation_handles_stale_records(tmp_path, monkeypatch):
+    state_dir = tmp_path / ".state"
+    deferred_dir = state_dir / "jobs" / "deferred"
+    deferred_dir.mkdir(parents=True)
+    monkeypatch.setenv("LOCAL_SHELL_MCP_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setenv("LOCAL_SHELL_MCP_STATE_DIR", str(state_dir))
+    get_settings.cache_clear()
+    job_id = "job_test"
+    duplicate_id = "00000000000000000001-00000000000000000001-duplicate"
+    job = {
+        "job_id": job_id,
+        "status": "running",
+        "output_bytes": 0,
+        jobs_module.MANAGED_DEFERRED_APPLIED_KEY: [duplicate_id],
+    }
+
+    def write_record(update_id, target_job_id, operation, payload):
+        (deferred_dir / f"{update_id}.json").write_text(
+            json.dumps(
+                {
+                    "version": jobs_module.MANAGED_DEFERRED_UPDATE_VERSION,
+                    "update_id": update_id,
+                    "job_id": target_job_id,
+                    "operation": operation,
+                    "payload": payload,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    write_record(duplicate_id, job_id, "append_log", {"bytes": 10})
+    write_record(
+        "00000000000000000002-00000000000000000002-missing",
+        "job_missing",
+        "update_progress",
+        {"progress": {"phase": "missing"}},
+    )
+    write_record(
+        "00000000000000000003-00000000000000000003-invalid",
+        job_id,
+        "append_log",
+        {"bytes": "invalid"},
+    )
+    (deferred_dir / "invalid-json.json").write_text("{", encoding="utf-8")
+
+    removable = jobs_module._reconcile_managed_deferred_updates({"jobs": [job]})
+
+    assert {path.name for path in removable} == {
+        f"{duplicate_id}.json",
+        "00000000000000000002-00000000000000000002-missing.json",
+        "00000000000000000003-00000000000000000003-invalid.json",
+        "invalid-json.json",
+    }
+    assert job["output_bytes"] == 0
+    assert job[jobs_module.MANAGED_DEFERRED_APPLIED_KEY] == [duplicate_id]
+    with pytest.raises(ValueError, match="unsupported managed update operation"):
+        jobs_module._apply_managed_update(job, "unknown", {})
+
+
+def test_managed_store_updates_handle_missing_jobs(tmp_path, monkeypatch):
+    state_dir = tmp_path / ".state"
+    runtime_dir = state_dir / "jobs"
+    runtime_dir.mkdir(parents=True)
+    monkeypatch.setenv("LOCAL_SHELL_MCP_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setenv("LOCAL_SHELL_MCP_STATE_DIR", str(state_dir))
+    get_settings.cache_clear()
+    log_path = runtime_dir / "job_missing-attempt-1.log"
+
+    jobs_module._append_managed_log(str(log_path), "orphaned")
+
+    assert not (runtime_dir / "deferred").exists()
+    with pytest.raises(KeyError, match="job not found"):
+        jobs_module._update_managed_progress("job_missing", {"phase": "missing"})
+
+
+@pytest.mark.asyncio
+async def test_stop_managed_job_finishes_after_deferred_cancellation_updates(tmp_path, monkeypatch):
+    state_dir = tmp_path / ".state"
+    monkeypatch.setenv("LOCAL_SHELL_MCP_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setenv("LOCAL_SHELL_MCP_STATE_DIR", str(state_dir))
+    get_settings.cache_clear()
+    started = asyncio.Event()
+    blocked = asyncio.Event()
+
+    async def handler(context, payload):  # noqa: ARG001
+        started.set()
+        await blocked.wait()
+
+    kind = f"test-managed-deferred-stop-{time.time_ns()}"
+    register_managed_job_handler(kind, handler)
+    job = await start_managed_job(kind, {}, name="managed-deferred-stop")
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    original_transaction = jobs_module._store_transaction
+    attempts = 0
+
+    @jobs_module.contextlib.contextmanager
+    def cancellation_contention():
+        nonlocal attempts
+        attempts += 1
+        if 3 <= attempts <= 6:
+            raise TimeoutError("busy")
+        with original_transaction() as store:
+            yield store
+
+    monkeypatch.setattr(jobs_module, "_store_transaction", cancellation_contention)
+    monkeypatch.setattr(jobs_module.time, "sleep", lambda _seconds: None)
+
+    stopped = await asyncio.wait_for(stop_job(job["job_id"]), timeout=1)
+
+    assert attempts == 7
+    assert stopped["killed"] is True
+    assert stopped["job"]["status"] == "stopped"
+    assert job["job_id"] not in jobs_module._MANAGED_JOB_TASKS
+    deferred_dir = state_dir / "jobs" / "deferred"
+    assert deferred_dir.is_dir()
+    assert not list(deferred_dir.iterdir())
+
+
+@pytest.mark.asyncio
+async def test_managed_jobs_track_tail_stop_and_retry(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCAL_SHELL_MCP_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setenv("LOCAL_SHELL_MCP_STATE_DIR", str(tmp_path / ".morrow-runtime"))
+    get_settings.cache_clear()
+    release = asyncio.Event()
+
+    async def handler(context, payload):
+        await context.log(f"started {payload['value']}")
+        await context.update_progress(phase="waiting", value=payload["value"])
+        await release.wait()
+        await context.log("finished")
+        return {"value": payload["value"]}
+
+    register_managed_job_handler("test-managed", handler)
+    job = await start_managed_job(
+        "test-managed",
+        {"value": 7},
+        name="managed",
+        command="managed test",
+    )
+    assert job["kind"] == "managed"
+    assert job["status"] == "running"
+
+    for _ in range(50):
+        await asyncio.sleep(0.01)
+        tail = await tail_job(job["job_id"])
+        if (
+            "started 7" in tail["output"]
+            and tail["job"]["progress"] == {"phase": "waiting", "value": 7}
+        ):
+            break
+    assert tail["job"]["progress"] == {"phase": "waiting", "value": 7}
+
+    stopped = await stop_job(job["job_id"])
+    assert stopped["killed"] is True
+    assert stopped["job"]["status"] == "stopped"
+
+    retried = await retry_job(job["job_id"])
+    assert retried["status"] == "running"
+    assert retried["attempts"] == 2
+    release.set()
+    for _ in range(50):
+        await asyncio.sleep(0.01)
+        current = (await list_jobs())["jobs"][0]
+        if current["status"] != "running":
+            break
+    assert current["status"] == "succeeded"
+    assert current["result"] == {"value": 7}
+
+
+def test_managed_job_validation_and_lost_recovery():
+    async def first_handler(context, payload):  # noqa: ARG001
+        return payload
+
+    async def second_handler(context, payload):  # noqa: ARG001
+        return payload
+
+    with pytest.raises(ValueError, match="must not be empty"):
+        register_managed_job_handler("   ", first_handler)
+
+    register_managed_job_handler("validation-managed", first_handler)
+    register_managed_job_handler("validation-managed", first_handler)
+    with pytest.raises(ValueError, match="already registered"):
+        register_managed_job_handler("validation-managed", second_handler)
+
+    with pytest.raises(ValueError, match="unknown managed job kind"):
+        asyncio.run(start_managed_job("missing-managed", {}))
+
+    running = jobs_module._refresh_job_status(
+        {"job_id": "managed-running", "kind": "managed", "status": "running"},
+        set(),
+        now=10.0,
+    )
+    assert running["status"] == "lost"
+    assert running["completed_at"] == 10.0
+    assert "retry it" in running["error"]
+
+    stopping = jobs_module._refresh_job_status(
+        {"job_id": "managed-stopping", "kind": "managed", "status": "stopping"},
+        set(),
+        now=11.0,
+    )
+    assert stopping["status"] == "stopped"
+    assert stopping["error"] is None
+
+
+@pytest.mark.asyncio
+async def test_managed_job_failure_and_launch_cleanup(tmp_path, monkeypatch):
+    state_dir = tmp_path / ".state"
+    monkeypatch.setenv("LOCAL_SHELL_MCP_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setenv("LOCAL_SHELL_MCP_STATE_DIR", str(state_dir))
+    get_settings.cache_clear()
+
+    async def failing_handler(context, payload):  # noqa: ARG001
+        raise RuntimeError("managed failure")
+
+    register_managed_job_handler("failing-managed", failing_handler)
+    failed = await start_managed_job("failing-managed", {})
+    for _ in range(50):
+        await asyncio.sleep(0.01)
+        current = (await list_jobs())["jobs"][0]
+        if current["status"] == "failed":
+            break
+    assert current["status"] == "failed"
+    assert current["exit_code"] == 1
+    assert current["error"] == "RuntimeError: managed failure"
+    assert "managed failure" in (await tail_job(failed["job_id"]))["output"]
+
+    async def idle_handler(context, payload):  # noqa: ARG001
+        return payload
+
+    register_managed_job_handler("launch-failure-managed", idle_handler)
+    def fail_launch(*args, **kwargs):  # noqa: ARG001
+        raise RuntimeError("launch failed")
+
+    monkeypatch.setattr(jobs_module, "_launch_managed_job", fail_launch)
+    with pytest.raises(RuntimeError, match="launch failed"):
+        await start_managed_job("launch-failure-managed", {})
+
+    stored = json.loads((state_dir / jobs_module.JOB_STORE_FILE_NAME).read_text(encoding="utf-8"))
+    assert [job["job_id"] for job in stored["jobs"]] == [failed["job_id"]]
+    assert [path.name for path in (state_dir / "jobs").glob("*-attempt-1.log")] == [
+        f"{failed['job_id']}-attempt-1.log"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_job_list_marks_missing_running_session_lost(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCAL_SHELL_MCP_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setenv("LOCAL_SHELL_MCP_STATE_DIR", str(tmp_path / ".morrow-runtime"))
+    get_settings.cache_clear()
+
+    async def fake_start_shell(cwd=".", name=None, command=None):  # noqa: ARG001
+        return {"session_id": "gone", "cwd": cwd, "command": command, "backend": "fake"}
+
+    async def no_shells():
+        return {"sessions": []}
+
+    monkeypatch.setattr(jobs_module, "start_shell", fake_start_shell)
+    monkeypatch.setattr(jobs_module, "list_shells", no_shells)
+
+    job = await start_job("printf done")
+    assert job["status"] == "running"
+
+    listed = await list_jobs()
+    assert listed["counts"] == {"lost": 1}
+    assert listed["jobs"][0]["status"] == "lost"
+    assert listed["jobs"][0]["exit_code"] is None
+
+
+@pytest.mark.asyncio
+async def test_completed_job_retains_output_and_exit_code(tmp_path, monkeypatch):
+    if os.name != "nt" and not shutil.which("tmux"):
+        pytest.skip("tmux is required for the Unix persistent shell backend")
+    monkeypatch.setenv("LOCAL_SHELL_MCP_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setenv("LOCAL_SHELL_MCP_STATE_DIR", str(tmp_path / ".morrow-runtime"))
+    get_settings.cache_clear()
+
+    job = await start_job("printf 'completed-output\n'; exit 3")
+    row = await _wait_for_shell_job_completion(job["job_id"])
+
+    assert row["status"] == "failed"
+    assert row["exit_code"] == 3
+    tail = await tail_job(job["job_id"])
+    assert tail["output"] == "completed-output\n"
+    assert tail["message"] == "job completed with exit code 3"
+
+
+@pytest.mark.asyncio
+async def test_job_log_is_bounded_and_reports_truncation(tmp_path, monkeypatch):
+    if os.name != "nt" and not shutil.which("tmux"):
+        pytest.skip("tmux is required for the Unix persistent shell backend")
+    monkeypatch.setenv("LOCAL_SHELL_MCP_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setenv("LOCAL_SHELL_MCP_STATE_DIR", str(tmp_path / ".morrow-runtime"))
+    monkeypatch.setenv("LOCAL_SHELL_MCP_MAX_JOB_LOG_BYTES", "32")
+    get_settings.cache_clear()
+
+    job = await start_job("python3 -c \"print('x' * 200)\"")
+    row = await _wait_for_shell_job_completion(job["job_id"])
+
+    assert row["status"] == "succeeded"
+    assert row["log_truncated"] is True
+    tail = await tail_job(job["job_id"])
+    assert len(tail["output"].encode()) <= 32
+
+
+@pytest.mark.asyncio
+async def test_job_notify_on_finish_persists_and_retry_override(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCAL_SHELL_MCP_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setenv("LOCAL_SHELL_MCP_STATE_DIR", str(tmp_path / ".morrow-runtime"))
+    get_settings.cache_clear()
+
+    sessions: set[str] = set()
+
+    async def fake_start_shell(cwd=".", name=None, command=None):  # noqa: ARG001
+        session_id = str(name)
+        sessions.add(session_id)
+        return {"session_id": session_id, "cwd": cwd, "backend": "fake"}
+
+    async def fake_list_shells():
+        return {"sessions": [{"session_id": item} for item in sorted(sessions)]}
+
+    monkeypatch.setattr(jobs_module, "start_shell", fake_start_shell)
+    monkeypatch.setattr(jobs_module, "list_shells", fake_list_shells)
+
+    started = await start_job(
+        "true",
+        notify_on_finish=True,
+        notify_title="Video render",
+        notify_summary_path="/tmp/render-notification.json",
+    )
+    assert started["notify_on_finish"] is True
+    assert started["notify_title"] == "Video render"
+    assert started["notify_summary_path"] == "/tmp/render-notification.json"
+
+    def finish_current():
+        with jobs_module._store_transaction() as store:
+            row = jobs_module._find_job(store, started["job_id"])
+            sessions.discard(str(row.get("session_id") or ""))
+            row["status"] = "succeeded"
+            row["updated_at"] = 10.0
+            row["completed_at"] = 10.0
+            row["exit_code"] = 0
+
+    finish_current()
+    inherited = await retry_job(started["job_id"])
+    assert inherited["notify_on_finish"] is True
+    assert inherited["notify_title"] == "Video render"
+    assert inherited["notify_summary_path"] == "/tmp/render-notification.json"
+
+    finish_current()
+    disabled = await retry_job(
+        started["job_id"],
+        notify_on_finish=False,
+        notify_title="Video render retry",
+        notify_summary_path="/tmp/render-notification-retry.json",
+    )
+    assert disabled["notify_on_finish"] is False
+    assert disabled["notify_title"] == "Video render retry"
+    assert disabled["notify_summary_path"] == "/tmp/render-notification-retry.json"
+
+
+def test_concurrent_job_starts_preserve_every_record(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCAL_SHELL_MCP_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setenv("LOCAL_SHELL_MCP_STATE_DIR", str(tmp_path / ".morrow-runtime"))
+    get_settings.cache_clear()
+
+    sessions: set[str] = set()
+    sessions_lock = threading.Lock()
+
+    async def fake_start_shell(cwd=".", name=None, command=None):
+        session_id = str(name)
+        with sessions_lock:
+            sessions.add(session_id)
+        return {
+            "session_id": session_id,
+            "cwd": cwd,
+            "command": command,
+            "backend": "fake",
+        }
+
+    async def fake_list_shells():
+        with sessions_lock:
+            current = sorted(sessions)
+        return {"sessions": [{"session_id": item} for item in current]}
+
+    original_load = jobs_module._load_store
+
+    def slow_load():
+        store = original_load()
+        time.sleep(0.02)
+        return store
+
+    monkeypatch.setattr(jobs_module, "start_shell", fake_start_shell)
+    monkeypatch.setattr(jobs_module, "list_shells", fake_list_shells)
+    monkeypatch.setattr(jobs_module, "_load_store", slow_load)
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        futures = [executor.submit(asyncio.run, start_job(f"printf {index}")) for index in range(8)]
+        started = [future.result() for future in futures]
+
+    listed = asyncio.run(list_jobs())
+    assert {job["job_id"] for job in listed["jobs"]} == {job["job_id"] for job in started}
+    assert listed["counts"] == {"running": 8}
+
+
+def test_job_list_limit_prioritizes_active_jobs_and_reports_truncation(tmp_path, monkeypatch):
+    state_dir = tmp_path / ".state"
+    state_dir.mkdir()
+    monkeypatch.setenv("LOCAL_SHELL_MCP_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setenv("LOCAL_SHELL_MCP_STATE_DIR", str(state_dir))
+    get_settings.cache_clear()
+
+    rows = [
+        {
+            "job_id": "finished-newest",
+            "status": "succeeded",
+            "command": "true",
+            "cwd": ".",
+            "created_at": 40.0,
+            "updated_at": 40.0,
+            "attempts": 1,
+        },
+        {
+            "job_id": "active-newer",
+            "status": "running",
+            "command": "sleep 10",
+            "cwd": ".",
+            "session_id": "session-newer",
+            "created_at": 30.0,
+            "updated_at": 30.0,
+            "attempts": 1,
+        },
+        {
+            "job_id": "finished-older",
+            "status": "failed",
+            "command": "false",
+            "cwd": ".",
+            "created_at": 20.0,
+            "updated_at": 20.0,
+            "attempts": 1,
+        },
+        {
+            "job_id": "active-older",
+            "status": "running",
+            "command": "sleep 10",
+            "cwd": ".",
+            "session_id": "session-older",
+            "created_at": 10.0,
+            "updated_at": 10.0,
+            "attempts": 1,
+        },
+    ]
+    (state_dir / jobs_module.JOB_STORE_FILE_NAME).write_text(
+        json.dumps({"version": jobs_module.JOB_STORE_VERSION, "jobs": rows}),
+        encoding="utf-8",
+    )
+
+    async def active_shells():
+        return {
+            "sessions": [
+                {"session_id": "session-newer"},
+                {"session_id": "session-older"},
+            ]
+        }
+
+    monkeypatch.setattr(jobs_module, "list_shells", active_shells)
+
+    listed = asyncio.run(list_jobs(limit=2))
+    assert [job["job_id"] for job in listed["jobs"]] == [
+        "active-newer",
+        "active-older",
+    ]
+    assert listed["total"] == 4
+    assert listed["returned"] == 2
+    assert listed["truncated"] is True
+    assert listed["counts"] == {"succeeded": 1, "running": 2, "failed": 1}
+
+    monkeypatch.setattr(jobs_module, "JOB_LIST_MAX_LIMIT", 1)
+    capped = asyncio.run(list_jobs(limit=999))
+    assert capped["returned"] == 1
+    assert capped["truncated"] is True
+
+    active_only = asyncio.run(list_jobs(include_finished=False, limit=1))
+    assert [job["job_id"] for job in active_only["jobs"]] == ["active-newer"]
+    assert active_only["total"] == 2
+    assert active_only["returned"] == 1
+    assert active_only["truncated"] is True
+
+
+def test_finished_job_history_and_attempt_files_are_bounded(tmp_path, monkeypatch):
+    state_dir = tmp_path / ".morrow-runtime"
+    runtime_dir = state_dir / "jobs"
+    runtime_dir.mkdir(parents=True)
+    monkeypatch.setenv("LOCAL_SHELL_MCP_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setenv("LOCAL_SHELL_MCP_STATE_DIR", str(state_dir))
+    monkeypatch.setenv("LOCAL_SHELL_MCP_MAX_JOBS", "2")
+    get_settings.cache_clear()
+
+    rows = []
+    for index in range(4):
+        job_id = f"job_{index}"
+        rows.append(
+            {
+                "job_id": job_id,
+                "name": job_id,
+                "status": "succeeded",
+                "command": "true",
+                "cwd": ".",
+                "created_at": float(index),
+                "updated_at": float(index),
+                "attempts": 1,
+            }
+        )
+        for suffix in ("command", "log", "status.json"):
+            (runtime_dir / f"{job_id}-attempt-1.{suffix}").write_text("data", encoding="utf-8")
+    (state_dir / "jobs.json").write_text(
+        json.dumps({"version": jobs_module.JOB_STORE_VERSION, "jobs": rows}),
+        encoding="utf-8",
+    )
+
+    async def no_shells():
+        return {"sessions": []}
+
+    monkeypatch.setattr(jobs_module, "list_shells", no_shells)
+    listed = asyncio.run(list_jobs())
+
+    assert [job["job_id"] for job in listed["jobs"]] == ["job_3", "job_2"]
+    assert not list(runtime_dir.glob("job_0-attempt-*"))
+    assert not list(runtime_dir.glob("job_1-attempt-*"))
+    assert list(runtime_dir.glob("job_2-attempt-*"))
+    assert list(runtime_dir.glob("job_3-attempt-*"))
+
+
+@pytest.mark.asyncio
+async def test_stop_failure_restores_retryable_job_state(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCAL_SHELL_MCP_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setenv("LOCAL_SHELL_MCP_STATE_DIR", str(tmp_path / ".state"))
+    get_settings.cache_clear()
+    active = {"session-a"}
+
+    async def fake_start_shell(cwd=".", name=None, command=None):
+        return {"session_id": "session-a", "cwd": cwd, "command": command, "backend": "fake"}
+
+    async def fake_list_shells():
+        return {"sessions": [{"session_id": item} for item in active]}
+
+    async def failing_kill_shell(session_id):
+        assert session_id == "session-a"
+        raise RuntimeError("kill failed")
+
+    monkeypatch.setattr(jobs_module, "start_shell", fake_start_shell)
+    monkeypatch.setattr(jobs_module, "list_shells", fake_list_shells)
+    monkeypatch.setattr(jobs_module, "kill_shell", failing_kill_shell)
+
+    job = await start_job("sleep 10")
+    with pytest.raises(RuntimeError, match="kill failed"):
+        await stop_job(job["job_id"])
+
+    listed = await list_jobs()
+    assert listed["jobs"][0]["status"] == "running"
+    assert "stop failed" in listed["jobs"][0]["error"]
+
+
+@pytest.mark.asyncio
+async def test_job_list_recovers_interrupted_stopping_and_retrying_states(tmp_path, monkeypatch):
+    state_dir = tmp_path / ".state"
+    runtime_dir = state_dir / "jobs"
+    runtime_dir.mkdir(parents=True)
+    monkeypatch.setenv("LOCAL_SHELL_MCP_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setenv("LOCAL_SHELL_MCP_STATE_DIR", str(state_dir))
+    get_settings.cache_clear()
+    now = time.time()
+    rows = [
+        {
+            "job_id": "job_stop_gone",
+            "name": "stop-gone",
+            "status": "stopping",
+            "command": "sleep 10",
+            "cwd": ".",
+            "session_id": "gone-session",
+            "created_at": now,
+            "updated_at": now,
+            "attempts": 1,
+        },
+        {
+            "job_id": "job_stop_live",
+            "name": "stop-live",
+            "status": "stopping",
+            "command": "sleep 10",
+            "cwd": ".",
+            "session_id": "live-session",
+            "created_at": now - 1,
+            "updated_at": now,
+            "attempts": 1,
+        },
+        {
+            "job_id": "job_retry_gone",
+            "name": "retry-gone",
+            "status": "retrying",
+            "command": "true",
+            "cwd": ".",
+            "session_id": "old-session",
+            "created_at": now - 2,
+            "updated_at": now,
+            "attempts": 1,
+            "pending_attempt": 2,
+            "pending_session_name": "missing-retry-session",
+        },
+        {
+            "job_id": "job_retry_live",
+            "name": "retry-live",
+            "status": "retrying",
+            "command": "true",
+            "cwd": ".",
+            "session_id": "old-session-2",
+            "created_at": now - 3,
+            "updated_at": now,
+            "attempts": 1,
+            "pending_attempt": 2,
+            "pending_session_name": "live-retry-session",
+            "pending_command_path": str(runtime_dir / "retry.command"),
+            "pending_log_path": str(runtime_dir / "retry.log"),
+            "pending_status_path": str(runtime_dir / "retry.status.json"),
+        },
+    ]
+    (state_dir / jobs_module.JOB_STORE_FILE_NAME).write_text(
+        json.dumps({"version": jobs_module.JOB_STORE_VERSION, "jobs": rows}),
+        encoding="utf-8",
+    )
+
+    async def active_shells():
+        return {
+            "sessions": [
+                {"session_id": "live-session"},
+                {"session_id": "live-retry-session"},
+            ]
+        }
+
+    monkeypatch.setattr(jobs_module, "list_shells", active_shells)
+
+    listed = await list_jobs()
+    recovered = {job["job_id"]: job for job in listed["jobs"]}
+
+    assert recovered["job_stop_gone"]["status"] == "stopped"
+    assert recovered["job_stop_live"]["status"] == "running"
+    assert "interrupted stop" in recovered["job_stop_live"]["error"]
+    assert recovered["job_retry_gone"]["status"] == "failed"
+    assert "retry was interrupted" in recovered["job_retry_gone"]["error"]
+    assert recovered["job_retry_live"]["status"] == "running"
+    assert recovered["job_retry_live"]["session_id"] == "live-retry-session"
+    assert recovered["job_retry_live"]["attempts"] == 2
+
+
+@pytest.mark.asyncio
+async def test_job_store_migrates_v1_without_losing_history(tmp_path, monkeypatch):
+    state_dir = tmp_path / ".state"
+    state_dir.mkdir()
+    monkeypatch.setenv("LOCAL_SHELL_MCP_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setenv("LOCAL_SHELL_MCP_STATE_DIR", str(state_dir))
+    get_settings.cache_clear()
+    legacy_jobs = [
+        {
+            "job_id": "job_legacy_done",
+            "name": "legacy-done",
+            "status": "exited",
+            "command": "true",
+            "cwd": ".",
+            "session_id": "legacy-done-session",
+            "created_at": 1.0,
+            "updated_at": 2.0,
+            "attempts": 1,
+        },
+        {
+            "job_id": "job_legacy_live",
+            "name": "legacy-live",
+            "status": "running",
+            "command": "sleep 10",
+            "cwd": ".",
+            "session_id": "legacy-live-session",
+            "created_at": 3.0,
+            "updated_at": 3.0,
+            "attempts": 1,
+        },
+    ]
+    store_path = state_dir / jobs_module.JOB_STORE_FILE_NAME
+    store_path.write_text(json.dumps({"version": 1, "jobs": legacy_jobs}), encoding="utf-8")
+
+    async def legacy_shells():
+        return {"sessions": [{"session_id": "legacy-live-session"}]}
+
+    monkeypatch.setattr(jobs_module, "list_shells", legacy_shells)
+    listed = await list_jobs()
+
+    assert {job["job_id"] for job in listed["jobs"]} == {
+        "job_legacy_done",
+        "job_legacy_live",
+    }
+    assert listed["counts"] == {"exited": 1, "running": 1}
+    for path in (store_path, state_dir / jobs_module.JOB_STORE_BACKUP_FILE_NAME):
+        migrated = json.loads(path.read_text(encoding="utf-8"))
+        assert migrated["version"] == jobs_module.JOB_STORE_VERSION
+        assert {job["job_id"] for job in migrated["jobs"]} == {
+            "job_legacy_done",
+            "job_legacy_live",
+        }
+
+
+@pytest.mark.asyncio
+async def test_job_start_does_not_launch_shell_when_store_is_invalid(tmp_path, monkeypatch):
+    state_dir = tmp_path / ".state"
+    state_dir.mkdir()
+    monkeypatch.setenv("LOCAL_SHELL_MCP_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setenv("LOCAL_SHELL_MCP_STATE_DIR", str(state_dir))
+    get_settings.cache_clear()
+    (state_dir / jobs_module.JOB_STORE_FILE_NAME).write_text(
+        json.dumps({"version": 99, "jobs": []}), encoding="utf-8"
+    )
+    started = False
+
+    async def fake_start_shell(cwd=".", name=None, command=None):  # noqa: ARG001
+        nonlocal started
+        started = True
+        return {"session_id": str(name), "backend": "fake"}
+
+    monkeypatch.setattr(jobs_module, "start_shell", fake_start_shell)
+
+    with pytest.raises(RuntimeError, match="refusing to reset"):
+        await start_job("echo must-not-run")
+
+    assert started is False
+    runtime_dir = state_dir / "jobs"
+    assert not runtime_dir.exists() or not list(runtime_dir.iterdir())
+
+
+@pytest.mark.asyncio
+async def test_job_start_records_shell_launch_failure(tmp_path, monkeypatch):
+    state_dir = tmp_path / ".state"
+    monkeypatch.setenv("LOCAL_SHELL_MCP_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setenv("LOCAL_SHELL_MCP_STATE_DIR", str(state_dir))
+    get_settings.cache_clear()
+
+    async def failing_start_shell(cwd=".", name=None, command=None):  # noqa: ARG001
+        raise RuntimeError("shell launch failed")
+
+    monkeypatch.setattr(jobs_module, "start_shell", failing_start_shell)
+
+    with pytest.raises(RuntimeError, match="shell launch failed"):
+        await start_job("echo never-ran")
+
+    stored = json.loads((state_dir / jobs_module.JOB_STORE_FILE_NAME).read_text(encoding="utf-8"))
+    assert len(stored["jobs"]) == 1
+    job = stored["jobs"][0]
+    assert job["status"] == "failed"
+    assert job["completed_at"] is not None
+    assert job["error"] == "start failed: RuntimeError: shell launch failed"
+    assert "operation_id" not in job
+    runtime_dir = state_dir / "jobs"
+    assert not list(runtime_dir.iterdir())
+
+
+@pytest.mark.asyncio
+async def test_job_start_kills_shell_when_running_state_cannot_be_committed(tmp_path, monkeypatch):
+    state_dir = tmp_path / ".state"
+    monkeypatch.setenv("LOCAL_SHELL_MCP_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setenv("LOCAL_SHELL_MCP_STATE_DIR", str(state_dir))
+    get_settings.cache_clear()
+    killed: list[str] = []
+
+    async def corrupt_store_after_start(cwd=".", name=None, command=None):  # noqa: ARG001
+        invalid = json.dumps({"version": 99, "jobs": []})
+        for path in (
+            state_dir / jobs_module.JOB_STORE_FILE_NAME,
+            state_dir / jobs_module.JOB_STORE_BACKUP_FILE_NAME,
+        ):
+            path.write_text(invalid, encoding="utf-8")
+        return {"session_id": str(name), "backend": "fake"}
+
+    async def fake_kill_shell(session_id):
+        killed.append(session_id)
+        return {"session_id": session_id, "killed": True, "stderr": ""}
+
+    monkeypatch.setattr(jobs_module, "start_shell", corrupt_store_after_start)
+    monkeypatch.setattr(jobs_module, "kill_shell", fake_kill_shell)
+
+    with pytest.raises(RuntimeError, match="refusing to reset"):
+        await start_job("echo started")
+
+    assert len(killed) == 1
+    runtime_dir = state_dir / "jobs"
+    assert not list(runtime_dir.iterdir())
+
+
+@pytest.mark.asyncio
+async def test_job_start_kills_shell_if_reserved_job_changes(tmp_path, monkeypatch):
+    state_dir = tmp_path / ".state"
+    monkeypatch.setenv("LOCAL_SHELL_MCP_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setenv("LOCAL_SHELL_MCP_STATE_DIR", str(state_dir))
+    get_settings.cache_clear()
+    killed: list[str] = []
+
+    async def change_reserved_job(cwd=".", name=None, command=None):  # noqa: ARG001
+        with jobs_module._store_transaction() as store:
+            store["jobs"][0]["status"] = "stopped"
+        return {"session_id": str(name), "backend": "fake"}
+
+    async def fake_kill_shell(session_id):
+        killed.append(session_id)
+        return {"session_id": session_id, "killed": True, "stderr": ""}
+
+    monkeypatch.setattr(jobs_module, "start_shell", change_reserved_job)
+    monkeypatch.setattr(jobs_module, "kill_shell", fake_kill_shell)
+
+    with pytest.raises(RuntimeError, match="job changed while starting"):
+        await start_job("echo changed")
+
+    assert len(killed) == 1
+    runtime_dir = state_dir / "jobs"
+    assert not list(runtime_dir.iterdir())
+
+
+@pytest.mark.asyncio
+async def test_job_list_recovers_interrupted_start(tmp_path, monkeypatch):
+    state_dir = tmp_path / ".state"
+    state_dir.mkdir()
+    monkeypatch.setenv("LOCAL_SHELL_MCP_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setenv("LOCAL_SHELL_MCP_STATE_DIR", str(state_dir))
+    get_settings.cache_clear()
+    now = time.time()
+    rows = [
+        {
+            "job_id": "job_start_live",
+            "name": "start-live",
+            "status": "starting",
+            "command": "sleep 10",
+            "cwd": ".",
+            "session_id": "start-live-session",
+            "created_at": now,
+            "updated_at": now,
+            "attempts": 1,
+            "operation_id": "start_stale_live",
+            "operation_kind": "start",
+        },
+        {
+            "job_id": "job_start_missing",
+            "name": "start-missing",
+            "status": "starting",
+            "command": "sleep 10",
+            "cwd": ".",
+            "session_id": "start-missing-session",
+            "created_at": now - 1,
+            "updated_at": now,
+            "attempts": 1,
+            "operation_id": "start_stale_missing",
+            "operation_kind": "start",
+        },
+    ]
+    (state_dir / jobs_module.JOB_STORE_FILE_NAME).write_text(
+        json.dumps({"version": jobs_module.JOB_STORE_VERSION, "jobs": rows}),
+        encoding="utf-8",
+    )
+
+    async def active_shells():
+        return {"sessions": [{"session_id": "start-live-session"}]}
+
+    monkeypatch.setattr(jobs_module, "list_shells", active_shells)
+    listed = await list_jobs()
+    recovered = {job["job_id"]: job for job in listed["jobs"]}
+
+    assert recovered["job_start_live"]["status"] == "running"
+    assert "recovered job start" in recovered["job_start_live"]["error"]
+    assert recovered["job_start_missing"]["status"] == "failed"
+    assert "start was interrupted" in recovered["job_start_missing"]["error"]
+    stored = json.loads((state_dir / jobs_module.JOB_STORE_FILE_NAME).read_text(encoding="utf-8"))
+    assert all("operation_id" not in job for job in stored["jobs"])
+
+
+@pytest.mark.asyncio
+async def test_job_store_recovers_from_atomic_backup(tmp_path, monkeypatch):
+    state_dir = tmp_path / ".state"
+    monkeypatch.setenv("LOCAL_SHELL_MCP_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setenv("LOCAL_SHELL_MCP_STATE_DIR", str(state_dir))
+    get_settings.cache_clear()
+    state_dir.mkdir(parents=True)
+    row = {
+        "job_id": "job_saved",
+        "name": "saved",
+        "status": "succeeded",
+        "command": "true",
+        "cwd": ".",
+        "created_at": 1.0,
+        "updated_at": 2.0,
+        "completed_at": 2.0,
+        "exit_code": 0,
+        "attempts": 1,
+    }
+    jobs_module._save_store({"version": jobs_module.JOB_STORE_VERSION, "jobs": [row]})
+    store_path = state_dir / jobs_module.JOB_STORE_FILE_NAME
+    backup_path = state_dir / jobs_module.JOB_STORE_BACKUP_FILE_NAME
+    assert backup_path.is_file()
+    store_path.write_text("{broken", encoding="utf-8")
+
+    async def no_shells():
+        return {"sessions": []}
+
+    monkeypatch.setattr(jobs_module, "list_shells", no_shells)
+    listed = await list_jobs()
+
+    assert [job["job_id"] for job in listed["jobs"]] == ["job_saved"]
+    assert json.loads(store_path.read_text(encoding="utf-8"))["jobs"][0]["job_id"] == "job_saved"
+
+
+@pytest.mark.asyncio
+async def test_job_store_refuses_to_overwrite_unrecoverable_corruption(tmp_path, monkeypatch):
+    state_dir = tmp_path / ".state"
+    state_dir.mkdir()
+    monkeypatch.setenv("LOCAL_SHELL_MCP_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setenv("LOCAL_SHELL_MCP_STATE_DIR", str(state_dir))
+    get_settings.cache_clear()
+    store_path = state_dir / jobs_module.JOB_STORE_FILE_NAME
+    store_path.write_text("{broken", encoding="utf-8")
+
+    async def no_shells():
+        return {"sessions": []}
+
+    monkeypatch.setattr(jobs_module, "list_shells", no_shells)
+
+    with pytest.raises(RuntimeError, match="refusing to reset"):
+        await list_jobs()
+    assert store_path.read_text(encoding="utf-8") == "{broken"
+    assert not (state_dir / jobs_module.JOB_STORE_BACKUP_FILE_NAME).exists()
+
+
+@pytest.mark.asyncio
+async def test_job_list_does_not_interrupt_active_start(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCAL_SHELL_MCP_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setenv("LOCAL_SHELL_MCP_STATE_DIR", str(tmp_path / ".state"))
+    get_settings.cache_clear()
+    active: set[str] = set()
+    start_entered = asyncio.Event()
+    allow_start = asyncio.Event()
+
+    async def fake_start_shell(cwd=".", name=None, command=None):
+        start_entered.set()
+        await allow_start.wait()
+        active.add(str(name))
+        return {
+            "session_id": str(name),
+            "cwd": cwd,
+            "command": command,
+            "backend": "fake",
+        }
+
+    async def fake_list_shells():
+        return {"sessions": [{"session_id": item} for item in sorted(active)]}
+
+    monkeypatch.setattr(jobs_module, "start_shell", fake_start_shell)
+    monkeypatch.setattr(jobs_module, "list_shells", fake_list_shells)
+
+    start_task = asyncio.create_task(start_job("sleep 10"))
+    await start_entered.wait()
+
+    during = await list_jobs()
+    assert during["jobs"][0]["status"] == "starting"
+
+    allow_start.set()
+    started = await start_task
+    assert started["status"] == "running"
+    assert (await list_jobs())["jobs"][0]["status"] == "running"
+
+
+@pytest.mark.asyncio
+async def test_job_list_does_not_interrupt_active_stop(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCAL_SHELL_MCP_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setenv("LOCAL_SHELL_MCP_STATE_DIR", str(tmp_path / ".state"))
+    get_settings.cache_clear()
+    active = {"session-stop"}
+    kill_entered = asyncio.Event()
+    allow_kill = asyncio.Event()
+
+    async def fake_start_shell(cwd=".", name=None, command=None):
+        return {
+            "session_id": "session-stop",
+            "cwd": cwd,
+            "command": command,
+            "backend": "fake",
+        }
+
+    async def fake_list_shells():
+        return {"sessions": [{"session_id": item} for item in sorted(active)]}
+
+    async def fake_kill_shell(session_id):
+        assert session_id == "session-stop"
+        kill_entered.set()
+        await allow_kill.wait()
+        active.discard(session_id)
+        return {"session_id": session_id, "killed": True, "stderr": ""}
+
+    monkeypatch.setattr(jobs_module, "start_shell", fake_start_shell)
+    monkeypatch.setattr(jobs_module, "list_shells", fake_list_shells)
+    monkeypatch.setattr(jobs_module, "kill_shell", fake_kill_shell)
+
+    job = await start_job("sleep 10")
+    stop_task = asyncio.create_task(stop_job(job["job_id"]))
+    await kill_entered.wait()
+
+    during = await list_jobs()
+    assert during["jobs"][0]["status"] == "stopping"
+
+    allow_kill.set()
+    stopped = await stop_task
+    assert stopped["job"]["status"] == "stopped"
+    assert (await list_jobs())["jobs"][0]["status"] == "stopped"
+
+
+@pytest.mark.asyncio
+async def test_job_list_does_not_interrupt_active_retry(tmp_path, monkeypatch):
+    state_dir = tmp_path / ".state"
+    state_dir.mkdir()
+    monkeypatch.setenv("LOCAL_SHELL_MCP_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setenv("LOCAL_SHELL_MCP_STATE_DIR", str(state_dir))
+    get_settings.cache_clear()
+    now = time.time()
+    (state_dir / jobs_module.JOB_STORE_FILE_NAME).write_text(
+        json.dumps(
+            {
+                "version": jobs_module.JOB_STORE_VERSION,
+                "jobs": [
+                    {
+                        "job_id": "job-retry-race",
+                        "name": "retry-race",
+                        "status": "failed",
+                        "command": "echo retry",
+                        "cwd": ".",
+                        "session_id": "old-session",
+                        "created_at": now,
+                        "updated_at": now,
+                        "completed_at": now,
+                        "exit_code": 1,
+                        "attempts": 1,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    active: set[str] = set()
+    start_entered = asyncio.Event()
+    allow_start = asyncio.Event()
+
+    async def fake_list_shells():
+        return {"sessions": [{"session_id": item} for item in sorted(active)]}
+
+    async def fake_start_shell(cwd=".", name=None, command=None):
+        start_entered.set()
+        await allow_start.wait()
+        active.add(str(name))
+        return {
+            "session_id": str(name),
+            "cwd": cwd,
+            "command": command,
+            "backend": "fake",
+        }
+
+    monkeypatch.setattr(jobs_module, "list_shells", fake_list_shells)
+    monkeypatch.setattr(jobs_module, "start_shell", fake_start_shell)
+
+    retry_task = asyncio.create_task(retry_job("job-retry-race"))
+    await start_entered.wait()
+
+    during = await list_jobs()
+    assert during["jobs"][0]["status"] == "retrying"
+
+    allow_start.set()
+    retried = await retry_task
+    assert retried["status"] == "running"
+    assert retried["attempts"] == 2

@@ -1,5 +1,6 @@
 use super::*;
 use crate::collaboration::actor;
+use crate::morrow_runtime::MorrowRuntimeControl;
 use axum::http::HeaderMap;
 use morrows_core::*;
 use std::path::{Path as FsPath, PathBuf};
@@ -16,6 +17,11 @@ pub fn routes() -> Router<AppState> {
         )
         .route("/machines", get(machine_list).post(machine_register))
         .route("/machines/{id}", get(machine_get))
+        .route(
+            "/machines/{id}/runtime-invite",
+            post(machine_runtime_invite),
+        )
+        .route("/runtime-workers", get(runtime_worker_list))
         .route(
             "/agent-instances",
             post(instance_register).get(instance_list),
@@ -104,6 +110,71 @@ async fn machine_get(
 ) -> Result<Json<Value>, ApiError> {
     Ok(Json(json!(s.store.get_machine(id).await?)))
 }
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeInviteBody {
+    #[serde(default)]
+    workdir: Option<String>,
+    #[serde(default = "default_runtime_invite_ttl")]
+    ttl_seconds: i64,
+}
+
+fn default_runtime_invite_ttl() -> i64 {
+    600
+}
+
+async fn runtime_worker_list() -> Result<Json<Value>, ApiError> {
+    let runtime = MorrowRuntimeControl::from_env()
+        .map_err(runtime_api_error)?
+        .ok_or_else(|| runtime_api_error(anyhow::anyhow!("morrow-runtime is not configured")))?;
+    Ok(Json(
+        runtime.list_workers().await.map_err(runtime_api_error)?,
+    ))
+}
+
+async fn machine_runtime_invite(
+    State(s): State<AppState>,
+    Path(id): Path<Id>,
+    Json(input): Json<RuntimeInviteBody>,
+) -> Result<Json<Value>, ApiError> {
+    let machine = s.store.get_machine(id).await?;
+    let worker_name = machine
+        .metadata
+        .get("morrow_runtime_worker")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(&machine.name)
+        .to_owned();
+    let configured_workdir = machine
+        .metadata
+        .get("morrow_runtime_workdir")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty());
+    let workdir = input
+        .workdir
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .or(configured_workdir);
+    let runtime = MorrowRuntimeControl::from_env()
+        .map_err(runtime_api_error)?
+        .ok_or_else(|| runtime_api_error(anyhow::anyhow!("morrow-runtime is not configured")))?;
+    let invite = runtime
+        .invite_worker(&worker_name, workdir, input.ttl_seconds)
+        .await
+        .map_err(runtime_api_error)?;
+    Ok(Json(json!({
+        "machine_id": machine.id,
+        "machine_name": machine.name,
+        "runtime_worker": worker_name,
+        "invite": invite["invite"],
+    })))
+}
+
+fn runtime_api_error(err: anyhow::Error) -> ApiError {
+    ApiError(DomainError::InvalidState(format!("morrow-runtime: {err}")))
+}
+
 async fn instance_register(
     State(s): State<AppState>,
     Json(input): Json<RegisterAgentInstance>,

@@ -5,26 +5,28 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[derive(Clone)]
-pub struct LsmControl {
-    origin: String,
+pub struct MorrowRuntimeControl {
+    mcp_url: String,
     address: std::net::SocketAddr,
     key: String,
     subject: String,
 }
 
-pub struct AgentBinding {
+pub struct RuntimeAgentBinding {
     pub logical_session_id: String,
     pub capability: String,
     pub mcp_url: String,
 }
 
-impl LsmControl {
+impl MorrowRuntimeControl {
     pub fn subject(&self) -> &str {
         &self.subject
     }
 
     pub fn from_env() -> anyhow::Result<Option<Self>> {
-        let Ok(configured) = std::env::var("MORROWS_LSM_CONTROL_URL") else {
+        let configured = std::env::var("MORROWS_RUNTIME_CONTROL_URL")
+            .or_else(|_| std::env::var("MORROWS_LSM_CONTROL_URL"));
+        let Ok(configured) = configured else {
             return Ok(None);
         };
         let origin = configured
@@ -33,24 +35,32 @@ impl LsmControl {
             .to_owned();
         let authority = origin
             .strip_prefix("http://")
-            .ok_or_else(|| anyhow!("MORROWS_LSM_CONTROL_URL must use loopback HTTP"))?;
+            .ok_or_else(|| anyhow!("MORROWS_RUNTIME_CONTROL_URL must use loopback HTTP"))?;
         let address: std::net::SocketAddr = authority
             .parse()
-            .context("MORROWS_LSM_CONTROL_URL must contain a numeric host and port")?;
+            .context("MORROWS_RUNTIME_CONTROL_URL must contain a numeric host and port")?;
         if !address.ip().is_loopback() {
-            anyhow::bail!("MORROWS_LSM_CONTROL_URL must target loopback");
+            anyhow::bail!("MORROWS_RUNTIME_CONTROL_URL must target loopback");
         }
-        let key = std::env::var("MORROWS_LSM_CONTROL_KEY")
-            .context("MORROWS_LSM_CONTROL_KEY is required when LSM integration is enabled")?;
+        let key = std::env::var("MORROWS_RUNTIME_CONTROL_KEY")
+            .or_else(|_| std::env::var("MORROWS_LSM_CONTROL_KEY"))
+            .context("MORROWS_RUNTIME_CONTROL_KEY is required when morrow-runtime integration is enabled")?;
         if key.is_empty() || key.contains('\r') || key.contains('\n') {
-            anyhow::bail!("MORROWS_LSM_CONTROL_KEY is empty or invalid");
+            anyhow::bail!("MORROWS_RUNTIME_CONTROL_KEY is empty or invalid");
+        }
+        let mcp_url = std::env::var("MORROWS_RUNTIME_MCP_URL")
+            .or_else(|_| std::env::var("MORROWS_LSM_MCP_URL"))
+            .unwrap_or_else(|_| format!("{origin}/mcp"));
+        if !(mcp_url.starts_with("http://") || mcp_url.starts_with("https://")) {
+            anyhow::bail!("MORROWS_RUNTIME_MCP_URL must use HTTP(S)");
         }
         Ok(Some(Self {
-            origin,
+            mcp_url,
             address,
             key,
-            subject: std::env::var("MORROWS_LSM_SUBJECT")
-                .unwrap_or_else(|_| "local-mcp-client".into()),
+            subject: std::env::var("MORROWS_RUNTIME_SUBJECT")
+                .or_else(|_| std::env::var("MORROWS_LSM_SUBJECT"))
+                .unwrap_or_else(|_| "morrows-runtime".into()),
         }))
     }
 
@@ -66,7 +76,7 @@ impl LsmControl {
         )
         .await??;
         let request = format!(
-            "{method} /api/control{path} HTTP/1.1\r\nHost: {}\r\nX-LSM-Control-Key: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            "{method} /api/control{path} HTTP/1.1\r\nHost: {}\r\nX-Morrow-Runtime-Control-Key: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             self.address,
             self.key,
             payload.len(),
@@ -82,18 +92,21 @@ impl LsmControl {
         let separator = response
             .windows(4)
             .position(|chunk| chunk == b"\r\n\r\n")
-            .ok_or_else(|| anyhow!("LSM control response has no headers"))?;
+            .ok_or_else(|| anyhow!("morrow-runtime control response has no headers"))?;
         let header = std::str::from_utf8(&response[..separator])?;
         let status = header
             .lines()
             .next()
             .and_then(|line| line.split_whitespace().nth(1))
             .and_then(|value| value.parse::<u16>().ok())
-            .ok_or_else(|| anyhow!("LSM control response has no status"))?;
+            .ok_or_else(|| anyhow!("morrow-runtime control response has no status"))?;
         let value: Value = serde_json::from_slice(&response[separator + 4..])
-            .context("LSM control response is not JSON")?;
+            .context("morrow-runtime control response is not JSON")?;
         if !(200..300).contains(&status) {
-            anyhow::bail!("LSM control returned {status}: {}", value["error"]);
+            anyhow::bail!(
+                "morrow-runtime control returned {status}: {}",
+                value["error"]
+            );
         }
         Ok(value)
     }
@@ -127,7 +140,7 @@ impl LsmControl {
                 .await?;
             let session_id = response["session"]["session_id"]
                 .as_str()
-                .ok_or_else(|| anyhow!("LSM did not return a Session ID"))?
+                .ok_or_else(|| anyhow!("morrow-runtime did not return a Session ID"))?
                 .to_owned();
             store.bind_run_lsm(run_id, &session_id).await?;
             session_id
@@ -140,7 +153,7 @@ impl LsmControl {
         store: &Store,
         run_id: Id,
         task_title: &str,
-    ) -> anyhow::Result<AgentBinding> {
+    ) -> anyhow::Result<RuntimeAgentBinding> {
         let session_id = self.provision_run(store, run_id, task_title).await?;
         let subject = store
             .run_lsm_provisioning_subject(run_id)
@@ -155,11 +168,11 @@ impl LsmControl {
             .await?;
         let capability = issued["capability"]
             .as_str()
-            .ok_or_else(|| anyhow!("LSM did not return a capability"))?
+            .ok_or_else(|| anyhow!("morrow-runtime did not return a capability"))?
             .to_owned();
         let capability_id = issued["capability_id"]
             .as_str()
-            .ok_or_else(|| anyhow!("LSM did not return a capability ID"))?;
+            .ok_or_else(|| anyhow!("morrow-runtime did not return a capability ID"))?;
         if let Err(err) = store.try_adopt_run_capability(run_id, capability_id).await {
             // The Run state write wins when cancellation races with issuance.
             // The unadopted credential must be revoked before aborting launch.
@@ -172,15 +185,150 @@ impl LsmControl {
                 .await
             {
                 tracing::warn!(%run_id, %capability_id, %revoke_err,
-                    "failed revoking unadopted LSM capability; runtime cleanup will retry");
+                    "failed revoking unadopted runtime capability; runtime cleanup will retry");
             }
             return Err(err.into());
         }
-        Ok(AgentBinding {
+        Ok(RuntimeAgentBinding {
             logical_session_id: session_id,
             capability,
-            mcp_url: format!("{}/mcp", self.origin),
+            mcp_url: self.mcp_url.clone(),
         })
+    }
+
+    pub async fn ensure_session_runtime(
+        &self,
+        runtime_attempt_id: Id,
+        label: &str,
+    ) -> anyhow::Result<String> {
+        let response = self
+            .request(
+                "POST",
+                "/sessions",
+                json!({
+                    "subject": self.subject,
+                    "idempotency_key": format!("morrows:session-runtime:{runtime_attempt_id}"),
+                    "label": label,
+                    "objective": label,
+                }),
+            )
+            .await?;
+        response["session"]["session_id"]
+            .as_str()
+            .map(str::to_owned)
+            .ok_or_else(|| anyhow!("morrow-runtime did not return a Session ID"))
+    }
+
+    pub async fn issue_session_runtime_capability(
+        &self,
+        session_id: &str,
+    ) -> anyhow::Result<RuntimeAgentBinding> {
+        let issued = self
+            .request(
+                "POST",
+                &format!("/sessions/{session_id}/capabilities"),
+                json!({"subject": self.subject}),
+            )
+            .await?;
+        let capability = issued["capability"]
+            .as_str()
+            .ok_or_else(|| anyhow!("morrow-runtime did not return a capability"))?
+            .to_owned();
+        Ok(RuntimeAgentBinding {
+            logical_session_id: session_id.to_owned(),
+            capability,
+            mcp_url: self.mcp_url.clone(),
+        })
+    }
+
+    pub async fn cleanup_session_runtime(
+        &self,
+        session_id: &str,
+        finish: bool,
+    ) -> anyhow::Result<bool> {
+        let response = self
+            .request(
+                "POST",
+                &format!("/sessions/{session_id}/cleanup"),
+                json!({
+                    "subject": self.subject,
+                    "wait_seconds": 30,
+                    "terminal_action": if finish { "finish" } else { "cancel" },
+                }),
+            )
+            .await?;
+        Ok(response["complete"].as_bool().unwrap_or(false))
+    }
+
+    pub async fn list_workers(&self) -> anyhow::Result<Value> {
+        self.request("GET", "/workers", json!({})).await
+    }
+
+    pub async fn invite_worker(
+        &self,
+        name: &str,
+        workdir: Option<&str>,
+        ttl_s: i64,
+    ) -> anyhow::Result<Value> {
+        self.request(
+            "POST",
+            "/workers/invite",
+            json!({
+                "name": name,
+                "workdir": workdir,
+                "ttl_s": ttl_s,
+            }),
+        )
+        .await
+    }
+
+    pub async fn launch_agent(
+        &self,
+        session_id: &str,
+        machine: &str,
+        runtime_id: Id,
+        spec: Value,
+    ) -> anyhow::Result<Value> {
+        self.request(
+            "POST",
+            &format!("/sessions/{session_id}/runtime/launch"),
+            json!({
+                "subject": self.subject,
+                "machine": machine,
+                "runtime_id": runtime_id,
+                "spec": spec,
+            }),
+        )
+        .await
+    }
+
+    pub async fn agent_status(
+        &self,
+        session_id: &str,
+        machine: &str,
+        runtime_id: Id,
+    ) -> anyhow::Result<Value> {
+        let machine = percent_encode(machine);
+        self.request(
+            "GET",
+            &format!("/sessions/{session_id}/runtime/{runtime_id}?machine={machine}"),
+            json!({}),
+        )
+        .await
+    }
+
+    pub async fn stop_agent(
+        &self,
+        session_id: &str,
+        machine: &str,
+        runtime_id: Id,
+    ) -> anyhow::Result<Value> {
+        self.request(
+            "POST",
+            &format!("/sessions/{session_id}/runtime/{runtime_id}/stop"),
+            json!({"machine":machine}),
+        )
+        .await
     }
 
     pub async fn revoke_for_run(&self, store: &Store, run_id: Id) -> anyhow::Result<()> {
@@ -248,17 +396,7 @@ impl LsmControl {
         job_id: &str,
         machine: &str,
     ) -> anyhow::Result<Value> {
-        let machine = machine
-            .as_bytes()
-            .iter()
-            .map(|byte| {
-                if byte.is_ascii_alphanumeric() || b"-._~".contains(byte) {
-                    (*byte as char).to_string()
-                } else {
-                    format!("%{byte:02X}")
-                }
-            })
-            .collect::<String>();
+        let machine = percent_encode(machine);
         self.request(
             "GET",
             &format!("/sessions/{session_id}/jobs/{job_id}/tail?machine={machine}&lines=200"),
@@ -266,6 +404,27 @@ impl LsmControl {
         )
         .await
     }
+}
+
+pub fn runtime_not_found(err: &anyhow::Error) -> bool {
+    let message = err.to_string();
+    message.contains("morrow-runtime control returned 400:")
+        && message.contains("runtime ")
+        && message.contains(" not found")
+}
+
+fn percent_encode(value: &str) -> String {
+    value
+        .as_bytes()
+        .iter()
+        .map(|byte| {
+            if byte.is_ascii_alphanumeric() || b"-._~".contains(byte) {
+                (*byte as char).to_string()
+            } else {
+                format!("%{byte:02X}")
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -361,8 +520,8 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let control = LsmControl {
-            origin: format!("http://{address}"),
+        let control = MorrowRuntimeControl {
+            mcp_url: format!("http://{address}/mcp"),
             address,
             key: "test-control-key".into(),
             subject: "shared-runtime".into(),

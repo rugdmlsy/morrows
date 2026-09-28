@@ -1,0 +1,19 @@
+[Unit]
+Description=Morrows Execution Runtime
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=morrow
+Group=morrow
+WorkingDirectory=/srv/morrow/workspaces/morrows
+Environment=HOME=/home/morrow
+ExecStart=/srv/morrow/workspaces/morrows/scripts/run-morrow-runtime-vps.sh
+Restart=on-failure
+RestartPreventExitStatus=78
+RestartSec=3
+KillMode=control-group
+
+[Install]
+WantedBy=multi-user.target

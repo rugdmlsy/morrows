@@ -6,11 +6,13 @@ mod dispatch;
 mod fleet;
 mod intake;
 mod launch;
-mod lsm;
 mod mcp;
 mod memory;
 mod memory_search;
+mod morrow_runtime;
 mod operator_auth;
+mod runtime_executor;
+mod runtime_proxy;
 mod session;
 
 use anyhow::Context;
@@ -217,6 +219,14 @@ async fn main() -> anyhow::Result<()> {
             "returned abandoned Agent delivery claims to the queue"
         );
     }
+    let recovered_remote_session_runtimes =
+        session::recover_remote_session_runtime_monitors(store.clone()).await?;
+    if recovered_remote_session_runtimes > 0 {
+        tracing::warn!(
+            recovered = recovered_remote_session_runtimes,
+            "restored morrow-runtime direct Session runtimes after server restart"
+        );
+    }
     let managed_memory_search = MemorySearch::managed();
     tracing::info!(
         enabled = managed_memory_search.is_some(),
@@ -271,12 +281,32 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(?mcp_allowed_hosts, "configured Morrows MCP Host allowlist");
 
     let mcp_store = store.clone();
+    let mcp_memory_search = managed_memory_search.clone();
     let mcp_service: StreamableHttpService<MorrowsMcp, LocalSessionManager> =
         StreamableHttpService::new(
             move || {
                 Ok(MorrowsMcp::new_with_memory_search(
                     mcp_store.clone(),
-                    managed_memory_search.clone(),
+                    mcp_memory_search.clone(),
+                ))
+            },
+            Default::default(),
+            StreamableHttpServerConfig::default()
+                .with_json_response(true)
+                .with_allowed_hosts(mcp_allowed_hosts.clone()),
+        );
+    // Provider runtimes cannot use the public /morrows OAuth bridge because that
+    // bridge deliberately replaces Authorization with validated browser/client
+    // provenance. /agent-mcp is the direct Agent-credential surface exposed only
+    // through the existing /morrows/ui/* TLS reverse-proxy path.
+    let direct_mcp_store = store.clone();
+    let direct_mcp_memory_search = managed_memory_search.clone();
+    let direct_mcp_service: StreamableHttpService<MorrowsMcp, LocalSessionManager> =
+        StreamableHttpService::new(
+            move || {
+                Ok(MorrowsMcp::new_with_memory_search(
+                    direct_mcp_store.clone(),
+                    direct_mcp_memory_search.clone(),
                 ))
             },
             Default::default(),
@@ -314,6 +344,13 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(async move {
         launch::runtime_sweep(runtime_store).await;
     });
+    let recovered_remote_launches = launch::recover_remote_launch_monitors(store.clone()).await?;
+    if recovered_remote_launches > 0 {
+        tracing::warn!(
+            recovered = recovered_remote_launches,
+            "restored morrow-runtime launch monitors after server restart"
+        );
+    }
 
     let web_dir = env::var("MORROWS_WEB_DIR")
         .or_else(|_| env::var("AC_WEB_DIR"))
@@ -324,10 +361,16 @@ async fn main() -> anyhow::Result<()> {
         require_operator_auth,
         bootstrap_operator_token,
     );
-    let app = Router::new()
+    let runtime_proxy = runtime_proxy::router_from_env()?;
+    let mut app = Router::new()
         .nest("/api", api)
         .nest_service("/mcp", mcp_service)
-        .fallback_service(ServeDir::new(web_dir).append_index_html_on_directories(true))
+        .nest_service("/agent-mcp", direct_mcp_service)
+        .fallback_service(ServeDir::new(web_dir).append_index_html_on_directories(true));
+    if let Some(runtime_proxy) = runtime_proxy {
+        app = app.nest("/runtime", runtime_proxy);
+    }
+    let app = app
         .layer(middleware::from_fn_with_state(
             auth_state,
             auth::authenticate_agent_requests,

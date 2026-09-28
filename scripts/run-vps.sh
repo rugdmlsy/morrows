@@ -3,9 +3,10 @@ set -euo pipefail
 
 readonly root="${MORROWS_ROOT:-/srv/morrow/workspaces/morrows}"
 readonly server_bin="${MORROWS_SERVER_BIN:-${root}/target/release/morrows-server}"
-readonly lsm_env="${MORROWS_LSM_SOURCE_ENV:-/home/morrow/.config/local-shell-mcp/service.env}"
+readonly runtime_env="${MORROWS_RUNTIME_ENV:-/home/morrow/.config/morrows/runtime.env}"
 readonly guard_file="${MORROWS_DEPLOY_GUARD_FILE:-/home/morrow/.config/morrows/DEPLOYED_RELEASE}"
 readonly installed_unit="${MORROWS_SYSTEMD_UNIT:-/etc/systemd/system/morrows.service}"
+readonly installed_runtime_unit="${MORROWS_RUNTIME_SYSTEMD_UNIT:-/etc/systemd/system/morrow-runtime.service}"
 
 deployment_guard_error() {
   echo "ERROR: refusing to start an unmanaged Morrows production deployment." >&2
@@ -31,21 +32,24 @@ test -x "${server_bin}" || deployment_guard_error
 cmp -s "${server_bin}" "${artifacts}/server" || deployment_guard_error
 diff -qr "${root}/web/dist" "${artifacts}/web" >/dev/null || deployment_guard_error
 cmp -s "${root}/scripts/run-vps.sh" "${artifacts}/launcher" || deployment_guard_error
+cmp -s "${root}/scripts/run-morrow-runtime-vps.sh" "${artifacts}/runtime-launcher" || deployment_guard_error
 cmp -s "${installed_unit}" "${artifacts}/unit" || deployment_guard_error
+cmp -s "${installed_runtime_unit}" "${artifacts}/runtime-unit" || deployment_guard_error
 command -v "${MORROWS_RG_BIN:-rg}" >/dev/null 2>&1 || deployment_guard_error
-if [[ -r "${lsm_env}" ]]; then
-  lsm_control_key="$(
-    set +u
-    # shellcheck disable=SC1090
-    source "${lsm_env}"
-    printf '%s' "${LOCAL_SHELL_MCP_CONTROL_API_KEY:-}"
-  )"
-  if [[ -n "${lsm_control_key}" ]]; then
-    export MORROWS_LSM_CONTROL_KEY="${lsm_control_key}"
-    export MORROWS_LSM_CONTROL_URL="${MORROWS_LSM_CONTROL_URL:-http://127.0.0.1:8766}"
-    export MORROWS_LSM_SUBJECT="${MORROWS_LSM_SUBJECT:-local-mcp-client}"
-  fi
-  unset lsm_control_key
-fi
+test -r "${runtime_env}" || deployment_guard_error
+runtime_control_key="$(
+  set +u
+  # shellcheck disable=SC1090
+  source "${runtime_env}"
+  printf '%s' "${MORROWS_RUNTIME_CONTROL_KEY:-}"
+)"
+test -n "${runtime_control_key}" || deployment_guard_error
+export MORROWS_RUNTIME_CONTROL_KEY="${runtime_control_key}"
+export MORROWS_RUNTIME_CONTROL_URL="${MORROWS_RUNTIME_CONTROL_URL:-http://127.0.0.1:8790}"
+export MORROWS_RUNTIME_PROXY_URL="${MORROWS_RUNTIME_PROXY_URL:-http://127.0.0.1:8790}"
+export MORROWS_RUNTIME_MCP_URL="${MORROWS_RUNTIME_MCP_URL:-https://mcp.xycdev.com/morrows/ui/runtime/mcp}"
+export MORROWS_AGENT_MCP_URL="${MORROWS_AGENT_MCP_URL:-https://mcp.xycdev.com/morrows/ui/agent-mcp}"
+export MORROWS_RUNTIME_SUBJECT="${MORROWS_RUNTIME_SUBJECT:-morrows-runtime}"
+unset runtime_control_key
 
 exec "${server_bin}"

@@ -1,8 +1,8 @@
 use super::*;
 use axum::extract::Query;
 use morrows_core::{
-    CreateSession, CreateSessionSummaryRevision, SessionRuntimeAttempt, SessionSummaryRevision,
-    StartSessionRuntime, UpdateSessionScope,
+    CreateSession, CreateSessionSummaryRevision, LaunchProfile, SessionRuntimeAttempt,
+    SessionSummaryRevision, StartSessionRuntime, UpdateSessionScope,
 };
 use std::{path::PathBuf, process::Stdio};
 use tokio::{fs, io::AsyncWriteExt, process::Command};
@@ -366,6 +366,27 @@ async fn execute_session_runtime(
     attempt: SessionRuntimeAttempt,
 ) -> anyhow::Result<()> {
     let profile = store.get_launch_profile(attempt.launch_profile_id).await?;
+    match crate::runtime_executor::resolve(&store, &profile, attempt.agent_instance_id).await? {
+        crate::runtime_executor::RuntimeExecutorTarget::Local => {
+            execute_local_session_runtime(store, attempt).await
+        }
+        crate::runtime_executor::RuntimeExecutorTarget::MorrowRuntime { worker_name, .. } => {
+            let control =
+                crate::morrow_runtime::MorrowRuntimeControl::from_env()?.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "morrow_runtime Session profile requires MORROWS_RUNTIME_CONTROL_URL/KEY"
+                    )
+                })?;
+            execute_remote_session_runtime(store, attempt, profile, control, worker_name).await
+        }
+    }
+}
+
+async fn execute_local_session_runtime(
+    store: Store,
+    attempt: SessionRuntimeAttempt,
+) -> anyhow::Result<()> {
+    let profile = store.get_launch_profile(attempt.launch_profile_id).await?;
     store.get_session(attempt.session_id).await?;
     let account = match attempt.account_id {
         Some(id) => Some(store.get_account(id).await?),
@@ -486,6 +507,356 @@ async fn execute_session_runtime(
         .revoke_agent_credential(credential.credential.id)
         .await;
     result
+}
+
+async fn execute_remote_session_runtime(
+    store: Store,
+    attempt: SessionRuntimeAttempt,
+    profile: LaunchProfile,
+    control: crate::morrow_runtime::MorrowRuntimeControl,
+    worker_name: String,
+) -> anyhow::Result<()> {
+    let session = store.get_session(attempt.session_id).await?;
+    let summary = store
+        .get_latest_session_summary_revision(attempt.session_id)
+        .await?;
+    let account = match attempt.account_id {
+        Some(id) => Some(store.get_account(id).await?),
+        None => None,
+    };
+    let cwd = attempt
+        .cwd
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("Session runtime cwd missing"))?;
+    let previous_ref = store
+        .latest_session_provider_ref(attempt.session_id, attempt.launch_profile_id)
+        .await?;
+    let runtime_session_id = control
+        .ensure_session_runtime(attempt.id, &format!("Morrows Session: {}", session.title))
+        .await?;
+    let runtime_binding = control
+        .issue_session_runtime_capability(&runtime_session_id)
+        .await?;
+    let credential = store
+        .issue_session_runtime_credential(
+            attempt.agent_instance_id,
+            attempt.session_id,
+            &format!("Remote Session runtime {}", attempt.id),
+            3600,
+        )
+        .await?;
+    let deliveries = store
+        .claim_session_deliveries_for_runtime(attempt.id, 100)
+        .await?;
+    let prompt = build_session_runtime_prompt(&attempt, &session, summary.as_ref(), &deliveries);
+
+    let mut runtime_profile = profile.clone();
+    runtime_profile.model = attempt.model.clone().or(profile.model.clone());
+    let mut env = serde_json::Map::new();
+    env.insert(
+        "MORROWS_AGENT_AUTHORIZATION".into(),
+        Value::String(format!("Bearer {}", credential.token)),
+    );
+    env.insert(
+        "MORROWS_AGENT_INSTANCE_ID".into(),
+        Value::String(attempt.agent_instance_id.to_string()),
+    );
+    env.insert(
+        "MORROWS_SESSION_ID".into(),
+        Value::String(attempt.session_id.to_string()),
+    );
+    if let Some(account_id) = attempt.account_id {
+        env.insert(
+            "MORROWS_ACCOUNT_ID".into(),
+            Value::String(account_id.to_string()),
+        );
+    }
+    env.insert(
+        "MORROWS_RUNTIME_CAPABILITY".into(),
+        Value::String(runtime_binding.capability.clone()),
+    );
+
+    let mut files = Vec::<Value>::new();
+    let (args, known_provider_ref) = match profile.adapter.as_str() {
+        "codex_cli" => {
+            if let Some(home) = super::launch::remote_codex_home(account.as_ref())? {
+                env.insert("CODEX_HOME".into(), Value::String(home));
+            }
+            let mut args = super::launch::codex_args(
+                &runtime_profile,
+                &cwd,
+                "{runtime_dir}/last-message.txt",
+                previous_ref.as_deref(),
+                false,
+            );
+            super::launch::inject_morrows_config(&mut args);
+            super::launch::inject_runtime_config(&mut args, &runtime_binding);
+            if let Some(effort) = attempt.reasoning_effort.as_deref() {
+                args.insert(1, format!("model_reasoning_effort=\"{effort}\""));
+                args.insert(1, "-c".into());
+            }
+            (args, None)
+        }
+        "codebuddy_cli" => {
+            let provider_ref = previous_ref
+                .clone()
+                .unwrap_or_else(|| attempt.id.to_string());
+            let config = session_codebuddy_mcp_config(
+                attempt.agent_instance_id,
+                &credential.token,
+                Some(&runtime_binding),
+            );
+            files.push(json!({
+                "name": "codebuddy-mcp.json",
+                "content": serde_json::to_string_pretty(&config)?,
+                "mode": 384,
+            }));
+            let mut args = super::launch::codebuddy_args(
+                &runtime_profile,
+                "{runtime_dir}/codebuddy-mcp.json",
+                &provider_ref,
+                previous_ref.is_some(),
+            );
+            if let Some(effort) = attempt.reasoning_effort.as_deref() {
+                args.extend(["--effort".into(), effort.into()]);
+            }
+            (args, Some(provider_ref))
+        }
+        other => anyhow::bail!("Session runtime requires CLI adapter, got {other}"),
+    };
+
+    let spec = json!({
+        "provider": profile.adapter,
+        "program": profile.program,
+        "cwd": cwd,
+        "args": args,
+        "env": env,
+        "files": files,
+        "stdin_text": prompt,
+    });
+    if let Err(err) = control
+        .launch_agent(&runtime_session_id, &worker_name, attempt.id, spec)
+        .await
+    {
+        store.release_session_runtime_deliveries(attempt.id).await?;
+        let _ = control
+            .cleanup_session_runtime(&runtime_session_id, false)
+            .await;
+        let _ = store
+            .revoke_agent_credential(credential.credential.id)
+            .await;
+        return Err(err);
+    }
+
+    if attempt.status == "queued" {
+        store
+            .mark_session_runtime_running(
+                attempt.id,
+                None,
+                format!("morrow-runtime://{worker_name}/{}/stdout", attempt.id),
+                format!("morrow-runtime://{worker_name}/{}/stderr", attempt.id),
+            )
+            .await?;
+    }
+    store
+        .complete_session_runtime_deliveries(
+            attempt.id,
+            &format!("session_runtime:{}:{}", worker_name, attempt.id),
+        )
+        .await?;
+
+    monitor_remote_session_runtime(
+        store,
+        attempt,
+        profile,
+        control,
+        worker_name,
+        runtime_session_id,
+        known_provider_ref,
+    )
+    .await
+}
+
+async fn monitor_remote_session_runtime(
+    store: Store,
+    attempt: SessionRuntimeAttempt,
+    profile: LaunchProfile,
+    control: crate::morrow_runtime::MorrowRuntimeControl,
+    worker_name: String,
+    runtime_session_id: String,
+    known_provider_ref: Option<String>,
+) -> anyhow::Result<()> {
+    let mut poll = tokio::time::interval(std::time::Duration::from_millis(750));
+    let runtime = loop {
+        poll.tick().await;
+        match control
+            .agent_status(&runtime_session_id, &worker_name, attempt.id)
+            .await
+        {
+            Ok(value) => {
+                let runtime = value.get("runtime").cloned().unwrap_or(Value::Null);
+                let status = runtime
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown");
+                if super::launch::runtime_terminal(status) {
+                    break runtime;
+                }
+            }
+            Err(err) if crate::morrow_runtime::runtime_not_found(&err) => {
+                let message = format!(
+                    "morrow-runtime durable Session runtime {} is missing on worker {}",
+                    attempt.id, worker_name
+                );
+                let _ = control
+                    .cleanup_session_runtime(&runtime_session_id, false)
+                    .await;
+                let _ = store
+                    .revoke_session_agent_credentials(attempt.session_id)
+                    .await;
+                store
+                    .finish_session_runtime_attempt(
+                        attempt.id,
+                        None,
+                        known_provider_ref.clone(),
+                        Some(message),
+                    )
+                    .await?;
+                return Ok(());
+            }
+            Err(err) => {
+                tracing::warn!(
+                    session_id = %attempt.session_id,
+                    runtime_attempt_id = %attempt.id,
+                    %worker_name,
+                    %err,
+                    "morrow-runtime Session status temporarily unavailable; preserving runtime"
+                );
+            }
+        }
+    };
+
+    let status = runtime
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("failed");
+    let exit_code = runtime.get("exit_code").and_then(Value::as_i64);
+    let stdout = super::launch::remote_output_text(&runtime);
+    let stderr = runtime
+        .get("stderr_tail")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let provider_ref =
+        known_provider_ref.or_else(|| super::launch::extract_external_session_ref(&stdout));
+    let success = status == "succeeded" || (status == "exited" && exit_code == Some(0));
+    let error = if success {
+        None
+    } else {
+        super::launch::extract_codex_error(&stdout)
+            .or_else(|| {
+                let value = stderr.trim();
+                (!value.is_empty()).then(|| value.chars().take(2000).collect())
+            })
+            .map(|message| format!("{}: {message}", profile.adapter))
+            .or_else(|| Some(format!("remote Session runtime ended with status {status}")))
+    };
+
+    let _ = control
+        .cleanup_session_runtime(&runtime_session_id, success)
+        .await;
+    let _ = store
+        .revoke_session_agent_credentials(attempt.session_id)
+        .await;
+    store
+        .finish_session_runtime_attempt(attempt.id, exit_code, provider_ref, error.clone())
+        .await?;
+    if let Some(error) = error {
+        anyhow::bail!(error);
+    }
+    Ok(())
+}
+
+pub async fn recover_remote_session_runtime_monitors(store: Store) -> anyhow::Result<usize> {
+    let attempts = store.active_morrow_runtime_session_attempts().await?;
+    if attempts.is_empty() {
+        return Ok(0);
+    }
+    let control = crate::morrow_runtime::MorrowRuntimeControl::from_env()?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "active morrow-runtime Session attempts exist but runtime control is not configured"
+        )
+    })?;
+    let count = attempts.len();
+    for attempt in attempts {
+        let child_store = store.clone();
+        if attempt.status == "queued" {
+            tokio::spawn(async move {
+                if let Err(err) =
+                    execute_session_runtime(child_store.clone(), attempt.clone()).await
+                {
+                    tracing::error!(
+                        session_id = %attempt.session_id,
+                        runtime_attempt_id = %attempt.id,
+                        %err,
+                        "replayed remote Session runtime failed after restart"
+                    );
+                    let _ = child_store
+                        .release_session_runtime_deliveries(attempt.id)
+                        .await;
+                    let _ = child_store
+                        .revoke_session_agent_credentials(attempt.session_id)
+                        .await;
+                    let _ = child_store
+                        .finish_session_runtime_attempt(
+                            attempt.id,
+                            None,
+                            None,
+                            Some(err.to_string()),
+                        )
+                        .await;
+                }
+            });
+            continue;
+        }
+
+        let profile = store.get_launch_profile(attempt.launch_profile_id).await?;
+        let target =
+            crate::runtime_executor::resolve(&store, &profile, attempt.agent_instance_id).await?;
+        let crate::runtime_executor::RuntimeExecutorTarget::MorrowRuntime { worker_name, .. } =
+            target
+        else {
+            continue;
+        };
+        let runtime_session_id = control
+            .ensure_session_runtime(
+                attempt.id,
+                &format!("Morrows Session runtime {}", attempt.session_id),
+            )
+            .await?;
+        let previous_ref = attempt.provider_session_ref.clone();
+        let child_control = control.clone();
+        tokio::spawn(async move {
+            if let Err(err) = monitor_remote_session_runtime(
+                child_store,
+                attempt.clone(),
+                profile,
+                child_control,
+                worker_name,
+                runtime_session_id,
+                previous_ref,
+            )
+            .await
+            {
+                tracing::error!(
+                    session_id = %attempt.session_id,
+                    runtime_attempt_id = %attempt.id,
+                    %err,
+                    "recovered remote Session runtime monitor failed"
+                );
+            }
+        });
+    }
+    Ok(count)
 }
 
 fn configure_session_runtime_env(
@@ -655,28 +1026,49 @@ fn clip_session_prompt(value: &str, max_chars: usize) -> String {
     clipped
 }
 
+fn session_codebuddy_mcp_config(
+    agent_id: Id,
+    token: &str,
+    runtime_binding: Option<&crate::morrow_runtime::RuntimeAgentBinding>,
+) -> Value {
+    let mut servers = serde_json::Map::new();
+    servers.insert(
+        "morrows".into(),
+        json!({
+            "type": "http",
+            "url": super::launch::morrows_mcp_url(),
+            "headers": {
+                "Authorization": format!("Bearer {token}"),
+                "X-Agent-Instance-Id": agent_id.to_string()
+            },
+            "description": "Morrows employee interface"
+        }),
+    );
+    if let Some(binding) = runtime_binding {
+        servers.insert(
+            "morrow-runtime".into(),
+            json!({
+                "type": "http",
+                "url": binding.mcp_url,
+                "headers": {
+                    "X-Morrow-Runtime-Capability": binding.capability,
+                },
+                "description": "morrow-runtime execution interface"
+            }),
+        );
+    }
+    json!({
+        "mcpServers": servers,
+        "disabledMcpServers": []
+    })
+}
+
 async fn write_session_codebuddy_mcp(
     path: &std::path::Path,
     agent_id: Id,
     token: &str,
 ) -> anyhow::Result<()> {
-    let morrows_url = std::env::var("MORROWS_MCP_URL")
-        .or_else(|_| std::env::var("AC_MCP_URL"))
-        .unwrap_or_else(|_| "http://127.0.0.1:8787/mcp".into());
-    let config = json!({
-        "mcpServers": {
-            "morrows": {
-                "type": "http",
-                "url": morrows_url,
-                "headers": {
-                    "Authorization": format!("Bearer {token}"),
-                    "X-Agent-Instance-Id": agent_id.to_string()
-                },
-                "description": "Morrows employee interface"
-            }
-        },
-        "disabledMcpServers": []
-    });
+    let config = session_codebuddy_mcp_config(agent_id, token, None);
     fs::write(path, serde_json::to_vec_pretty(&config)?).await?;
     #[cfg(unix)]
     {
