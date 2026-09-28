@@ -8,12 +8,20 @@ mkdir -p "$fixture/repo/scripts" "$fixture/repo/web/dist" "$fixture/artifacts/we
 cp "$source_root/scripts/run-vps.sh" "$fixture/repo/scripts/run-vps.sh"
 cp "$source_root/scripts/run-morrow-runtime-vps.sh" "$fixture/repo/scripts/run-morrow-runtime-vps.sh"
 printf '/web/dist/\n/server\n' > "$fixture/repo/.gitignore"
-printf '#!/bin/sh\necho guarded-server-started\n' > "$fixture/repo/server"
+cat > "$fixture/repo/server" <<'SH'
+#!/bin/sh
+test "${MORROWS_RUNTIME_CONTROL_KEY:-}" = "test-runtime-control-key"
+test "${MORROWS_LSM_CONTROL_KEY:-}" = "test-lsm-control-key"
+test "${MORROWS_LSM_CONTROL_URL:-}" = "http://127.0.0.1:8766"
+test "${MORROWS_LSM_SUBJECT:-}" = "local-mcp-client"
+echo guarded-server-started
+SH
 chmod +x "$fixture/repo/server"
 printf 'test frontend\n' > "$fixture/repo/web/dist/index.html"
 printf 'test unit\n' > "$fixture/unit"
 printf 'test runtime unit\n' > "$fixture/runtime-unit"
 printf 'MORROWS_RUNTIME_CONTROL_KEY=test-runtime-control-key\n' > "$fixture/runtime.env"
+printf 'LOCAL_SHELL_MCP_CONTROL_API_KEY=test-lsm-control-key\n' > "$fixture/lsm.env"
 git -C "$fixture/repo" init -q
 git -C "$fixture/repo" add .
 git -C "$fixture/repo" -c user.name=Test -c user.email=test@local commit -qm fixture
@@ -30,6 +38,7 @@ export MORROWS_DEPLOY_GUARD_FILE="$fixture/guard"
 export MORROWS_SYSTEMD_UNIT="$fixture/unit"
 export MORROWS_RUNTIME_SYSTEMD_UNIT="$fixture/runtime-unit"
 export MORROWS_RUNTIME_ENV="$fixture/runtime.env"
+export MORROWS_LSM_SOURCE_ENV="$fixture/lsm.env"
 launch() { bash "$fixture/repo/scripts/run-vps.sh"; }
 expect_rejected() {
   local status=0
