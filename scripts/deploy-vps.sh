@@ -74,7 +74,7 @@ test "$(git -C "$root" rev-parse HEAD)" = "$expected_commit" || {
 
 cd "$root"
 mkdir -p data/launches data/session-runtimes
-chmod 755 scripts/run-vps.sh scripts/run-morrow-runtime-vps.sh
+chmod 755 scripts/run-vps.sh scripts/run-morrow-runtime-vps.sh scripts/run-morrows-cloudflared-vps.sh
 uv sync --project morrow-runtime --frozen --no-dev
 (
   cd web
@@ -94,8 +94,10 @@ git diff --cached --quiet --
 commit="$(git rev-parse HEAD)"
 sudo install -m 0644 deploy/morrows.service /etc/systemd/system/morrows.service
 sudo install -m 0644 deploy/morrow-runtime.service /etc/systemd/system/morrow-runtime.service
+sudo install -m 0644 deploy/morrows-cloudflared.service /etc/systemd/system/morrows-cloudflared.service
 cmp -s deploy/morrows.service /etc/systemd/system/morrows.service
 cmp -s deploy/morrow-runtime.service /etc/systemd/system/morrow-runtime.service
+cmp -s deploy/morrows-cloudflared.service /etc/systemd/system/morrows-cloudflared.service
 
 guard_dir=/home/morrow/.config/morrows
 guard_file="$guard_dir/DEPLOYED_RELEASE"
@@ -131,8 +133,11 @@ release_dir="$(mktemp -d "$guard_dir/release.XXXXXX")"
 install -m 0444 target/release/morrows-server "$release_dir/server"
 install -m 0444 scripts/run-vps.sh "$release_dir/launcher"
 install -m 0444 scripts/run-morrow-runtime-vps.sh "$release_dir/runtime-launcher"
+install -m 0444 scripts/run-morrows-cloudflared-vps.sh "$release_dir/edge-launcher"
 install -m 0444 deploy/morrows.service "$release_dir/unit"
 install -m 0444 deploy/morrow-runtime.service "$release_dir/runtime-unit"
+install -m 0444 deploy/morrows-cloudflared.service "$release_dir/edge-unit"
+install -m 0444 deploy/morrows-edge.caddy "$release_dir/edge-caddy"
 cp -R web/dist "$release_dir/web"
 chmod -R a-w "$release_dir"
 guard_tmp="$(mktemp "$guard_dir/.DEPLOYED_RELEASE.XXXXXX")"
@@ -168,9 +173,43 @@ while (( SECONDS < deadline )); do
     grep -q '^MORROWS_AGENT_MCP_URL=https://mcp.xycdev.com/morrows/ui/agent-mcp$' <<<"$env_names"
     test "$(systemctl is-active morrow-runtime.service)" = active
     curl -fsS http://127.0.0.1:8790/healthz >/dev/null
+    runtime_pid="$(systemctl show morrow-runtime.service -p MainPID --value)"
+    runtime_env_names="$(tr '\0' '\n' < "/proc/$runtime_pid/environ")"
+    grep -q '^LOCAL_SHELL_MCP_AUTH_MODE=oauth$' <<<"$runtime_env_names"
+    grep -q '^LOCAL_SHELL_MCP_OAUTH_ISSUER=https://mcp.xycdev.com/morrows/auth$' <<<"$runtime_env_names"
+    grep -q '^LOCAL_SHELL_MCP_OAUTH_RESOURCE=https://mcp.xycdev.com/morrows/auth$' <<<"$runtime_env_names"
     python3 -c 'import json,sys; data=json.loads(sys.stdin.read()); assert data["memory_search"]["enabled"] is True and data["memory_search"]["engine"] == "ripgrep"' <<<"$body"
     ! grep -q '^CLOUDFLARE_TUNNEL_TOKEN=' <<<"$env_names"
     ! grep -q '^LOCAL_SHELL_MCP_OAUTH_ADMIN_PIN=' <<<"$env_names"
+
+    # Morrows now owns /morrows and the Cloudflare connector lifecycle. The
+    # root fallback remains standalone LSM, but an LSM restart cannot remove
+    # the tunnel or the Morrows routes.
+    sudo install -m 0644 deploy/morrows-edge.caddy /etc/caddy/morrows-router.caddy
+    cmp -s deploy/morrows-edge.caddy /etc/caddy/morrows-router.caddy
+    if ! sudo grep -Fxq 'import /etc/caddy/morrows-router.caddy' /etc/caddy/Caddyfile; then
+      printf '\n# Morrows / standalone LSM shared loopback edge\nimport /etc/caddy/morrows-router.caddy\n' |
+        sudo tee -a /etc/caddy/Caddyfile >/dev/null
+    fi
+    sudo caddy validate --config /etc/caddy/Caddyfile
+    sudo systemctl reload caddy.service
+
+    sudo systemctl daemon-reload
+    sudo systemctl enable --now morrows-cloudflared.service
+    edge_deadline=$((SECONDS + 30))
+    while (( SECONDS < edge_deadline )); do
+      if curl -fsS http://127.0.0.1:20243/metrics 2>/dev/null |
+        awk '/cloudflared_tunnel_ha_connections/ && $2 + 0 > 0 {ok=1} END {exit !ok}'; then
+        break
+      fi
+      sleep 1
+    done
+    curl -fsS http://127.0.0.1:20243/metrics |
+      awk '/cloudflared_tunnel_ha_connections/ && $2 + 0 > 0 {ok=1} END {exit !ok}'
+    sudo systemctl disable --now local-shell-mcp-cloudflared.service >/dev/null 2>&1 || true
+    test "$(systemctl is-active morrows-cloudflared.service)" = active
+    ! systemctl show morrows-cloudflared.service -p Requires --value | grep -q 'local-shell-mcp'
+    curl -fsS https://mcp.xycdev.com/morrows/health >/dev/null
 
     # Keep only current + immediately previous successful release.
     for stale_release in "$guard_dir"/release.*; do

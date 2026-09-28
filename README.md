@@ -109,21 +109,25 @@ WebUI 同一实例暴露在：
 https://mcp.xycdev.com/morrows/ui/
 ```
 
-公网 WebUI / 控制平面 API 复用 LSM OAuth，不再要求浏览器保存第二套
+公网 WebUI / 控制平面 API 使用 Morrows 内置的 `morrow-runtime` OAuth，
+不再依赖独立 Local Shell MCP 的 OAuth 服务，也不要求浏览器保存
 `mrw_operator_*` token。
 
-VPS 上的 Local Shell MCP 已移到 `127.0.0.1:8766`。本地路由层占用
-`127.0.0.1:8765`：公网 `/morrows` MCP 先进入 Local Shell MCP，复用与
-Blender、Keynote 等 MCP 相同的 ChatGPT OAuth 边界；LSM 验证成功后会移除公网
-OAuth token 和调用方伪造的 Morrows 身份头，并只通过 loopback 注入已验证的
-OAuth `client_id`（以及可选 `client_name`）作为可信 provenance。Morrows
-按该 `client_id` 自动解析/创建一个稳定的技术 AgentInstance；名称、账号邮箱、
-平台和设备由 Agent 使用 `agent_identity_report` 自行查询并上报，绝不用于授权。
-WebUI 静态资源仍直接进入 Morrows；`/morrows/api/*` 控制面请求先经 LSM OAuth
-验证，再由 LSM 通过 loopback 注入可信控制面断言后进入 Morrows。
-原有 `https://mcp.xycdev.com/mcp` 保持不变。这个共享 Caddy 入口由
-`local-shell-mcp` 仓库的 `deploy/morrow/deploy-vps.sh` 统一管理；Morrows
-不再维护第二份路由配置。
+VPS 上的 Local Shell MCP 仍独立监听 `127.0.0.1:8766`，原有
+`https://mcp.xycdev.com/mcp` 保持不变。共享 loopback edge 监听
+`127.0.0.1:8765`，但 `/morrows`、`/morrows/api/*` 和
+`/morrows/auth/*` 均进入 Morrows 自己的 `morrow-runtime`；WebUI 静态资源
+直接进入 Morrows server。runtime 验证 OAuth 后移除公网 token 和调用方伪造的
+Morrows 身份头，只通过 loopback 注入已验证的 OAuth `client_id`（以及可选
+`client_name`）作为可信 provenance。Morrows 按该 `client_id` 解析/创建稳定
+技术 AgentInstance；名称、账号邮箱、平台和设备继续由 Agent
+`agent_identity_report` 自行上报，绝不用于授权。
+
+共享 Caddy 路由和 Cloudflare connector 生命周期现在由 Morrows
+`scripts/deploy-vps.sh` 管理。connector 不依赖 `local-shell-mcp.service`，
+所以独立 LSM 重启/停止不会让 Morrows WebUI/API/MCP 从公网消失。迁移期 runtime
+仍可验证已经签发的旧 LSM OAuth token，以避免现有 ChatGPT connector 立即失效；
+新认证统一走 `/morrows/auth`，后续完成客户端重认证后可移除这层兼容。
 
 本地开发仍可使用旧的 tmux 部署：
 

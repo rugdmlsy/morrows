@@ -250,6 +250,35 @@ def _verify_oauth(request: Request, settings: Settings) -> Principal:
     try:
         claims = validate_bearer_token(token, request)
     except jwt.PyJWTError as exc:
+        legacy_secret = (settings.oauth_legacy_jwt_secret or "").strip()
+        legacy_issuer = (settings.oauth_legacy_issuer or "").strip()
+        legacy_resource = (settings.oauth_legacy_resource or "").strip()
+        if (
+            str(request.url.path).startswith("/morrows")
+            and legacy_secret
+            and legacy_issuer
+            and legacy_resource
+        ):
+            try:
+                claims = jwt.decode(
+                    token,
+                    legacy_secret,
+                    algorithms=["HS256"],
+                    audience=legacy_resource,
+                    issuer=legacy_issuer,
+                    options={"require": ["iat", "aud", "iss"]},
+                )
+                claims = dict(claims)
+                claims["auth"] = "legacy_lsm_oauth"
+                audit(
+                    "legacy_lsm_oauth_auth_ok",
+                    client_id=claims.get("client_id"),
+                    path=str(request.url.path),
+                    ip=_client_host(request),
+                )
+                return Principal(email=None, subject=claims.get("sub"), claims=claims)
+            except jwt.PyJWTError:
+                pass
         audit("oauth_auth_failed", error=str(exc), path=str(request.url.path), ip=_client_host(request))
         raise HTTPException(status_code=401, detail=f"Invalid OAuth bearer token: {exc}") from exc
     return Principal(email=None, subject=claims.get("sub"), claims=claims)

@@ -1,0 +1,19 @@
+[Unit]
+Description=Cloudflare Tunnel edge for Morrows and standalone Local Shell MCP
+After=network-online.target caddy.service
+Wants=network-online.target caddy.service
+
+[Service]
+Type=simple
+User=morrow
+Group=morrow
+WorkingDirectory=/srv/morrow/workspaces/morrows
+Environment=HOME=/home/morrow
+EnvironmentFile=-/home/morrow/.config/local-shell-mcp/service.env
+ExecStart=/srv/morrow/workspaces/morrows/scripts/run-morrows-cloudflared-vps.sh
+Restart=always
+RestartSec=5
+KillMode=control-group
+
+[Install]
+WantedBy=multi-user.target

@@ -153,7 +153,7 @@ def test_morrows_control_proxy_accepts_only_first_party_browser_oauth(monkeypatc
         ),
     )
     monkeypatch.setattr(morrows_bridge, "oauth_client_name", lambda _client_id: "Morrows WebUI")
-    monkeypatch.setattr(morrows_bridge, "public_base_url", lambda _request: "http://testserver")
+    monkeypatch.setattr(morrows_bridge, "issuer_url", lambda _request: "http://testserver/morrows/auth")
     monkeypatch.setattr(
         morrows_bridge,
         "oauth_client_redirect_uris",
@@ -199,7 +199,7 @@ def test_morrows_control_proxy_rejects_non_browser_oauth_client(monkeypatch) -> 
         "oauth_client_redirect_uris",
         lambda _client_id: ("https://chat.openai.com/aip/callback",),
     )
-    monkeypatch.setattr(morrows_bridge, "public_base_url", lambda _request: "http://testserver")
+    monkeypatch.setattr(morrows_bridge, "issuer_url", lambda _request: "http://testserver/morrows/auth")
 
     app = Starlette(routes=morrows_bridge.morrows_bridge_routes())
     with TestClient(app, base_url="http://testserver") as client:
@@ -207,6 +207,50 @@ def test_morrows_control_proxy_rejects_non_browser_oauth_client(monkeypatch) -> 
 
     assert response.status_code == 403
     assert _FakeAsyncClient.calls == []
+
+
+def test_morrows_bridge_accepts_legacy_lsm_token_on_morrows_path(tmp_path, monkeypatch) -> None:
+    new_secret = "morrows-new-oauth-secret-that-is-over-32-bytes"
+    legacy_secret = "standalone-lsm-legacy-secret-that-is-over-32-bytes"
+    monkeypatch.setenv("LOCAL_SHELL_MCP_WORKSPACE_ROOT", str(tmp_path))
+    monkeypatch.setenv("LOCAL_SHELL_MCP_STATE_DIR", str(tmp_path / ".state"))
+    monkeypatch.setenv("LOCAL_SHELL_MCP_AUTH_MODE", "oauth")
+    monkeypatch.setenv("LOCAL_SHELL_MCP_OAUTH_JWT_SECRET", new_secret)
+    monkeypatch.setenv("LOCAL_SHELL_MCP_OAUTH_ISSUER", "http://testserver/morrows/auth")
+    monkeypatch.setenv("LOCAL_SHELL_MCP_OAUTH_RESOURCE", "http://testserver/morrows/auth")
+    monkeypatch.setenv("LOCAL_SHELL_MCP_OAUTH_LEGACY_JWT_SECRET", legacy_secret)
+    monkeypatch.setenv("LOCAL_SHELL_MCP_OAUTH_LEGACY_ISSUER", "http://testserver")
+    monkeypatch.setenv("LOCAL_SHELL_MCP_OAUTH_LEGACY_RESOURCE", "http://testserver")
+    get_settings.cache_clear()
+    _FakeAsyncClient.calls = []
+    monkeypatch.setattr(morrows_bridge.httpx, "AsyncClient", _FakeAsyncClient)
+
+    now = int(time.time())
+    legacy_token = jwt.encode(
+        {
+            "iat": now,
+            "aud": "http://testserver",
+            "iss": "http://testserver",
+            "sub": "chatgpt-existing",
+            "client_id": "existing-chatgpt-client",
+            "scope": "shell:read",
+        },
+        legacy_secret,
+        algorithm="HS256",
+    )
+
+    app = Starlette(routes=morrows_bridge.morrows_bridge_routes())
+    app.add_middleware(AuthMiddleware)
+    with TestClient(app, base_url="http://testserver") as client:
+        response = client.post(
+            "/morrows",
+            headers={"Authorization": f"Bearer {legacy_token}"},
+            content=b'{"jsonrpc":"2.0","id":1,"method":"tools/list"}',
+        )
+        assert response.status_code == 200
+        assert len(_FakeAsyncClient.calls) == 1
+
+    get_settings.cache_clear()
 
 def test_morrows_proxy_rejects_when_authenticated_principal_has_no_client_id(monkeypatch) -> None:
     _FakeAsyncClient.calls = []

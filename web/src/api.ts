@@ -2,21 +2,25 @@ export function getOperatorToken() {
   return window.sessionStorage.getItem("morrows.operatorToken") || window.localStorage.getItem("morrows.operatorToken") || "";
 }
 
-export const LSM_OAUTH_TOKEN_KEY = "lsm.ui.access_token";
+export const MORROWS_OAUTH_TOKEN_KEY = "morrows.runtime.oauth_access_token";
+const LEGACY_LSM_OAUTH_TOKEN_KEY = "lsm.ui.access_token";
 
 export function isHostedUnderMorrows() {
   return window.location.pathname === "/morrows/ui"
     || window.location.pathname.startsWith("/morrows/ui/");
 }
 
-export function getLsmOAuthToken() {
-  return window.sessionStorage.getItem(LSM_OAUTH_TOKEN_KEY) || "";
+export function getMorrowsOAuthToken() {
+  return window.sessionStorage.getItem(MORROWS_OAUTH_TOKEN_KEY)
+    || window.sessionStorage.getItem(LEGACY_LSM_OAUTH_TOKEN_KEY)
+    || "";
 }
 
-export function setLsmOAuthToken(token: string) {
+export function setMorrowsOAuthToken(token: string) {
   const value = token.trim();
-  if (value) window.sessionStorage.setItem(LSM_OAUTH_TOKEN_KEY, value);
-  else window.sessionStorage.removeItem(LSM_OAUTH_TOKEN_KEY);
+  window.sessionStorage.removeItem(LEGACY_LSM_OAUTH_TOKEN_KEY);
+  if (value) window.sessionStorage.setItem(MORROWS_OAUTH_TOKEN_KEY, value);
+  else window.sessionStorage.removeItem(MORROWS_OAUTH_TOKEN_KEY);
   window.dispatchEvent(new CustomEvent("morrows-operator-token-changed"));
 }
 
@@ -42,20 +46,33 @@ function publicPath(path: string) {
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const publicLogin = path === "/api/operator-login" || path === "/api/operator-login/status";
   const operatorToken = path.startsWith("/api/") && !publicLogin
-    ? (isHostedUnderMorrows() ? getLsmOAuthToken() : getOperatorToken())
+    ? (isHostedUnderMorrows() ? getMorrowsOAuthToken() : getOperatorToken())
     : "";
-  const response = await fetch(publicPath(path), {
-    ...init,
-    headers: {
-      "Content-Type": "application/json",
-      ...(operatorToken ? { Authorization: `Bearer ${operatorToken}` } : {}),
-      ...(init?.headers || {}),
-    },
-  });
+  let response: Response;
+  try {
+    response = await fetch(publicPath(path), {
+      ...init,
+      headers: {
+        "Content-Type": "application/json",
+        ...(operatorToken ? { Authorization: `Bearer ${operatorToken}` } : {}),
+        ...(init?.headers || {}),
+      },
+    });
+  } catch {
+    throw new ApiError(0, "Service temporarily unavailable; reconnecting automatically.");
+  }
   if (!response.ok) {
     const text = await response.text();
+    const contentType = response.headers.get("content-type") || "";
     let message = text || `${response.status} ${response.statusText}`;
-    try { message = JSON.parse(text).error || message; } catch { /* Plain-text proxy errors remain readable. */ }
+    if (contentType.includes("text/html") || /^\s*<!doctype html/i.test(text)) {
+      message = `Service temporarily unavailable (${response.status} ${response.statusText}); reconnecting automatically.`;
+    } else {
+      try {
+        const parsed = JSON.parse(text);
+        message = parsed.error || parsed.detail || message;
+      } catch { /* Plain-text proxy errors remain readable. */ }
+    }
     if (response.status === 401 && !new Headers(init?.headers).has("Authorization")) {
       window.dispatchEvent(new CustomEvent("morrows-operator-auth-required"));
     }

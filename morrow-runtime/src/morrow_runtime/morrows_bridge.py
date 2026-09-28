@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+from urllib.parse import urlsplit
+
 import httpx
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from .auth import current_principal
-from .oauth import oauth_client_name, oauth_client_redirect_uris, public_base_url
+from .oauth import issuer_url, oauth_client_name, oauth_client_redirect_uris
 
 _MORROWS_MCP_UPSTREAM = "http://127.0.0.1:8787/mcp"
 _MORROWS_CONTROL_UPSTREAM = "http://127.0.0.1:8787"
@@ -90,11 +92,11 @@ def _upstream_headers(
 
 
 def _first_party_browser_client(request: Request, client_id: str) -> bool:
-    base = public_base_url(request).rstrip("/")
+    issuer = urlsplit(issuer_url(request))
+    origin = f"{issuer.scheme}://{issuer.netloc}"
     allowed_redirects = {
-        f"{base}/ui/callback",
-        f"{base}/morrows/ui",
-        f"{base}/morrows/ui/",
+        f"{origin}/morrows/ui",
+        f"{origin}/morrows/ui/",
     }
     return any(uri in allowed_redirects for uri in oauth_client_redirect_uris(client_id))
 

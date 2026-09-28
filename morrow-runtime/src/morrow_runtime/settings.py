@@ -284,6 +284,7 @@ SENSITIVE_SETTING_KEYS = {
     "control_api_key",
     "oauth_admin_pin",
     "oauth_jwt_secret",
+    "oauth_legacy_jwt_secret",
     "remote_mobile_apns_team_id",
     "remote_mobile_apns_key_id",
     "remote_mobile_apns_key_path",
@@ -475,6 +476,11 @@ if _PYDANTIC_AVAILABLE:
         oauth_jwt_secret: str = Field(
             default_factory=lambda: os.getenv("LOCAL_SHELL_MCP_OAUTH_JWT_SECRET") or "dev-change-me"
         )
+        # Transitional verification only. New Morrows OAuth tokens are always
+        # issued by this runtime under oauth_issuer/oauth_resource.
+        oauth_legacy_jwt_secret: str | None = None
+        oauth_legacy_issuer: str | None = None
+        oauth_legacy_resource: str | None = None
         # 0 means access tokens never expire.
         oauth_access_token_ttl_s: int = 0
         oauth_code_ttl_s: int = 300
@@ -711,6 +717,9 @@ else:
         oauth_jwt_secret: str = field(
             default_factory=lambda: os.getenv("LOCAL_SHELL_MCP_OAUTH_JWT_SECRET") or "dev-change-me"
         )
+        oauth_legacy_jwt_secret: str | None = None
+        oauth_legacy_issuer: str | None = None
+        oauth_legacy_resource: str | None = None
         oauth_access_token_ttl_s: int = 0
         oauth_code_ttl_s: int = 300
 

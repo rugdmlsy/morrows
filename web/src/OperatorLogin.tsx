@@ -2,23 +2,23 @@ import { useEffect, useState } from "react";
 import {
   api,
   ApiError,
-  getLsmOAuthToken,
+  getMorrowsOAuthToken,
   getOperatorToken,
   isHostedUnderMorrows,
-  setLsmOAuthToken,
+  setMorrowsOAuthToken,
   setOperatorToken,
 } from "./api";
 import type { Locale } from "./i18n";
-import { completeLsmOAuthCallback, startLsmOAuth } from "./lsmOAuth";
+import { completeMorrowsOAuthCallback, startMorrowsOAuth } from "./morrowsOAuth";
 
 type Identity = { authenticated: boolean; role: string; label?: string; expires_at?: string };
 type LoginRequest = { id: string; code: string; token: string; expires_at: string };
 
 export default function OperatorLogin(props: { locale: Locale; onLogin: () => void }) {
-  return isHostedUnderMorrows() ? <LsmOAuthLogin {...props} /> : <LegacyOperatorLogin {...props} />;
+  return isHostedUnderMorrows() ? <MorrowsOAuthLogin {...props} /> : <LegacyOperatorLogin {...props} />;
 }
 
-function LsmOAuthLogin({ locale, onLogin }: { locale: Locale; onLogin: () => void }) {
+function MorrowsOAuthLogin({ locale, onLogin }: { locale: Locale; onLogin: () => void }) {
   const zh = locale === "zh-CN";
   const [identity, setIdentity] = useState<Identity | null>(null);
   const [required, setRequired] = useState(false);
@@ -40,7 +40,7 @@ function LsmOAuthLogin({ locale, onLogin }: { locale: Locale; onLogin: () => voi
     };
     const unauthorized = () => { setIdentity(null); setRequired(true); };
     const boot = async () => {
-      try { await completeLsmOAuthCallback(); }
+      try { await completeMorrowsOAuthCallback(); }
       catch (e) { if (!stopped) setError(e instanceof Error ? e.message : String(e)); }
       if (!stopped) verify();
     };
@@ -55,8 +55,8 @@ function LsmOAuthLogin({ locale, onLogin }: { locale: Locale; onLogin: () => voi
   }, []);
 
   const signIn = async () => {
-    setBusy(true); setError(""); setLsmOAuthToken("");
-    try { await startLsmOAuth(); }
+    setBusy(true); setError(""); setMorrowsOAuthToken("");
+    try { await startMorrowsOAuth(); }
     catch (e) { setError(e instanceof Error ? e.message : String(e)); setBusy(false); }
   };
 
@@ -69,16 +69,16 @@ function LsmOAuthLogin({ locale, onLogin }: { locale: Locale; onLogin: () => voi
     >
       <span className="auth-dot" />
       {identity
-        ? `${zh ? "LSM OAuth 已登录" : "LSM OAuth signed in"} · ${identity.role}`
+        ? `${zh ? "Morrows OAuth 已登录" : "Morrows OAuth signed in"} · ${identity.role}`
         : busy
           ? (zh ? "跳转中" : "Redirecting")
           : required || error
-            ? (zh ? "使用 LSM OAuth 登录" : "Sign in with LSM OAuth")
-            : (zh ? "检查 LSM OAuth" : "Checking LSM OAuth")}
+            ? (zh ? "使用 Morrows OAuth 登录" : "Sign in with Morrows OAuth")
+            : (zh ? "检查 Morrows OAuth" : "Checking Morrows OAuth")}
     </button>
     {(required || error) && <div className="operator-signin-hint">
-      <span>{error || (zh ? "Morrows 控制台只使用 LSM OAuth，不再需要 Operator token。" : "Morrows uses LSM OAuth only; no Operator token is required.")}</span>
-      {!!getLsmOAuthToken() && <button type="button" onClick={() => { setLsmOAuthToken(""); setIdentity(null); setRequired(true); onLogin(); }}>{zh ? "清除本标签页 OAuth" : "Clear tab OAuth"}</button>}
+      <span>{error || (zh ? "Morrows 控制台使用内置 runtime OAuth，不依赖独立 LSM。" : "Morrows uses its built-in runtime OAuth and does not depend on standalone LSM.")}</span>
+      {!!getMorrowsOAuthToken() && <button type="button" onClick={() => { setMorrowsOAuthToken(""); setIdentity(null); setRequired(true); onLogin(); }}>{zh ? "清除本标签页 OAuth" : "Clear tab OAuth"}</button>}
     </div>}
   </div>;
 }

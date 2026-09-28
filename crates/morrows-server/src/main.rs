@@ -18,8 +18,9 @@ mod session;
 use anyhow::Context;
 use axum::{
     Json, Router,
+    body::Body,
     extract::{Path, State},
-    http::StatusCode,
+    http::{Request, StatusCode},
     middleware,
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -67,6 +68,9 @@ fn configure_memory_cli(command: &mut tokio::process::Command) {
 #[derive(Debug)]
 struct ApiError(DomainError);
 
+#[derive(Debug, Clone)]
+struct ApiFailureDetail(String);
+
 impl From<DomainError> for ApiError {
     fn from(value: DomainError) -> Self {
         Self(value)
@@ -81,8 +85,36 @@ impl IntoResponse for ApiError {
             DomainError::InvalidState(_) | DomainError::InvalidInput(_) => StatusCode::BAD_REQUEST,
             DomainError::Storage(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
-        (status, Json(json!({"error": self.0.to_string()}))).into_response()
+        let detail = self.0.to_string();
+        let mut response = (status, Json(json!({"error": detail}))).into_response();
+        if status.is_server_error() {
+            response
+                .extensions_mut()
+                .insert(ApiFailureDetail(self.0.to_string()));
+        }
+        response
     }
+}
+
+async fn log_http_failures(request: Request<Body>, next: middleware::Next) -> Response {
+    let method = request.method().clone();
+    let uri = request.uri().clone();
+    let response = next.run(request).await;
+    if response.status().is_server_error() {
+        let detail = response
+            .extensions()
+            .get::<ApiFailureDetail>()
+            .map(|value| value.0.as_str())
+            .unwrap_or("unclassified server error");
+        tracing::error!(
+            method = %method,
+            uri = %uri,
+            status = %response.status(),
+            error = %detail,
+            "HTTP request failed"
+        );
+    }
+    response
 }
 
 #[derive(Deserialize)]
@@ -385,7 +417,9 @@ async fn main() -> anyhow::Result<()> {
     } else {
         app
     };
-    let app = app.layer(TraceLayer::new_for_http());
+    let app = app
+        .layer(middleware::from_fn(log_http_failures))
+        .layer(TraceLayer::new_for_http());
 
     info!(%addr, "Morrows server listening");
     axum::serve(listener, app).await?;

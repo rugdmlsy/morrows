@@ -9,6 +9,7 @@ User=morrow
 Group=morrow
 WorkingDirectory=/srv/morrow/workspaces/morrows
 Environment=HOME=/home/morrow
+EnvironmentFile=-/home/morrow/.config/local-shell-mcp/service.env
 ExecStart=/srv/morrow/workspaces/morrows/scripts/run-morrow-runtime-vps.sh
 Restart=on-failure
 RestartPreventExitStatus=78

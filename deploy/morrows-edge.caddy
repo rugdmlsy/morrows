@@ -1,0 +1,52 @@
+# Managed by Morrows. Standalone Local Shell MCP must not overwrite this file.
+# One Cloudflare hostname is shared, but /morrows is owned by Morrows and its
+# embedded morrow-runtime. Standalone LSM keeps the remaining root surface.
+:8765 {
+	bind 127.0.0.1
+
+	@morrows_browser_root {
+		method GET
+		path /morrows /morrows/
+		header Accept *text/html*
+	}
+	handle @morrows_browser_root {
+		redir * /morrows/ui/ 302
+	}
+
+	@morrows_auth path /morrows/auth /morrows/auth/*
+	handle @morrows_auth {
+		uri strip_prefix /morrows/auth
+		reverse_proxy 127.0.0.1:8790
+	}
+
+	@morrows_mcp path /morrows /morrows/
+	handle @morrows_mcp {
+		reverse_proxy 127.0.0.1:8790
+	}
+
+	@morrows_health path /morrows/health
+	handle @morrows_health {
+		rewrite * /api/health
+		reverse_proxy 127.0.0.1:8787
+	}
+
+	handle /morrows/api/* {
+		reverse_proxy 127.0.0.1:8790
+	}
+
+	@morrows_ui_root path /morrows/ui
+	handle @morrows_ui_root {
+		redir * /morrows/ui/ 308
+	}
+
+	handle /morrows/ui/* {
+		uri strip_prefix /morrows/ui
+		reverse_proxy 127.0.0.1:8787
+	}
+
+	# Standalone LSM remains independently reachable at the root /mcp, /oauth,
+	# UI, download and compatibility surfaces. It is no longer on Morrows' path.
+	handle {
+		reverse_proxy 127.0.0.1:8766
+	}
+}

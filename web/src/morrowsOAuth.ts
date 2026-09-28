@@ -1,6 +1,6 @@
-import { setLsmOAuthToken } from "./api";
+import { setMorrowsOAuthToken } from "./api";
 
-const PENDING_KEY = "morrows.lsm.oauth_pending";
+const PENDING_KEY = "morrows.runtime.oauth_pending";
 const SCOPES = "shell:read shell:write shell:execute browser:use file:share remote:use";
 
 type PendingOAuth = {
@@ -29,9 +29,9 @@ function redirectUri() {
   return `${window.location.origin}/morrows/ui/`;
 }
 
-export async function startLsmOAuth() {
+export async function startMorrowsOAuth() {
   const uri = redirectUri();
-  const registration = await fetch("/oauth/register", {
+  const registration = await fetch("/morrows/auth/oauth/register", {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "application/json" },
     body: JSON.stringify({ client_name: "Morrows WebUI", redirect_uris: [uri] }),
@@ -46,28 +46,28 @@ export async function startLsmOAuth() {
   const pending: PendingOAuth = { client_id: registered.client_id, verifier, state, redirect_uri: uri };
   window.sessionStorage.setItem(PENDING_KEY, JSON.stringify(pending));
 
-  const authorize = new URL("/oauth/authorize", window.location.origin);
+  const authorize = new URL("/morrows/auth/oauth/authorize", window.location.origin);
   authorize.searchParams.set("response_type", "code");
   authorize.searchParams.set("client_id", pending.client_id);
   authorize.searchParams.set("redirect_uri", pending.redirect_uri);
   authorize.searchParams.set("scope", SCOPES);
-  authorize.searchParams.set("resource", window.location.origin);
+  authorize.searchParams.set("resource", `${window.location.origin}/morrows/auth`);
   authorize.searchParams.set("code_challenge", await challenge(verifier));
   authorize.searchParams.set("code_challenge_method", "S256");
   authorize.searchParams.set("state", state);
   window.location.assign(authorize);
 }
 
-export async function completeLsmOAuthCallback() {
+export async function completeMorrowsOAuthCallback() {
   const current = new URL(window.location.href);
   const code = current.searchParams.get("code");
   if (!code) return false;
 
   const raw = window.sessionStorage.getItem(PENDING_KEY);
-  if (!raw) throw new Error("LSM OAuth request state is missing. Start authentication again.");
+  if (!raw) throw new Error("Morrows OAuth request state is missing. Start authentication again.");
   const pending = JSON.parse(raw) as PendingOAuth;
   if (current.searchParams.get("state") !== pending.state) {
-    throw new Error("LSM OAuth state verification failed.");
+    throw new Error("Morrows OAuth state verification failed.");
   }
 
   const body = new URLSearchParams({
@@ -77,17 +77,17 @@ export async function completeLsmOAuthCallback() {
     redirect_uri: pending.redirect_uri,
     code_verifier: pending.verifier,
   });
-  const response = await fetch("/oauth/token", {
+  const response = await fetch("/morrows/auth/oauth/token", {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
     body,
   });
   const result = await response.json();
   if (!response.ok || !result.access_token) {
-    throw new Error(result.error_description || result.error || "LSM OAuth token exchange failed.");
+    throw new Error(result.error_description || result.error || "Morrows OAuth token exchange failed.");
   }
 
-  setLsmOAuthToken(result.access_token);
+  setMorrowsOAuthToken(result.access_token);
   window.sessionStorage.removeItem(PENDING_KEY);
   current.searchParams.delete("code");
   current.searchParams.delete("state");

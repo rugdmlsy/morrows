@@ -64,3 +64,14 @@ expect_rejected
 rm "$fixture/repo/web/dist/extra.js"
 test "$(launch)" = guarded-server-started
 printf 'deployment guard tests passed\n'
+
+edge_router="$source_root/deploy/morrows-edge.caddy"
+edge_unit="$source_root/deploy/morrows-cloudflared.service"
+runtime_unit="$source_root/deploy/morrow-runtime.service"
+grep -Fq 'Managed by Morrows. Standalone Local Shell MCP must not overwrite this file.' "$edge_router"
+grep -Fq 'reverse_proxy 127.0.0.1:8790' "$edge_router"
+grep -Fq 'reverse_proxy 127.0.0.1:8766' "$edge_router"
+grep -Fq 'EnvironmentFile=-/home/morrow/.config/local-shell-mcp/service.env' "$edge_unit"
+grep -Fq 'EnvironmentFile=-/home/morrow/.config/local-shell-mcp/service.env' "$runtime_unit"
+! grep -Eq '^(Requires|BindsTo|PartOf)=.*local-shell-mcp' "$edge_unit"
+printf 'edge ownership tests passed\n'
