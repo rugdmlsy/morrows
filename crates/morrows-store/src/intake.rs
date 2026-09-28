@@ -1,7 +1,9 @@
 use super::*;
 use morrows_core::{
     AssignmentIntake, INTAKE_PHASE_CONTEXT_REVIEW, INTAKE_PHASE_HUMAN_INTERVIEW,
-    INTAKE_PHASE_IMPLEMENTING, INTAKE_PHASE_READY, InterviewSubmission, TaskIntakeView,
+    INTAKE_PHASE_IMPLEMENTING, INTAKE_PHASE_READY, INTERVIEW_STATE_CONVERGED,
+    INTERVIEW_STATE_NOT_STARTED, INTERVIEW_STATE_WAITING_FOR_AGENT, InterviewFinalize,
+    TaskIntakeView,
 };
 
 impl Store {
@@ -82,34 +84,18 @@ impl Store {
         })
     }
 
-    pub async fn submit_intake_interview(
+    pub async fn start_intake_interview(
         &self,
         task_id: Id,
         agent_id: Id,
-        input: InterviewSubmission,
     ) -> Result<AssignmentIntake, DomainError> {
-        if input.understanding.trim().is_empty() {
-            return Err(DomainError::InvalidInput(
-                "interview understanding is required".into(),
-            ));
-        }
-        if value_is_empty(&input.plan) {
-            return Err(DomainError::InvalidInput(
-                "interview plan is required".into(),
-            ));
-        }
-        if input.questions.iter().any(|q| q.trim().is_empty()) {
-            return Err(DomainError::InvalidInput(
-                "interview questions cannot contain empty items".into(),
-            ));
-        }
         let assignment = self.active_executor_assignment(task_id, agent_id).await?;
         if !matches!(
             assignment.phase.as_str(),
             INTAKE_PHASE_CONTEXT_REVIEW | INTAKE_PHASE_HUMAN_INTERVIEW
         ) {
             return Err(DomainError::Conflict(format!(
-                "assignment intake phase is {}; interview may only be submitted during context_review or human_interview",
+                "assignment intake phase is {}; interview may only start during context_review or human_interview",
                 assignment.phase
             )));
         }
@@ -127,24 +113,29 @@ impl Store {
             )));
         }
         let now = Utc::now();
-        let questions: Vec<String> = input
-            .questions
-            .into_iter()
-            .map(|q| q.trim().to_owned())
-            .collect();
+        let session_id = match intake.interview_session_id {
+            Some(id) => id,
+            None => {
+                self.ensure_task_session_for_agent_tx(&mut tx, task_id, agent_id)
+                    .await?
+            }
+        };
         sqlx::query(
-            "UPDATE assignment_intakes SET understanding=?,constraints_json=?,plan_json=?,questions_json=?,unresolved_questions_json=?,interview_status='pending',human_response=NULL,approved_by_actor_id=NULL,approved_at=NULL,updated_at=? WHERE assignment_id=?",
+            "UPDATE assignment_intakes
+             SET interview_session_id=?,conversation_state=?,interview_started_at=COALESCE(interview_started_at,?),
+                 interview_status='pending',human_response=NULL,approved_by_actor_id=NULL,approved_at=NULL,
+                 final_summary_message_id=NULL,confirmation_message_id=NULL,converged_at=NULL,updated_at=?
+             WHERE assignment_id=?",
         )
-        .bind(input.understanding.trim())
-        .bind(input.constraints.to_string())
-        .bind(input.plan.to_string())
-        .bind(json!(questions).to_string())
-        .bind(json!(questions).to_string())
+        .bind(session_id.to_string())
+        .bind(INTERVIEW_STATE_WAITING_FOR_AGENT)
+        .bind(now.to_rfc3339())
         .bind(now.to_rfc3339())
         .bind(assignment.id.to_string())
         .execute(&mut *tx)
         .await
         .map_err(storage)?;
+        extend_intake_lease_tx(&mut tx, assignment.id, now).await?;
         sqlx::query("UPDATE assignments SET phase=? WHERE id=? AND status='active'")
             .bind(INTAKE_PHASE_HUMAN_INTERVIEW)
             .bind(assignment.id.to_string())
@@ -157,8 +148,8 @@ impl Store {
             &agent_id.to_string(),
             "task",
             task_id,
-            "intake.interview_submitted",
-            json!({"assignment_id":assignment.id,"question_count":questions.len()}),
+            "intake.interview_started",
+            json!({"assignment_id":assignment.id,"session_id":session_id}),
             None,
         )
         .await?;
@@ -166,112 +157,125 @@ impl Store {
         self.get_assignment_intake(assignment.id).await
     }
 
-    pub async fn resolve_intake_interview(
+    pub async fn finalize_intake_interview(
         &self,
-        assignment_id: Id,
-        action: &str,
-        response: &str,
-        actor_id: &str,
+        task_id: Id,
+        agent_id: Id,
+        input: InterviewFinalize,
     ) -> Result<AssignmentIntake, DomainError> {
-        if !matches!(action, "approve" | "revise") {
+        if input.understanding.trim().is_empty() {
             return Err(DomainError::InvalidInput(
-                "interview action must be approve or revise".into(),
+                "interview understanding is required".into(),
             ));
         }
-        if action == "revise" && response.trim().is_empty() {
+        if value_is_empty(&input.plan) {
             return Err(DomainError::InvalidInput(
-                "revision response is required".into(),
+                "interview plan is required".into(),
             ));
         }
-        let mut tx = self
-            .pool
-            .begin_with("BEGIN IMMEDIATE")
-            .await
-            .map_err(storage)?;
-        let assignment = row_to_assignment(
-            sqlx::query("SELECT * FROM assignments WHERE id=?")
-                .bind(assignment_id.to_string())
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(storage)?
-                .ok_or_else(|| DomainError::NotFound(format!("assignment {assignment_id}")))?,
-        )?;
-        if assignment.role != "executor" || assignment.status != "active" {
+        if !input.unresolved_questions.is_empty() {
             return Err(DomainError::Conflict(
-                "human interview requires an active executor assignment".into(),
+                "human interview cannot converge while unresolved_questions is non-empty".into(),
             ));
         }
+        let assignment = self.active_executor_assignment(task_id, agent_id).await?;
         if assignment.phase != INTAKE_PHASE_HUMAN_INTERVIEW {
             return Err(DomainError::Conflict(format!(
                 "assignment intake phase is {}; expected human_interview",
                 assignment.phase
             )));
         }
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(storage)?;
         let intake = load_intake_tx(&mut tx, assignment.id).await?;
-        if intake.interview_status != "pending" {
+        let session_id = intake.interview_session_id.ok_or_else(|| {
+            DomainError::Conflict("human interview has no bound Task Session".into())
+        })?;
+        if intake.conversation_state == INTERVIEW_STATE_NOT_STARTED {
             return Err(DomainError::Conflict(format!(
-                "interview status is {}; the agent must submit or resubmit the interview before human resolution",
-                intake.interview_status
+                "human interview has not started"
             )));
-        }
-        if action == "approve"
-            && !intake.unresolved_questions.is_empty()
-            && response.trim().is_empty()
-        {
-            return Err(DomainError::InvalidInput(
-                "approval response is required when the interview contains unresolved questions"
-                    .into(),
-            ));
         }
         let read_blockers = intake_read_blockers_tx(self, &mut tx, &assignment, &intake).await?;
         if !read_blockers.is_empty() {
             return Err(DomainError::Conflict(format!(
-                "task intake became stale before human resolution: {}",
+                "task intake became stale during human interview: {}",
                 read_blockers.join(", ")
             )));
         }
+        validate_interview_convergence_tx(
+            &mut tx,
+            session_id,
+            task_id,
+            agent_id,
+            intake.interview_started_at,
+            input.final_summary_message_id,
+            input.confirmation_message_id,
+        )
+        .await?;
         let now = Utc::now();
-        if action == "approve" {
-            sqlx::query(
-                "UPDATE assignment_intakes SET unresolved_questions_json='[]',interview_status='approved',human_response=?,approved_by_actor_id=?,approved_at=?,updated_at=? WHERE assignment_id=?",
-            )
-            .bind(response.trim())
-            .bind(actor_id)
-            .bind(now.to_rfc3339())
-            .bind(now.to_rfc3339())
-            .bind(assignment.id.to_string())
-            .execute(&mut *tx)
-            .await
-            .map_err(storage)?;
-            sqlx::query("UPDATE assignments SET phase=? WHERE id=? AND status='active'")
-                .bind(INTAKE_PHASE_READY)
-                .bind(assignment.id.to_string())
-                .execute(&mut *tx)
+        let confirmation_body: String =
+            sqlx::query_scalar("SELECT body FROM session_messages WHERE id=? AND session_id=?")
+                .bind(input.confirmation_message_id.to_string())
+                .bind(session_id.to_string())
+                .fetch_one(&mut *tx)
                 .await
                 .map_err(storage)?;
-        } else {
-            sqlx::query(
-                "UPDATE assignment_intakes SET interview_status='revision_requested',human_response=?,approved_by_actor_id=NULL,approved_at=NULL,updated_at=? WHERE assignment_id=?",
-            )
-            .bind(response.trim())
-            .bind(now.to_rfc3339())
+        sqlx::query(
+            "UPDATE assignment_intakes
+             SET understanding=?,constraints_json=?,plan_json=?,unresolved_questions_json='[]',
+                 interview_status='approved',conversation_state=?,human_response=?,
+                 approved_by_actor_id=?,approved_at=?,final_summary_message_id=?,
+                 confirmation_message_id=?,converged_at=?,updated_at=?
+             WHERE assignment_id=?",
+        )
+        .bind(input.understanding.trim())
+        .bind(input.constraints.to_string())
+        .bind(input.plan.to_string())
+        .bind(INTERVIEW_STATE_CONVERGED)
+        .bind(confirmation_body)
+        .bind(format!("session_message:{}", input.confirmation_message_id))
+        .bind(now.to_rfc3339())
+        .bind(input.final_summary_message_id.to_string())
+        .bind(input.confirmation_message_id.to_string())
+        .bind(now.to_rfc3339())
+        .bind(now.to_rfc3339())
+        .bind(assignment.id.to_string())
+        .execute(&mut *tx)
+        .await
+        .map_err(storage)?;
+        sqlx::query(
+            "UPDATE session_messages SET status='delivered'
+             WHERE id=? AND session_id=? AND author_type='human' AND recalled_at IS NULL",
+        )
+        .bind(input.confirmation_message_id.to_string())
+        .bind(session_id.to_string())
+        .execute(&mut *tx)
+        .await
+        .map_err(storage)?;
+        sqlx::query("UPDATE assignments SET phase=? WHERE id=? AND status='active'")
+            .bind(INTAKE_PHASE_READY)
             .bind(assignment.id.to_string())
             .execute(&mut *tx)
             .await
             .map_err(storage)?;
-        }
+        extend_intake_lease_tx(&mut tx, assignment.id, now).await?;
         append_event_tx(
             &mut tx,
-            "operator",
-            actor_id,
+            "agent_instance",
+            &agent_id.to_string(),
             "task",
-            assignment.task_id,
-            if action == "approve" {
-                "intake.interview_approved"
-            } else {
-                "intake.interview_revision_requested"
-            },
-            json!({"assignment_id":assignment.id,"response":response.trim()}),
+            task_id,
+            "intake.interview_converged",
+            json!({
+                "assignment_id":assignment.id,
+                "session_id":session_id,
+                "final_summary_message_id":input.final_summary_message_id,
+                "confirmation_message_id":input.confirmation_message_id,
+            }),
             None,
         )
         .await?;
@@ -402,7 +406,10 @@ impl Store {
             || intake.project_memory_head != memory_head
             || intake.context_package_id != Some(package.id)
             || intake.context_revision_id != package.context_snapshot_id;
-        if snapshot_changed && intake.interview_status != "not_started" {
+        if snapshot_changed
+            && (intake.interview_status != "not_started"
+                || intake.conversation_state != INTERVIEW_STATE_NOT_STARTED)
+        {
             sqlx::query("UPDATE assignments SET phase=? WHERE id=? AND status='active'")
                 .bind(INTAKE_PHASE_CONTEXT_REVIEW)
                 .bind(assignment.id.to_string())
@@ -410,8 +417,15 @@ impl Store {
                 .await
                 .map_err(storage)?;
             sqlx::query(
-                "UPDATE assignment_intakes SET understanding='',constraints_json='{}',plan_json='[]',questions_json='[]',unresolved_questions_json='[]',interview_status='not_started',human_response=NULL,approved_by_actor_id=NULL,approved_at=NULL WHERE assignment_id=?",
+                "UPDATE assignment_intakes
+                 SET understanding='',constraints_json='{}',plan_json='[]',questions_json='[]',
+                     unresolved_questions_json='[]',interview_status='not_started',
+                     conversation_state=?,human_response=NULL,approved_by_actor_id=NULL,approved_at=NULL,
+                     interview_started_at=NULL,final_summary_message_id=NULL,
+                     confirmation_message_id=NULL,converged_at=NULL
+                 WHERE assignment_id=?",
             )
+            .bind(INTERVIEW_STATE_NOT_STARTED)
             .bind(assignment.id.to_string())
             .execute(&mut *tx)
             .await
@@ -485,6 +499,161 @@ pub(super) async fn create_assignment_intake_tx(
     .execute(&mut **tx)
     .await
     .map_err(storage)?;
+    Ok(())
+}
+
+pub(crate) async fn extend_intake_lease_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    assignment_id: Id,
+    now: DateTime<Utc>,
+) -> Result<(), DomainError> {
+    let interview_deadline = now + Duration::hours(24);
+    sqlx::query(
+        "UPDATE assignments
+         SET expires_at=MAX(expires_at,?),renewed_at=?
+         WHERE id=? AND status='active'",
+    )
+    .bind(interview_deadline.to_rfc3339())
+    .bind(now.to_rfc3339())
+    .bind(assignment_id.to_string())
+    .execute(&mut **tx)
+    .await
+    .map_err(storage)?;
+    Ok(())
+}
+
+async fn validate_interview_convergence_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    session_id: Id,
+    task_id: Id,
+    agent_id: Id,
+    interview_started_at: Option<DateTime<Utc>>,
+    final_summary_message_id: Id,
+    confirmation_message_id: Id,
+) -> Result<(), DomainError> {
+    if final_summary_message_id == confirmation_message_id {
+        return Err(DomainError::InvalidInput(
+            "final summary and human confirmation must be different messages".into(),
+        ));
+    }
+    let interview_started_at = interview_started_at.ok_or_else(|| {
+        DomainError::Conflict("human interview has no current start boundary".into())
+    })?;
+    let task_id_text = task_id.to_string();
+    let agent_id_text = agent_id.to_string();
+    let final_summary_id_text = final_summary_message_id.to_string();
+    let confirmation_id_text = confirmation_message_id.to_string();
+
+    let session = sqlx::query("SELECT agent_instance_id,task_id,status FROM sessions WHERE id=?")
+        .bind(session_id.to_string())
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(storage)?
+        .ok_or_else(|| DomainError::NotFound(format!("session {session_id}")))?;
+    let session_agent: String = session.try_get("agent_instance_id").map_err(storage)?;
+    let session_task: Option<String> = session.try_get("task_id").map_err(storage)?;
+    let session_status: String = session.try_get("status").map_err(storage)?;
+    if session_agent != agent_id_text
+        || session_task.as_deref() != Some(task_id_text.as_str())
+        || session_status != "open"
+    {
+        return Err(DomainError::Conflict(
+            "human interview Session is not the open Task Session for this Agent".into(),
+        ));
+    }
+
+    let summary = sqlx::query(
+        "SELECT author_type,author_agent_instance_id,created_at,recalled_at
+         FROM session_messages WHERE id=? AND session_id=?",
+    )
+    .bind(&final_summary_id_text)
+    .bind(session_id.to_string())
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(storage)?
+    .ok_or_else(|| DomainError::NotFound(format!("session message {final_summary_message_id}")))?;
+    let summary_author: String = summary.try_get("author_type").map_err(storage)?;
+    let summary_agent: Option<String> = summary
+        .try_get("author_agent_instance_id")
+        .map_err(storage)?;
+    let summary_created: String = summary.try_get("created_at").map_err(storage)?;
+    let summary_recalled: Option<String> = summary.try_get("recalled_at").map_err(storage)?;
+    let summary_created_at = parse_dt(summary_created.clone())?;
+    if summary_author != "agent"
+        || summary_agent.as_deref() != Some(agent_id_text.as_str())
+        || summary_recalled.is_some()
+    {
+        return Err(DomainError::Conflict(
+            "final interview summary must be a current Agent-authored message in the interview Session"
+                .into(),
+        ));
+    }
+    if summary_created_at < interview_started_at {
+        return Err(DomainError::Conflict(
+            "final interview summary predates the current interview round".into(),
+        ));
+    }
+
+    let confirmation = sqlx::query(
+        "SELECT author_type,created_at,recalled_at
+         FROM session_messages WHERE id=? AND session_id=?",
+    )
+    .bind(&confirmation_id_text)
+    .bind(session_id.to_string())
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(storage)?
+    .ok_or_else(|| DomainError::NotFound(format!("session message {confirmation_message_id}")))?;
+    let confirmation_author: String = confirmation.try_get("author_type").map_err(storage)?;
+    let confirmation_created: String = confirmation.try_get("created_at").map_err(storage)?;
+    let confirmation_recalled: Option<String> =
+        confirmation.try_get("recalled_at").map_err(storage)?;
+    let confirmation_created_at = parse_dt(confirmation_created.clone())?;
+    if confirmation_author != "human" || confirmation_recalled.is_some() {
+        return Err(DomainError::Conflict(
+            "interview convergence requires a current Human message after the final Agent summary"
+                .into(),
+        ));
+    }
+    if confirmation_created_at <= summary_created_at {
+        return Err(DomainError::Conflict(
+            "human confirmation must be sent after the final Agent summary".into(),
+        ));
+    }
+
+    let latest_agent_before_confirmation: Option<String> = sqlx::query_scalar(
+        "SELECT id FROM session_messages
+         WHERE session_id=? AND author_type='agent' AND recalled_at IS NULL
+           AND created_at<=?
+         ORDER BY created_at DESC,id DESC LIMIT 1",
+    )
+    .bind(session_id.to_string())
+    .bind(&confirmation_created)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(storage)?;
+    if latest_agent_before_confirmation.as_deref() != Some(final_summary_id_text.as_str()) {
+        return Err(DomainError::Conflict(
+            "cited final summary is not the latest Agent message before the Human confirmation"
+                .into(),
+        ));
+    }
+
+    let latest_message: Option<String> = sqlx::query_scalar(
+        "SELECT id FROM session_messages
+         WHERE session_id=? AND recalled_at IS NULL
+         ORDER BY created_at DESC,id DESC LIMIT 1",
+    )
+    .bind(session_id.to_string())
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(storage)?;
+    if latest_message.as_deref() != Some(confirmation_id_text.as_str()) {
+        return Err(DomainError::Conflict(
+            "human confirmation must be the latest interview message; reconcile newer messages first"
+                .into(),
+        ));
+    }
     Ok(())
 }
 
@@ -609,8 +778,16 @@ async fn intake_execution_blockers_tx(
     intake: &AssignmentIntake,
 ) -> Result<Vec<String>, DomainError> {
     let mut blockers = intake_read_blockers_tx(store, tx, assignment, intake).await?;
-    if intake.interview_status != "approved" || intake.approved_at.is_none() {
-        blockers.push("human_interview_not_approved".into());
+    let legacy_converged = intake.conversation_state == INTERVIEW_STATE_CONVERGED
+        && intake.interview_session_id.is_none()
+        && intake.approved_at.is_some();
+    let conversationally_converged = intake.conversation_state == INTERVIEW_STATE_CONVERGED
+        && intake.interview_session_id.is_some()
+        && intake.final_summary_message_id.is_some()
+        && intake.confirmation_message_id.is_some()
+        && intake.converged_at.is_some();
+    if !(legacy_converged || conversationally_converged) {
+        blockers.push("human_interview_not_converged".into());
     }
     if !intake.unresolved_questions.is_empty() {
         blockers.push("unresolved_questions".into());
@@ -655,6 +832,16 @@ fn row_to_assignment_intake(row: sqlx::sqlite::SqliteRow) -> Result<AssignmentIn
         human_response: row.try_get("human_response").map_err(storage)?,
         approved_by_actor_id: row.try_get("approved_by_actor_id").map_err(storage)?,
         approved_at: parse_opt_dt(row.try_get("approved_at").map_err(storage)?)?,
+        interview_session_id: parse_opt_id(row.try_get("interview_session_id").map_err(storage)?)?,
+        conversation_state: row.try_get("conversation_state").map_err(storage)?,
+        interview_started_at: parse_opt_dt(row.try_get("interview_started_at").map_err(storage)?)?,
+        final_summary_message_id: parse_opt_id(
+            row.try_get("final_summary_message_id").map_err(storage)?,
+        )?,
+        confirmation_message_id: parse_opt_id(
+            row.try_get("confirmation_message_id").map_err(storage)?,
+        )?,
+        converged_at: parse_opt_dt(row.try_get("converged_at").map_err(storage)?)?,
         created_at: parse_dt(row.try_get("created_at").map_err(storage)?)?,
         updated_at: parse_dt(row.try_get("updated_at").map_err(storage)?)?,
     })

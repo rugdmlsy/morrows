@@ -150,6 +150,7 @@ type Assignment = {
   role: string;
   agent_instance_id: string;
   status: string;
+  phase: string;
   acquired_at: string;
   expires_at: string;
 };
@@ -350,6 +351,21 @@ type TaskSession = {
   undelivered_count: number;
   last_message_preview?: string | null;
   updated_at: string;
+};
+
+type AssignmentIntakeView = {
+  assignment: Assignment;
+  intake: {
+    assignment_id: string;
+    interview_session_id?: string | null;
+    conversation_state: string;
+    interview_started_at?: string | null;
+    final_summary_message_id?: string | null;
+    confirmation_message_id?: string | null;
+    converged_at?: string | null;
+  };
+  blockers: string[];
+  execution_ready: boolean;
 };
 
 type LaunchInstruction = {
@@ -617,6 +633,7 @@ export default function App() {
   const [selectedProjectMemoryId, setSelectedProjectMemoryId] = useState<string | null>(null);
   const [projectMemoryLoading, setProjectMemoryLoading] = useState(false);
   const [taskSessions, setTaskSessions] = useState<TaskSession[]>([]);
+  const [assignmentIntake, setAssignmentIntake] = useState<AssignmentIntakeView | null>(null);
   const [sessionAgentId, setSessionAgentId] = useState<string | null>(null);
   const [sessionTargetId, setSessionTargetId] = useState<string | null>(null);
   const [sessionTaskId, setSessionTaskId] = useState<string | null>(null);
@@ -862,6 +879,15 @@ export default function App() {
       setLaunchAttempts(nextLaunchAttempts);
       setLaunchInstructions(nextLaunchInstructions);
       setTaskSessions(nextTaskSessions);
+      const intakeAssignment = nextAssignments.find(
+        (assignment) => assignment.role === "executor" && assignment.status === "active" && assignment.phase !== "implementing",
+      );
+      if (intakeAssignment) {
+        const nextIntake = await api<AssignmentIntakeView>(`/api/assignments/${intakeAssignment.id}/intake`).catch(() => null);
+        setAssignmentIntake(nextIntake);
+      } else {
+        setAssignmentIntake(null);
+      }
       if (openRunId && nextRuns.some((run) => run.id === openRunId)) {
         void api<RunExecution>(`/api/runs/${openRunId}/execution`)
           .then((execution) => setRunExecutions((current) => ({ ...current, [openRunId]: execution })))
@@ -2190,6 +2216,56 @@ export default function App() {
                           ))}
                         </div>}
                       </div>
+
+                      {assignmentIntake && (() => {
+                        const interviewSession = taskSessions.find(
+                          (session) => session.id === assignmentIntake.intake.interview_session_id,
+                        );
+                        const state = assignmentIntake.intake.conversation_state;
+                        const statusText = state === "waiting_for_human"
+                          ? (locale === "zh-CN" ? "Agent 正在等你回复" : "Agent is waiting for your reply")
+                          : state === "waiting_for_agent"
+                            ? (locale === "zh-CN" ? "你的回复已投递，Agent 会继续访谈" : "Your reply was delivered; the Agent will continue the interview")
+                            : state === "converged"
+                              ? (locale === "zh-CN" ? "访谈已收敛，正在切换到实施运行时" : "Interview converged; switching to the implementation runtime")
+                              : assignmentIntake.assignment.phase === "context_review"
+                                ? (locale === "zh-CN" ? "Agent 正在读取 Project Memory 与 Task Context" : "Agent is reviewing Project Memory and Task Context")
+                                : (locale === "zh-CN" ? "准备开始 Human Interview" : "Preparing the Human Interview");
+                        return (
+                          <div className="human-interview-panel">
+                            <div className="mini-card-row">
+                              <div>
+                                <h3 className="detail-section-title tone-violet">Human Interview</h3>
+                                <small>{statusText}</small>
+                              </div>
+                              {interviewSession && (
+                                <button
+                                  type="button"
+                                  className="secondary"
+                                  onClick={() => {
+                                    setSessionTargetId(interviewSession.id);
+                                    setSessionTaskId(null);
+                                    setSessionAgentId(null);
+                                    setView("sessions");
+                                  }}
+                                >
+                                  {locale === "zh-CN" ? "继续访谈" : "Continue interview"}
+                                </button>
+                              )}
+                            </div>
+                            <div className="intake-state-row">
+                              <span>{locale === "zh-CN" ? "阶段" : "Phase"} · <code>{assignmentIntake.assignment.phase}</code></span>
+                              <span>{locale === "zh-CN" ? "对话" : "Conversation"} · <code>{state}</code></span>
+                            </div>
+                            {interviewSession?.last_message_preview && (
+                              <p className="human-interview-preview">{interviewSession.last_message_preview}</p>
+                            )}
+                            {!interviewSession && assignmentIntake.assignment.phase === "human_interview" && (
+                              <small>{locale === "zh-CN" ? "访谈 Session 正在创建；无需手动审批。" : "The interview Session is being created; no manual approval is required."}</small>
+                            )}
+                          </div>
+                        );
+                      })()}
 
                       <div className="task-session-section">
                         <div className="mini-card-row">

@@ -1625,6 +1625,27 @@ h3 { margin: 20px 0 8px; color: var(--ink-3); font: 700 calc(8px * var(--font-sc
 }
 .task-session-section { display: grid; gap: 8px; }
 .task-session-section > .mini-card-row h3 { margin: 0; }
+.human-interview-panel {
+  display: grid;
+  gap: 8px;
+  padding: 10px 0;
+  border-block: 1px solid var(--line-soft);
+}
+.human-interview-panel .detail-section-title { margin: 0 0 3px; }
+.human-interview-panel small { color: var(--ink-3); }
+.intake-state-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  color: var(--ink-3);
+  font-size: calc(8px * var(--font-scale));
+}
+.human-interview-preview {
+  margin: 0;
+  color: var(--ink-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 .task-session-link { width: 100%; text-align: left; cursor: pointer; color: inherit; }
 .task-session-link p {
   margin: 5px 0 0;

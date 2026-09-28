@@ -401,6 +401,28 @@ pub async fn delivery_worker_loop(store: Store) {
                 Err(err) => tracing::error!(%run_id, %err, "failed to queue delivery continuation"),
             }
         }
+        let intake_candidates = match store.intake_delivery_resume_candidates().await {
+            Ok(value) => value,
+            Err(err) => {
+                tracing::error!(%err, "intake conversation resume scan failed");
+                continue;
+            }
+        };
+        for assignment_id in intake_candidates {
+            match store.enqueue_intake_continuation(assignment_id).await {
+                Ok(attempt) => tracing::info!(
+                    %assignment_id,
+                    launch_attempt_id = %attempt.id,
+                    "queued conversational intake/implementation continuation"
+                ),
+                Err(DomainError::Conflict(_)) => {}
+                Err(err) => tracing::error!(
+                    %assignment_id,
+                    %err,
+                    "failed to queue conversational intake continuation"
+                ),
+            }
+        }
     }
 }
 
@@ -705,7 +727,7 @@ async fn execute_codebuddy_with_root(
             binding.logical_session_id,
         ));
     } else {
-        prompt.push_str("\nThis is an intake-only launch. Morrows has not issued LSM execution capability. Use task_intake to read the complete current Project Memory and ContextPackage, submit task_interview_submit with all unclear details, then wait for human approval. Do not implement or modify external state until the Assignment phase becomes implementing.\n");
+        prompt.push_str("\nThis is an intake-only launch. Morrows has not issued LSM execution capability. Complete task_intake, then call task_interview_start and conduct the Human Interview in the returned Task Session using session_reply. Ask every unclear detail, incorporate Human replies, and continue for as many turns as needed. When nothing remains unresolved, send a final synthesis and implementation plan with session_reply, wait for a later Human reply in that Session, then call task_interview_finalize citing both message IDs. There is no separate operator approval step. After finalize, stop this read-only turn; Morrows will relaunch the implementation runtime automatically. Do not implement or modify external state until a new launch has Assignment phase=implementing.\n");
     }
 
     if let Some(mut stdin) = child.stdin.take() {
@@ -1012,7 +1034,7 @@ async fn execute_codex_with_root(
             binding.logical_session_id,
         ));
     } else {
-        prompt.push_str("\nThis is an intake-only launch. Morrows has not issued LSM execution capability. Use task_intake to read the complete current Project Memory and ContextPackage, submit task_interview_submit with all unclear details, then wait for human approval. Do not implement or modify external state until the Assignment phase becomes implementing.\n");
+        prompt.push_str("\nThis is an intake-only launch. Morrows has not issued LSM execution capability. Complete task_intake, then call task_interview_start and conduct the Human Interview in the returned Task Session using session_reply. Ask every unclear detail, incorporate Human replies, and continue for as many turns as needed. When nothing remains unresolved, send a final synthesis and implementation plan with session_reply, wait for a later Human reply in that Session, then call task_interview_finalize citing both message IDs. There is no separate operator approval step. After finalize, stop this read-only turn; Morrows will relaunch the implementation runtime automatically. Do not implement or modify external state until a new launch has Assignment phase=implementing.\n");
     }
     if let Some(mut stdin) = child.stdin.take() {
         if let Err(err) = stdin.write_all(prompt.as_bytes()).await {

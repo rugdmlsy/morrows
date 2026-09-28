@@ -1,19 +1,7 @@
 use super::*;
 
-#[derive(Deserialize)]
-struct ResolveInterview {
-    action: String,
-    #[serde(default)]
-    response: String,
-}
-
 pub fn routes() -> Router<AppState> {
-    Router::new()
-        .route("/assignments/{id}/intake", get(get_intake))
-        .route(
-            "/assignments/{id}/intake/interview",
-            post(resolve_interview),
-        )
+    Router::new().route("/assignments/{id}/intake", get(get_intake))
 }
 
 async fn get_intake(
@@ -29,21 +17,4 @@ async fn get_intake(
         "blockers": blockers,
         "execution_ready": blockers.is_empty(),
     })))
-}
-
-async fn resolve_interview(
-    State(s): State<AppState>,
-    Path(id): Path<Id>,
-    Json(body): Json<ResolveInterview>,
-) -> Result<Json<Value>, ApiError> {
-    Ok(Json(json!(
-        s.store
-            .resolve_intake_interview(
-                id,
-                body.action.trim(),
-                body.response.trim(),
-                "control-plane",
-            )
-            .await?
-    )))
 }

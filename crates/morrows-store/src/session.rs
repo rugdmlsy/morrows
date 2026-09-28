@@ -540,6 +540,37 @@ impl Store {
             }),
         )
         .await?;
+        sqlx::query(
+            "UPDATE assignment_intakes
+             SET conversation_state=?,interview_status='pending',human_response=NULL,
+                 approved_by_actor_id=NULL,approved_at=NULL,final_summary_message_id=NULL,
+                 confirmation_message_id=NULL,converged_at=NULL,updated_at=?
+             WHERE interview_session_id=? AND conversation_state!=?
+               AND assignment_id IN (
+                 SELECT id FROM assignments
+                 WHERE status='active' AND phase IN ('human_interview','ready')
+               )",
+        )
+        .bind(morrows_core::INTERVIEW_STATE_WAITING_FOR_AGENT)
+        .bind(now.to_rfc3339())
+        .bind(session_id.to_string())
+        .bind(morrows_core::INTERVIEW_STATE_NOT_STARTED)
+        .execute(&mut *tx)
+        .await
+        .map_err(storage)?;
+        sqlx::query(
+            "UPDATE assignments SET phase=?,expires_at=MAX(expires_at,?),renewed_at=?
+             WHERE id IN (
+               SELECT assignment_id FROM assignment_intakes WHERE interview_session_id=?
+             ) AND status='active' AND phase IN ('human_interview','ready')",
+        )
+        .bind(morrows_core::INTAKE_PHASE_HUMAN_INTERVIEW)
+        .bind((now + Duration::hours(24)).to_rfc3339())
+        .bind(now.to_rfc3339())
+        .bind(session_id.to_string())
+        .execute(&mut *tx)
+        .await
+        .map_err(storage)?;
         append_event_tx(
             &mut tx,
             "human",
@@ -759,6 +790,33 @@ impl Store {
         .bind(agent_id.to_string())
         .bind(&body)
         .bind(now.to_rfc3339())
+        .execute(&mut *tx)
+        .await
+        .map_err(storage)?;
+        sqlx::query(
+            "UPDATE assignment_intakes
+             SET conversation_state=?,interview_status='pending',updated_at=?
+             WHERE interview_session_id=? AND conversation_state!=?
+               AND assignment_id IN (
+                 SELECT id FROM assignments WHERE status='active' AND phase='human_interview'
+               )",
+        )
+        .bind(morrows_core::INTERVIEW_STATE_WAITING_FOR_HUMAN)
+        .bind(now.to_rfc3339())
+        .bind(session_id.to_string())
+        .bind(morrows_core::INTERVIEW_STATE_CONVERGED)
+        .execute(&mut *tx)
+        .await
+        .map_err(storage)?;
+        sqlx::query(
+            "UPDATE assignments SET expires_at=MAX(expires_at,?),renewed_at=?
+             WHERE id IN (
+               SELECT assignment_id FROM assignment_intakes WHERE interview_session_id=?
+             ) AND status='active' AND phase='human_interview'",
+        )
+        .bind((now + Duration::hours(24)).to_rfc3339())
+        .bind(now.to_rfc3339())
+        .bind(session_id.to_string())
         .execute(&mut *tx)
         .await
         .map_err(storage)?;
