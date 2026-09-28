@@ -249,7 +249,7 @@ impl Store {
         .await
         .map_err(storage)?;
         sqlx::query(
-            "UPDATE assignment_intakes SET project_id=NULL,project_memory_head=NULL,project_memory_next_offset=NULL,project_memory_complete=0,project_memory_read_at=NULL,context_package_id=NULL,context_revision_id=NULL,context_package_read_at=NULL,understanding='',constraints_json='{}',plan_json='[]',questions_json='[]',unresolved_questions_json='[]',interview_status='not_started',human_response=NULL,approved_by_actor_id=NULL,approved_at=NULL,updated_at=? WHERE task_id=? AND assignment_id IN (SELECT id FROM assignments WHERE task_id=? AND status='active' AND role='executor' AND phase='context_review')",
+            "UPDATE assignment_intakes SET project_id=NULL,project_memory_head=NULL,project_memory_next_offset=NULL,project_memory_complete=0,project_memory_read_at=NULL,context_package_id=NULL,context_revision_id=NULL,context_package_read_at=NULL,understanding='',constraints_json='{}',plan_json='[]',questions_json='[]',unresolved_questions_json='[]',interview_status='not_started',conversation_state='not_started',human_response=NULL,approved_by_actor_id=NULL,approved_at=NULL,interview_started_at=NULL,final_summary_message_id=NULL,confirmation_message_id=NULL,converged_at=NULL,updated_at=? WHERE task_id=? AND assignment_id IN (SELECT id FROM assignments WHERE task_id=? AND status='active' AND role='executor' AND phase='context_review')",
         )
         .bind(now.to_rfc3339())
         .bind(task_id.to_string())

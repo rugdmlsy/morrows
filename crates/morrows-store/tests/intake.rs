@@ -40,63 +40,57 @@ async fn fixture() -> (Store, Project, AgentInstance, Task) {
     (store, project, agent, task)
 }
 
-fn submission(questions: Vec<&str>) -> InterviewSubmission {
-    InterviewSubmission {
-        understanding: "Read current project/task context before implementation.".into(),
+fn finalize(final_summary_message_id: Id, confirmation_message_id: Id) -> InterviewFinalize {
+    InterviewFinalize {
+        understanding: "Read current project/task context and incorporate the Human interview."
+            .into(),
         constraints: json!({"preserve_existing_behavior":true}),
         plan: json!([
             "inspect current state",
-            "implement only after human approval",
+            "implement only after conversational convergence",
             "verify acceptance criteria"
         ]),
-        questions: questions.into_iter().map(str::to_owned).collect(),
+        unresolved_questions: vec![],
+        final_summary_message_id,
+        confirmation_message_id,
     }
 }
 
 #[tokio::test]
-async fn open_claim_requires_current_reads_and_human_approval_before_implementation() {
+async fn open_claim_requires_multi_turn_human_interview_before_implementation() {
     let (store, _project, agent, task) = fixture().await;
     let claim = store
         .claim_task_for_execution(task.id, agent.id, "executor", 300)
         .await
         .unwrap();
     assert_eq!(claim.assignment.phase, INTAKE_PHASE_CONTEXT_REVIEW);
-    assert_eq!(claim.run.status, "running");
     let initial = store
         .get_assignment_intake(claim.assignment.id)
         .await
         .unwrap();
-    assert_eq!(initial.interview_status, "not_started");
-
-    let blocked = store
-        .begin_task_execution(task.id, agent.id)
-        .await
-        .unwrap_err();
-    assert!(blocked.to_string().contains("context_review"));
+    assert_eq!(initial.conversation_state, INTERVIEW_STATE_NOT_STARTED);
 
     let view = store
         .task_intake_page(task.id, agent.id, 100, 0)
         .await
         .unwrap();
-    assert!(view.project_memory.next_offset.is_none());
     assert!(view.intake.project_memory_complete);
     assert!(view.intake.context_package_id.is_some());
-    assert!(!view.execution_ready);
     assert!(
         view.blockers
             .iter()
-            .any(|b| b == "human_interview_not_approved")
+            .any(|blocker| blocker == "human_interview_not_converged")
     );
 
-    let pending = store
-        .submit_intake_interview(
-            task.id,
-            agent.id,
-            submission(vec!["Which compatibility behavior is required?"]),
-        )
+    let started = store
+        .start_intake_interview(task.id, agent.id)
         .await
         .unwrap();
-    assert_eq!(pending.interview_status, "pending");
+    let session_id = started.interview_session_id.unwrap();
+    assert_eq!(
+        started.conversation_state,
+        INTERVIEW_STATE_WAITING_FOR_AGENT
+    );
     assert_eq!(
         store
             .get_assignment(claim.assignment.id)
@@ -106,44 +100,84 @@ async fn open_claim_requires_current_reads_and_human_approval_before_implementat
         INTAKE_PHASE_HUMAN_INTERVIEW
     );
 
-    let empty_approval = store
-        .resolve_intake_interview(claim.assignment.id, "approve", "", "human:test")
-        .await
-        .unwrap_err();
-    assert!(
-        empty_approval
-            .to_string()
-            .contains("approval response is required")
-    );
-
-    let revised = store
-        .resolve_intake_interview(
-            claim.assignment.id,
-            "revise",
-            "Preserve existing operator recovery behavior; resubmit your plan.",
-            "human:test",
+    let question = store
+        .agent_reply_session(
+            session_id,
+            agent.id,
+            "I need one detail before implementation: which compatibility behavior must be preserved?",
         )
         .await
         .unwrap();
-    assert_eq!(revised.interview_status, "revision_requested");
-    let cannot_skip_resubmit = store
-        .resolve_intake_interview(claim.assignment.id, "approve", "approved", "human:test")
+    assert_eq!(
+        store
+            .get_assignment_intake(claim.assignment.id)
+            .await
+            .unwrap()
+            .conversation_state,
+        INTERVIEW_STATE_WAITING_FOR_HUMAN
+    );
+
+    let human_answer = store
+        .create_human_session_message(session_id, "Preserve existing operator recovery behavior.")
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .get_assignment_intake(claim.assignment.id)
+            .await
+            .unwrap()
+            .conversation_state,
+        INTERVIEW_STATE_WAITING_FOR_AGENT
+    );
+
+    let final_summary = store
+        .agent_reply_session(
+            session_id,
+            agent.id,
+            "Final synthesis: preserve operator recovery behavior; inspect, implement, then run the acceptance tests.",
+        )
+        .await
+        .unwrap();
+
+    let too_early = store
+        .finalize_intake_interview(
+            task.id,
+            agent.id,
+            finalize(final_summary.id, human_answer.id),
+        )
         .await
         .unwrap_err();
     assert!(
-        cannot_skip_resubmit
+        too_early
             .to_string()
-            .contains("must submit or resubmit")
+            .contains("human confirmation must be sent after")
     );
 
-    store
-        .submit_intake_interview(task.id, agent.id, submission(vec![]))
+    let forged_human = store
+        .finalize_intake_interview(task.id, agent.id, finalize(final_summary.id, question.id))
+        .await
+        .unwrap_err();
+    assert!(
+        forged_human
+            .to_string()
+            .contains("requires a current Human message")
+    );
+
+    let confirmation = store
+        .create_human_session_message(session_id, "没问题，按这个方案做。")
         .await
         .unwrap();
-    store
-        .resolve_intake_interview(claim.assignment.id, "approve", "", "human:test")
+    let converged = store
+        .finalize_intake_interview(
+            task.id,
+            agent.id,
+            finalize(final_summary.id, confirmation.id),
+        )
         .await
         .unwrap();
+    assert_eq!(converged.conversation_state, INTERVIEW_STATE_CONVERGED);
+    assert_eq!(converged.final_summary_message_id, Some(final_summary.id));
+    assert_eq!(converged.confirmation_message_id, Some(confirmation.id));
     assert_eq!(
         store
             .get_assignment(claim.assignment.id)
@@ -153,12 +187,98 @@ async fn open_claim_requires_current_reads_and_human_approval_before_implementat
         INTAKE_PHASE_READY
     );
 
+    // A new Human message before implementation reopens the interview instead of
+    // letting an already-converged plan race into execution.
+    store
+        .create_human_session_message(session_id, "再补充一点：保留旧日志格式。")
+        .await
+        .unwrap();
+    let reopened = store
+        .get_assignment_intake(claim.assignment.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        reopened.conversation_state,
+        INTERVIEW_STATE_WAITING_FOR_AGENT
+    );
+    assert!(reopened.converged_at.is_none());
+    assert_eq!(
+        store
+            .get_assignment(claim.assignment.id)
+            .await
+            .unwrap()
+            .phase,
+        INTAKE_PHASE_HUMAN_INTERVIEW
+    );
+
+    let revised_summary = store
+        .agent_reply_session(
+            session_id,
+            agent.id,
+            "Revised synthesis: preserve operator recovery and the existing log format; then implement and test.",
+        )
+        .await
+        .unwrap();
+    let reconfirm = store
+        .create_human_session_message(session_id, "对，就这样。")
+        .await
+        .unwrap();
+    store
+        .finalize_intake_interview(
+            task.id,
+            agent.id,
+            finalize(revised_summary.id, reconfirm.id),
+        )
+        .await
+        .unwrap();
+
+    let implementing = store.begin_task_execution(task.id, agent.id).await.unwrap();
+    assert_eq!(implementing.phase, INTAKE_PHASE_IMPLEMENTING);
+}
+
+#[tokio::test]
+async fn context_change_invalidates_conversational_convergence() {
+    let (store, _project, agent, task) = fixture().await;
+    let claim = store
+        .claim_task_for_execution(task.id, agent.id, "executor", 300)
+        .await
+        .unwrap();
+    store
+        .task_intake_page(task.id, agent.id, 100, 0)
+        .await
+        .unwrap();
+    let intake = store
+        .start_intake_interview(task.id, agent.id)
+        .await
+        .unwrap();
+    let session_id = intake.interview_session_id.unwrap();
+    let final_summary = store
+        .agent_reply_session(
+            session_id,
+            agent.id,
+            "Final plan: implement the current acceptance criteria.",
+        )
+        .await
+        .unwrap();
+    let confirmation = store
+        .create_human_session_message(session_id, "Proceed with that plan.")
+        .await
+        .unwrap();
+    store
+        .finalize_intake_interview(
+            task.id,
+            agent.id,
+            finalize(final_summary.id, confirmation.id),
+        )
+        .await
+        .unwrap();
+
     store
         .create_context_revision(
             task.id,
             input(json!({
                 "goal":"ship safely",
-                "background":"changed after human approval",
+                "background":"changed after conversational convergence",
                 "constraints":{"acceptance_criteria":["intake enforced","new constraint"]},
                 "current_summary":"context changed",
                 "created_by_actor_id":"human:test"
@@ -166,6 +286,7 @@ async fn open_claim_requires_current_reads_and_human_approval_before_implementat
         )
         .await
         .unwrap();
+
     let stale = store
         .begin_task_execution(task.id, agent.id)
         .await
@@ -177,19 +298,24 @@ async fn open_claim_requires_current_reads_and_human_approval_before_implementat
         .await
         .unwrap();
     assert_eq!(refreshed.assignment.phase, INTAKE_PHASE_CONTEXT_REVIEW);
-    assert_eq!(refreshed.intake.interview_status, "not_started");
-    assert!(refreshed.intake.approved_at.is_none());
-
-    store
-        .submit_intake_interview(task.id, agent.id, submission(vec![]))
-        .await
-        .unwrap();
-    store
-        .resolve_intake_interview(claim.assignment.id, "approve", "", "human:test")
-        .await
-        .unwrap();
-    let implementing = store.begin_task_execution(task.id, agent.id).await.unwrap();
-    assert_eq!(implementing.phase, INTAKE_PHASE_IMPLEMENTING);
+    assert_eq!(
+        refreshed.intake.conversation_state,
+        INTERVIEW_STATE_NOT_STARTED
+    );
+    assert!(refreshed.intake.converged_at.is_none());
+    assert_eq!(
+        refreshed.intake.interview_session_id,
+        Some(session_id),
+        "transcript remains durable even though convergence is invalidated"
+    );
+    assert_eq!(
+        store
+            .get_assignment(claim.assignment.id)
+            .await
+            .unwrap()
+            .phase,
+        INTAKE_PHASE_CONTEXT_REVIEW
+    );
 }
 
 #[tokio::test]
@@ -244,4 +370,205 @@ async fn projectless_executor_intake_is_blocked_before_interview() {
         .await
         .unwrap_err();
     assert!(error.to_string().contains("task has no project"));
+}
+
+#[tokio::test]
+async fn human_messages_resume_read_only_intake_then_convergence_queues_implementation_launch() {
+    let (store, _project, agent, task) = fixture().await;
+    store
+        .set_task_assignment_mode(task.id, AssignmentMode::Approval)
+        .await
+        .unwrap();
+    let request = store
+        .request_assignment(task.id, agent.id, "executor", "take this work")
+        .await
+        .unwrap();
+    let resolved = store
+        .resolve_assignment_request(request.id, None, "approve", "assigned", 300)
+        .await
+        .unwrap();
+    let assignment_id = resolved.assignment_id.unwrap();
+    store
+        .task_intake_page(task.id, agent.id, 100, 0)
+        .await
+        .unwrap();
+    let intake = store
+        .start_intake_interview(task.id, agent.id)
+        .await
+        .unwrap();
+    let session_id = intake.interview_session_id.unwrap();
+
+    let program = std::env::current_exe().unwrap();
+    let cwd = std::env::current_dir().unwrap();
+    let profile = store
+        .register_launch_profile(RegisterLaunchProfile {
+            name: "intake-test-profile".into(),
+            adapter: "codex_cli".into(),
+            agent_instance_id: agent.id,
+            program: program.to_string_lossy().into_owned(),
+            default_cwd: Some(cwd.to_string_lossy().into_owned()),
+            model: None,
+            enabled: true,
+            metadata: json!({}),
+        })
+        .await
+        .unwrap();
+
+    let first = store
+        .enqueue_launch(EnqueueLaunch {
+            assignment_id,
+            launch_profile_id: profile.id,
+            cwd: None,
+            resume_from_attempt_id: None,
+        })
+        .await
+        .unwrap();
+    let first_execution = store
+        .begin_launch_attempt_with_lsm(first.id, Some("test-lsm-subject"))
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .run_lsm_provisioning_subject(first_execution.run.id)
+            .await
+            .unwrap(),
+        None,
+        "human_interview turn must not acquire LSM execution authority"
+    );
+    store
+        .mark_launch_running(first.id, Some(101), "stdout-1".into(), "stderr-1".into())
+        .await
+        .unwrap();
+    store
+        .agent_reply_session(
+            session_id,
+            agent.id,
+            "Which compatibility behavior should I preserve?",
+        )
+        .await
+        .unwrap();
+    store
+        .finish_launch_attempt(first.id, Some(0), Some("provider-session".into()), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        store.get_assignment(assignment_id).await.unwrap().status,
+        "active",
+        "finishing an intake turn must retain Assignment ownership"
+    );
+
+    store
+        .create_human_session_message(session_id, "Preserve operator recovery behavior.")
+        .await
+        .unwrap();
+    assert!(
+        store
+            .intake_delivery_resume_candidates()
+            .await
+            .unwrap()
+            .contains(&assignment_id)
+    );
+    let second = store
+        .enqueue_intake_continuation(assignment_id)
+        .await
+        .unwrap();
+    assert_eq!(second.resume_from_attempt_id, Some(first.id));
+    let second_execution = store
+        .begin_launch_attempt_with_lsm(second.id, Some("test-lsm-subject"))
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .run_lsm_provisioning_subject(second_execution.run.id)
+            .await
+            .unwrap(),
+        None
+    );
+    store
+        .mark_launch_running(second.id, Some(102), "stdout-2".into(), "stderr-2".into())
+        .await
+        .unwrap();
+    let final_summary = store
+        .agent_reply_session(
+            session_id,
+            agent.id,
+            "Final synthesis: preserve operator recovery behavior; inspect, implement, and run acceptance tests.",
+        )
+        .await
+        .unwrap();
+    store
+        .finish_launch_attempt(second.id, Some(0), Some("provider-session".into()), None)
+        .await
+        .unwrap();
+
+    let confirmation = store
+        .create_human_session_message(session_id, "没问题，按这个做。")
+        .await
+        .unwrap();
+    let third = store
+        .enqueue_intake_continuation(assignment_id)
+        .await
+        .unwrap();
+    assert_eq!(third.resume_from_attempt_id, Some(second.id));
+    let third_execution = store
+        .begin_launch_attempt_with_lsm(third.id, Some("test-lsm-subject"))
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .run_lsm_provisioning_subject(third_execution.run.id)
+            .await
+            .unwrap(),
+        None
+    );
+    store
+        .mark_launch_running(third.id, Some(103), "stdout-3".into(), "stderr-3".into())
+        .await
+        .unwrap();
+    store
+        .finalize_intake_interview(
+            task.id,
+            agent.id,
+            finalize(final_summary.id, confirmation.id),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        store.get_assignment(assignment_id).await.unwrap().phase,
+        INTAKE_PHASE_READY
+    );
+    store
+        .finish_launch_attempt(third.id, Some(0), Some("provider-session".into()), None)
+        .await
+        .unwrap();
+
+    assert!(
+        store
+            .intake_delivery_resume_candidates()
+            .await
+            .unwrap()
+            .contains(&assignment_id),
+        "converged ready intake should automatically queue the implementation runtime"
+    );
+    let implementation = store
+        .enqueue_intake_continuation(assignment_id)
+        .await
+        .unwrap();
+    let implementation_execution = store
+        .begin_launch_attempt_with_lsm(implementation.id, Some("test-lsm-subject"))
+        .await
+        .unwrap();
+    assert_eq!(
+        store.get_assignment(assignment_id).await.unwrap().phase,
+        INTAKE_PHASE_IMPLEMENTING
+    );
+    assert_eq!(
+        store
+            .run_lsm_provisioning_subject(implementation_execution.run.id)
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("test-lsm-subject"),
+        "only the implementation launch may create LSM provisioning intent"
+    );
 }

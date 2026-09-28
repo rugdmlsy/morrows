@@ -317,6 +317,105 @@ impl Store {
         rows.into_iter().map(row_to_launch_attempt).collect()
     }
 
+    pub async fn intake_delivery_resume_candidates(&self) -> Result<Vec<Id>, DomainError> {
+        let now = Utc::now().to_rfc3339();
+        let rows: Vec<String> = sqlx::query_scalar(
+            "SELECT ass.id
+             FROM assignments ass
+             JOIN assignment_intakes ai ON ai.assignment_id=ass.id
+             WHERE ass.role='executor'
+               AND ass.status='active'
+               AND ass.expires_at>?
+               AND ai.interview_session_id IS NOT NULL
+               AND (
+                 (
+                   ass.phase='human_interview'
+                   AND ai.conversation_state='waiting_for_agent'
+                   AND EXISTS (
+                     SELECT 1 FROM agent_deliveries d
+                     WHERE d.agent_instance_id=ass.agent_instance_id
+                       AND d.task_id=ass.task_id
+                       AND d.kind='session_message'
+                       AND d.status='queued'
+                   )
+                 )
+                 OR (
+                   ass.phase='ready'
+                   AND ai.conversation_state='converged'
+                 )
+               )
+               AND EXISTS (
+                 SELECT 1
+                 FROM launch_attempts a
+                 JOIN launch_profiles p ON p.id=a.launch_profile_id
+                 WHERE a.assignment_id=ass.id
+                   AND a.status IN ('completed','failed')
+                   AND a.external_session_ref IS NOT NULL
+                   AND p.adapter IN ('codex_cli','codebuddy_cli')
+               )
+               AND NOT EXISTS (
+                 SELECT 1 FROM launch_attempts active
+                 WHERE active.assignment_id=ass.id
+                   AND active.status IN ('queued','starting','running')
+               )
+             ORDER BY ass.acquired_at,ass.id
+             LIMIT 32",
+        )
+        .bind(now)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage)?;
+        rows.into_iter().map(parse_id).collect()
+    }
+
+    pub async fn enqueue_intake_continuation(
+        &self,
+        assignment_id: Id,
+    ) -> Result<LaunchAttempt, DomainError> {
+        let assignment = self.get_assignment(assignment_id).await?;
+        if assignment.role != "executor"
+            || assignment.status != "active"
+            || !matches!(
+                assignment.phase.as_str(),
+                INTAKE_PHASE_HUMAN_INTERVIEW | INTAKE_PHASE_READY
+            )
+        {
+            return Err(DomainError::Conflict(
+                "intake continuation requires an active executor in human_interview or ready"
+                    .into(),
+            ));
+        }
+        let row = sqlx::query(
+            "SELECT a.*
+             FROM launch_attempts a
+             JOIN launch_profiles p ON p.id=a.launch_profile_id
+             WHERE a.assignment_id=?
+               AND a.status IN ('completed','failed')
+               AND a.external_session_ref IS NOT NULL
+               AND p.adapter IN ('codex_cli','codebuddy_cli')
+             ORDER BY COALESCE(a.ended_at,a.created_at) DESC,a.id DESC
+             LIMIT 1",
+        )
+        .bind(assignment_id.to_string())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage)?
+        .ok_or_else(|| {
+            DomainError::Conflict(
+                "intake continuation requires a finished local launch with provider session state"
+                    .into(),
+            )
+        })?;
+        let previous = row_to_launch_attempt(row)?;
+        self.enqueue_launch(EnqueueLaunch {
+            assignment_id,
+            launch_profile_id: previous.launch_profile_id,
+            cwd: previous.cwd.clone(),
+            resume_from_attempt_id: Some(previous.id),
+        })
+        .await
+    }
+
     pub async fn claim_launch_job(&self) -> Result<Option<ClaimedLaunchJob>, DomainError> {
         let now = Utc::now();
         let mut tx = self
@@ -393,7 +492,7 @@ impl Store {
                 attempt.status
             )));
         }
-        let assignment = row_to_assignment(
+        let mut assignment = row_to_assignment(
             sqlx::query("SELECT * FROM assignments WHERE id=?")
                 .bind(attempt.assignment_id.to_string())
                 .fetch_optional(&mut *tx)
@@ -411,6 +510,7 @@ impl Store {
         }
         if assignment.role == "executor" && assignment.phase == morrows_core::INTAKE_PHASE_READY {
             crate::intake::enforce_execution_phase_tx(self, &mut tx, &assignment).await?;
+            assignment.phase = morrows_core::INTAKE_PHASE_IMPLEMENTING.into();
         }
         let profile = row_to_launch_profile(
             sqlx::query("SELECT * FROM launch_profiles WHERE id=?")
@@ -518,7 +618,9 @@ impl Store {
                 .await
                 .map_err(storage)?;
             }
-            if let Some(subject) = lsm_subject {
+            if let Some(subject) = lsm_subject
+                && assignment.phase == morrows_core::INTAKE_PHASE_IMPLEMENTING
+            {
                 sqlx::query(
                     "INSERT INTO run_lsm_provisioning(run_id,subject,created_at,updated_at)
                      VALUES(?,?,?,?)",
@@ -741,51 +843,105 @@ impl Store {
                 }
             }
             if matches!(run_status.as_deref(), Some("running") | Some("paused")) {
-                let lsm_bound_or_pending: bool = sqlx::query_scalar(
-                    "SELECT EXISTS(SELECT 1 FROM run_lsm_bindings WHERE run_id=?)
-                         OR EXISTS(SELECT 1 FROM run_lsm_provisioning WHERE run_id=?)",
-                )
-                .bind(run_id.to_string())
-                .bind(run_id.to_string())
-                .fetch_one(&mut *tx)
-                .await
-                .map_err(storage)?;
-                if lsm_bound_or_pending {
-                    let deadline = now + Duration::seconds(agent_restart_grace_seconds());
-                    let reason = error
-                        .clone()
-                        .unwrap_or_else(|| format!("launcher_exit_{}", exit_code.unwrap_or(-1)));
-                    sqlx::query("UPDATE runs SET status='interrupted',stop_reason=?,ended_at=NULL WHERE id=?")
-                        .bind(&reason).bind(run_id.to_string()).execute(&mut *tx).await.map_err(storage)?;
-                    sqlx::query("UPDATE run_lsm_bindings SET restart_deadline_at=?,updated_at=? WHERE run_id=?")
-                        .bind(deadline.to_rfc3339()).bind(now.to_rfc3339()).bind(run_id.to_string())
-                        .execute(&mut *tx).await.map_err(storage)?;
-                    sqlx::query("UPDATE run_lsm_provisioning SET restart_deadline_at=?,updated_at=? WHERE run_id=?")
-                        .bind(deadline.to_rfc3339()).bind(now.to_rfc3339()).bind(run_id.to_string())
-                        .execute(&mut *tx).await.map_err(storage)?;
-                    sqlx::query("UPDATE assignments SET expires_at=MAX(expires_at,?),renewed_at=? WHERE id=? AND status='active'")
-                        .bind(deadline.to_rfc3339()).bind(now.to_rfc3339()).bind(attempt.assignment_id.to_string())
-                        .execute(&mut *tx).await.map_err(storage)?;
-                    append_event_tx(&mut tx,"system","launcher","run",run_id,"run.interrupted",
-                        json!({"launch_attempt_id":id,"restart_deadline_at":deadline,"reason":reason}),None).await?;
-                } else {
-                    let new_run_status = if success { "paused" } else { "failed" };
+                let assignment_phase: Option<String> =
+                    sqlx::query_scalar("SELECT phase FROM assignments WHERE id=?")
+                        .bind(attempt.assignment_id.to_string())
+                        .fetch_optional(&mut *tx)
+                        .await
+                        .map_err(storage)?;
+                let intake_turn = assignment_phase
+                    .as_deref()
+                    .is_some_and(|phase| phase != morrows_core::INTAKE_PHASE_IMPLEMENTING);
+                if intake_turn {
+                    let phase = assignment_phase.as_deref().unwrap_or("unknown");
                     let stop_reason = if success {
-                        "launcher_process_exited_without_completion".to_owned()
+                        match phase {
+                            morrows_core::INTAKE_PHASE_READY => "intake_converged",
+                            morrows_core::INTAKE_PHASE_HUMAN_INTERVIEW => "intake_waiting_human",
+                            _ => "intake_context_review_incomplete",
+                        }
+                        .to_owned()
                     } else {
                         error
                             .clone()
                             .unwrap_or_else(|| format!("launcher_exit_{}", exit_code.unwrap_or(-1)))
                     };
                     sqlx::query("UPDATE runs SET status=?,stop_reason=?,ended_at=? WHERE id=?")
-                        .bind(new_run_status)
+                        .bind(if success { "completed" } else { "failed" })
                         .bind(&stop_reason)
                         .bind(now.to_rfc3339())
                         .bind(run_id.to_string())
                         .execute(&mut *tx)
                         .await
                         .map_err(storage)?;
+                    crate::intake::extend_intake_lease_tx(&mut tx, attempt.assignment_id, now)
+                        .await?;
                     append_event_tx(
+                        &mut tx,
+                        "system",
+                        "launcher",
+                        "run",
+                        run_id,
+                        if success {
+                            "run.intake_turn_completed"
+                        } else {
+                            "run.failed"
+                        },
+                        json!({
+                            "task_id":attempt.task_id,
+                            "launch_attempt_id":id,
+                            "assignment_phase":phase,
+                            "stop_reason":stop_reason,
+                        }),
+                        None,
+                    )
+                    .await?;
+                } else {
+                    let lsm_bound_or_pending: bool = sqlx::query_scalar(
+                        "SELECT EXISTS(SELECT 1 FROM run_lsm_bindings WHERE run_id=?)
+                         OR EXISTS(SELECT 1 FROM run_lsm_provisioning WHERE run_id=?)",
+                    )
+                    .bind(run_id.to_string())
+                    .bind(run_id.to_string())
+                    .fetch_one(&mut *tx)
+                    .await
+                    .map_err(storage)?;
+                    if lsm_bound_or_pending {
+                        let deadline = now + Duration::seconds(agent_restart_grace_seconds());
+                        let reason = error.clone().unwrap_or_else(|| {
+                            format!("launcher_exit_{}", exit_code.unwrap_or(-1))
+                        });
+                        sqlx::query("UPDATE runs SET status='interrupted',stop_reason=?,ended_at=NULL WHERE id=?")
+                        .bind(&reason).bind(run_id.to_string()).execute(&mut *tx).await.map_err(storage)?;
+                        sqlx::query("UPDATE run_lsm_bindings SET restart_deadline_at=?,updated_at=? WHERE run_id=?")
+                        .bind(deadline.to_rfc3339()).bind(now.to_rfc3339()).bind(run_id.to_string())
+                        .execute(&mut *tx).await.map_err(storage)?;
+                        sqlx::query("UPDATE run_lsm_provisioning SET restart_deadline_at=?,updated_at=? WHERE run_id=?")
+                        .bind(deadline.to_rfc3339()).bind(now.to_rfc3339()).bind(run_id.to_string())
+                        .execute(&mut *tx).await.map_err(storage)?;
+                        sqlx::query("UPDATE assignments SET expires_at=MAX(expires_at,?),renewed_at=? WHERE id=? AND status='active'")
+                        .bind(deadline.to_rfc3339()).bind(now.to_rfc3339()).bind(attempt.assignment_id.to_string())
+                        .execute(&mut *tx).await.map_err(storage)?;
+                        append_event_tx(&mut tx,"system","launcher","run",run_id,"run.interrupted",
+                        json!({"launch_attempt_id":id,"restart_deadline_at":deadline,"reason":reason}),None).await?;
+                    } else {
+                        let new_run_status = if success { "paused" } else { "failed" };
+                        let stop_reason = if success {
+                            "launcher_process_exited_without_completion".to_owned()
+                        } else {
+                            error.clone().unwrap_or_else(|| {
+                                format!("launcher_exit_{}", exit_code.unwrap_or(-1))
+                            })
+                        };
+                        sqlx::query("UPDATE runs SET status=?,stop_reason=?,ended_at=? WHERE id=?")
+                            .bind(new_run_status)
+                            .bind(&stop_reason)
+                            .bind(now.to_rfc3339())
+                            .bind(run_id.to_string())
+                            .execute(&mut *tx)
+                            .await
+                            .map_err(storage)?;
+                        append_event_tx(
                     &mut tx,
                     "system",
                     "launcher",
@@ -796,19 +952,20 @@ impl Store {
                     None,
                 )
                 .await?;
-                    release_launcher_assignment_tx(
-                        &mut tx,
-                        attempt.assignment_id,
-                        attempt.task_id,
-                        attempt.agent_instance_id,
-                        if success {
-                            "launcher_process_exited"
-                        } else {
-                            "launcher_failed"
-                        },
-                        now,
-                    )
-                    .await?;
+                        release_launcher_assignment_tx(
+                            &mut tx,
+                            attempt.assignment_id,
+                            attempt.task_id,
+                            attempt.agent_instance_id,
+                            if success {
+                                "launcher_process_exited"
+                            } else {
+                                "launcher_failed"
+                            },
+                            now,
+                        )
+                        .await?;
+                    }
                 }
             }
         } else if !success {

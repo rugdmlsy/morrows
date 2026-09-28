@@ -162,7 +162,6 @@ async fn failed_project_repair_is_atomic_and_preserves_existing_binding() {
     assert_eq!(store.task_events(task.id).await.unwrap().len(), event_count);
 }
 
-
 #[tokio::test]
 async fn unbound_project_repair_is_atomic_idempotent_and_refuses_reassignment() {
     let store = Store::connect("sqlite::memory:").await.unwrap();
@@ -221,7 +220,10 @@ async fn unbound_project_repair_is_atomic_idempotent_and_refuses_reassignment() 
         .await
         .unwrap_err();
     assert!(error.to_string().contains("refuses reassignment"));
-    assert_eq!(store.get_task(task.id).await.unwrap().project_id, Some(alpha.id));
+    assert_eq!(
+        store.get_task(task.id).await.unwrap().project_id,
+        Some(alpha.id)
+    );
 }
 
 #[tokio::test]

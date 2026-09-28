@@ -490,21 +490,33 @@ async fn continuation_chain_is_ordered_single_owner_and_recovers_checkpoints() {
             .await
             .unwrap();
         assert!(intake.project_memory.next_offset.is_none());
-        store
-            .submit_intake_interview(
-                task.id,
+        let interview = store.start_intake_interview(task.id, agent).await.unwrap();
+        let interview_session = interview.interview_session_id.unwrap();
+        let summary = store
+            .agent_reply_session(
+                interview_session,
                 agent,
-                InterviewSubmission {
-                    understanding: "continue the same durable task".into(),
-                    constraints: json!({}),
-                    plan: json!(["resume from durable handoff and checkpoint"]),
-                    questions: vec![],
-                },
+                "Final synthesis: continue the same durable task from the latest handoff and checkpoint.",
             )
             .await
             .unwrap();
+        let confirmation = store
+            .create_human_session_message(interview_session, "Proceed with that continuation plan.")
+            .await
+            .unwrap();
         store
-            .resolve_intake_interview(assignment.id, "approve", "approved", "human:test")
+            .finalize_intake_interview(
+                task.id,
+                agent,
+                InterviewFinalize {
+                    understanding: "continue the same durable task".into(),
+                    constraints: json!({}),
+                    plan: json!(["resume from durable handoff and checkpoint"]),
+                    unresolved_questions: vec![],
+                    final_summary_message_id: summary.id,
+                    confirmation_message_id: confirmation.id,
+                },
+            )
             .await
             .unwrap();
         let (one, two) = tokio::join!(

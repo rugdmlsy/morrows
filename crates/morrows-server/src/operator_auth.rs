@@ -358,27 +358,17 @@ mod tests {
         );
         assert_eq!(
             app.clone()
-                .oneshot(lsm_control_request(
-                    Method::GET,
-                    "/api/tasks",
-                    true,
-                    false,
-                ))
+                .oneshot(lsm_control_request(Method::GET, "/api/tasks", true, false,))
                 .await
                 .unwrap()
                 .status(),
             StatusCode::UNAUTHORIZED
         );
         assert_eq!(
-            app.oneshot(lsm_control_request(
-                Method::GET,
-                "/api/tasks",
-                false,
-                true,
-            ))
-            .await
-            .unwrap()
-            .status(),
+            app.oneshot(lsm_control_request(Method::GET, "/api/tasks", false, true,))
+                .await
+                .unwrap()
+                .status(),
             StatusCode::UNAUTHORIZED
         );
     }
