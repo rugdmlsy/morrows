@@ -211,7 +211,7 @@ while (( SECONDS < deadline )); do
     ! systemctl show morrows-cloudflared.service -p Requires --value | grep -q 'local-shell-mcp'
     curl -fsS https://mcp.xycdev.com/morrows/health >/dev/null
     # Discovery must name the MCP resource, not the separately mounted issuer.
-    curl -fsS https://mcp.xycdev.com/morrows/auth/.well-known/oauth-protected-resource |
+    curl -fsS https://mcp.xycdev.com/.well-known/oauth-protected-resource/morrows |
       "$root/morrow-runtime/.venv/bin/python" -c 'import json,sys; metadata=json.load(sys.stdin); assert metadata["resource"] == "https://mcp.xycdev.com/morrows"; assert metadata["authorization_servers"] == ["https://mcp.xycdev.com/morrows/auth"]'
 
     # Keep only current + immediately previous successful release.

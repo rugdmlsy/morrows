@@ -13,6 +13,12 @@
 		redir * /morrows/ui/ 302
 	}
 
+	# RFC 9728 discovery is rooted at the resource origin, before /morrows.
+	@morrows_resource_metadata path /.well-known/oauth-protected-resource/morrows
+	handle @morrows_resource_metadata {
+		reverse_proxy 127.0.0.1:8790
+	}
+
 	@morrows_auth path /morrows/auth /morrows/auth/*
 	handle @morrows_auth {
 		uri strip_prefix /morrows/auth

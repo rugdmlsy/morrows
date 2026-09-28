@@ -232,15 +232,11 @@ def _is_cross_origin_request(request: Request) -> bool:
 
 
 def _verify_oauth(request: Request, settings: Settings) -> Principal:
-    from .oauth import ALL_OAUTH_SCOPES, issuer_url, validate_bearer_token
+    from .oauth import ALL_OAUTH_SCOPES, protected_resource_metadata_url, validate_bearer_token
 
     token = _extract_token(request)
     if not token:
-        # The runtime publishes metadata alongside its OAuth endpoints. The
-        # protected resource is the MCP URL (/morrows), while this issuer may
-        # be mounted separately (/morrows/auth); do not derive a discovery
-        # route from the token audience.
-        metadata_url = issuer_url(request) + "/.well-known/oauth-protected-resource"
+        metadata_url = protected_resource_metadata_url(request)
         raise HTTPException(
             status_code=401,
             detail="Missing OAuth bearer token",

@@ -113,6 +113,11 @@ def _with_oauth_routes(inner_app, mcp=None):  # noqa: ANN001
         Route("/healthz", lambda request: JSONResponse({"ok": True}), methods=["GET"]),
         Route("/readyz", lambda request: JSONResponse({"ok": True}), methods=["GET"]),
         Route("/.well-known/oauth-protected-resource", oauth_protected_resource, methods=["GET"]),
+        Route(
+            "/.well-known/oauth-protected-resource/{resource_path:path}",
+            oauth_protected_resource,
+            methods=["GET"],
+        ),
         Route("/.well-known/oauth-authorization-server", oauth_server_metadata, methods=["GET"]),
         Route("/.well-known/openid-configuration", oauth_server_metadata, methods=["GET"]),
         Route("/oauth/register", oauth_register, methods=["POST"]),

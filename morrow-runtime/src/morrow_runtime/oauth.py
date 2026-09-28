@@ -109,6 +109,20 @@ def resource_url(request: Request | None = None) -> str:
     return (settings.oauth_resource or public_base_url(request)).rstrip("/")
 
 
+def protected_resource_metadata_url(request: Request | None = None) -> str:
+    """Insert the RFC 9728 well-known suffix before the resource's path.
+
+    The issuer may live at a different path or host. Discovery belongs to the
+    protected resource's origin; using issuer_url or appending to the resource
+    path conflates the token audience with the authorization server location.
+    """
+    resource = urlsplit(resource_url(request))
+    return (
+        f"{resource.scheme}://{resource.netloc}"
+        f"/.well-known/oauth-protected-resource{resource.path}"
+    )
+
+
 def _canonical_requested_resource(value: str | None, request: Request | None = None) -> str | None:
     """Return this server's canonical resource URI for an equivalent request.
 
@@ -430,6 +444,9 @@ def _json(data: dict, status_code: int = 200) -> JSONResponse:
 
 
 async def oauth_protected_resource(request: Request) -> JSONResponse:
+    requested_path = request.path_params.get("resource_path")
+    if requested_path is not None and "/" + requested_path != urlsplit(resource_url(request)).path:
+        return _json({"error": "unknown_resource"}, status_code=404)
     return _json(protected_resource_metadata(request))
 
 

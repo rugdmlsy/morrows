@@ -115,8 +115,11 @@ Morrows MCP is the protected resource `https://mcp.xycdev.com/morrows`.
 Its OAuth issuer and registration/authorization/token endpoints are hosted under
 `https://mcp.xycdev.com/morrows/auth`. These URIs serve different purposes: token
 `aud` and protected-resource metadata name `/morrows`, while `iss` names
-`/morrows/auth`. The 401 challenge links to metadata hosted under the issuer's
-route prefix, independently of the audience URI. Advertising `/morrows/auth` as
+`/morrows/auth`. The 401 challenge links to the RFC 9728 resource metadata URL
+`https://mcp.xycdev.com/.well-known/oauth-protected-resource/morrows`.
+Caddy sends this exact path to the embedded runtime, preserving standalone
+LSM discovery at the origin's bare well-known endpoint. The old metadata URL
+under `/morrows/auth` remains a compatible alias. Advertising `/morrows/auth` as
 the resource causes strict MCP clients to reject metadata before sending even
 previously stored credentials.
 

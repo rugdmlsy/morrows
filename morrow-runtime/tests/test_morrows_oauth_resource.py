@@ -44,7 +44,13 @@ def test_split_issuer_resource_discovery_and_pkce(tmp_path, monkeypatch):
             Route("/oauth/token", oauth.oauth_token, methods=["POST"]),
         ]
     )
-    edge = Starlette(routes=[Mount("/morrows/auth", auth), Mount("/", protected)])
+    edge = Starlette(
+        routes=[
+            Route("/.well-known/oauth-protected-resource/morrows", oauth.oauth_protected_resource),
+            Mount("/morrows/auth", auth),
+            Mount("/", protected),
+        ]
+    )
     _FakeAsyncClient.calls = []
     monkeypatch.setattr(morrows_bridge.httpx, "AsyncClient", _FakeAsyncClient)
     with TestClient(edge, base_url=base) as client:
@@ -52,7 +58,7 @@ def test_split_issuer_resource_discovery_and_pkce(tmp_path, monkeypatch):
         assert rejected.status_code == 401
         challenge = rejected.headers["www-authenticate"]
         metadata_url = challenge.split('resource_metadata="', 1)[1].split('"', 1)[0]
-        assert metadata_url == issuer + "/.well-known/oauth-protected-resource"
+        assert metadata_url == base + "/.well-known/oauth-protected-resource/morrows"
         metadata = client.get(metadata_url)
         assert metadata.status_code == 200
         assert metadata.json()["resource"] == resource
@@ -116,3 +122,29 @@ def test_split_issuer_resource_discovery_and_pkce(tmp_path, monkeypatch):
         denied = client.post("/morrows", headers={"Authorization": f"Bearer {wrong_audience}"})
         assert denied.status_code == 401
         assert len(_FakeAsyncClient.calls) == 1
+
+
+def test_runtime_serves_standard_resource_path_and_rejects_other_resources(tmp_path, monkeypatch):
+    from morrow_runtime.main import _build_mcp_http_app
+    from morrow_runtime.tools import build_mcp
+
+    for key, value in {
+        "WORKSPACE_ROOT": str(tmp_path),
+        "STATE_DIR": str(tmp_path / "state"),
+        "AUTH_MODE": "oauth",
+        "REMOTE_ENABLED": "false",
+        "PUBLIC_BASE_URL": "http://testserver/morrows/ui/runtime",
+        "OAUTH_RESOURCE": "http://testserver/morrows",
+        "OAUTH_ISSUER": "http://testserver/morrows/auth",
+        "OAUTH_JWT_SECRET": "resource-route-test-secret-at-least-thirty-two-bytes",
+    }.items():
+        monkeypatch.setenv("LOCAL_SHELL_MCP_" + key, value)
+    get_settings.cache_clear()
+    with TestClient(_build_mcp_http_app(build_mcp())) as client:
+        path = "/.well-known/oauth-protected-resource/morrows"
+        response = client.get(path)
+        assert response.status_code == 200
+        assert response.json()["resource"] == "http://testserver/morrows"
+        assert client.get("/.well-known/oauth-protected-resource/unrelated").status_code == 404
+        # Keep the issuer-mounted old alias compatible, but advertise the same audience.
+        assert client.get("/.well-known/oauth-protected-resource").json() == response.json()
