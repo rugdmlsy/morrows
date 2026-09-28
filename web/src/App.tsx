@@ -100,6 +100,14 @@ type Collaboration = {
     status: string;
   }[];
   dependencies: { depends_on_task_id: string }[];
+  relationships: {
+    source_task_id: string;
+    target_task_id: string;
+    relation_type: string;
+    created_by_actor_id: string;
+    metadata: Record<string, unknown>;
+    created_at: string;
+  }[];
 };
 
 type Agent = {
@@ -627,6 +635,7 @@ export default function App() {
   const [showProjectCreate, setShowProjectCreate] = useState(false);
   const [projectBusy, setProjectBusy] = useState(false);
   const [assignmentModeBusy, setAssignmentModeBusy] = useState(false);
+  const [taskMutationBusy, setTaskMutationBusy] = useState(false);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [expandedProjectId, setExpandedProjectId] = useState<string | null>(null);
   const [projectMemories, setProjectMemories] = useState<MemoryEntry[]>([]);
@@ -1336,6 +1345,71 @@ export default function App() {
     }
   }
 
+  async function deleteTask(task: Task) {
+    const message = t("deleteTaskConfirm").replace("{title}", task.title);
+    if (!window.confirm(message)) return;
+    setTaskMutationBusy(true);
+    try {
+      await api<{ task_id: string; deleted: boolean }>(`/api/tasks/${task.id}`, { method: "DELETE" });
+      const nextTaskId = tasks.find((item) => item.id !== task.id)?.id ?? null;
+      setTasks((current) => current.filter((item) => item.id !== task.id));
+      setTaskManagement((current) => current.filter((row) => row.task.id !== task.id));
+      if (selectedId === task.id) {
+        setSelectedProjectId(null);
+        setSelectedId(nextTaskId);
+      }
+      await Promise.all([refreshQueueBase(), refreshTaskManagement()]);
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setTaskMutationBusy(false);
+    }
+  }
+
+  async function createSelectedTaskRework() {
+    if (!selectedTask || selectedTask.state !== "done") return;
+    const reason = window.prompt(t("reworkReasonPrompt"));
+    if (!reason?.trim()) return;
+    setTaskMutationBusy(true);
+    try {
+      const created = await api<{ task: Task }>(`/api/tasks/${selectedTask.id}/rework`, {
+        method: "POST",
+        body: JSON.stringify({
+          reason: reason.trim(),
+          title: locale === "zh-CN" ? `返工：${selectedTask.title}` : `Rework: ${selectedTask.title}`,
+        }),
+      });
+      await refreshQueueBase();
+      selectTask(created.task.id);
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setTaskMutationBusy(false);
+    }
+  }
+
+  async function reopenSelectedTask() {
+    if (!selectedTask || selectedTask.state !== "done") return;
+    const reason = window.prompt(t("reopenReasonPrompt"));
+    if (!reason?.trim()) return;
+    setTaskMutationBusy(true);
+    try {
+      const next = await api<Task>(`/api/tasks/${selectedTask.id}/reopen`, {
+        method: "POST",
+        body: JSON.stringify({ reason: reason.trim() }),
+      });
+      setTasks((current) => current.map((task) => task.id === next.id ? next : task));
+      await Promise.all([refreshQueueBase(), refreshDetail()]);
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setTaskMutationBusy(false);
+    }
+  }
+
   function actorDisplayName(actorId: string) {
     if (actorId === "human:webui") return locale === "zh-CN" ? "WebUI 用户" : "WebUI user";
     if (actorId === "human:local") return locale === "zh-CN" ? "本地用户" : "Local user";
@@ -1663,6 +1737,7 @@ export default function App() {
                     <th>{locale === "zh-CN" ? "创建时间" : "Created"}</th>
                     <th>{locale === "zh-CN" ? "更新时间" : "Updated"}</th>
                     <th>{locale === "zh-CN" ? "优先级" : "Priority"}</th>
+                    <th>{locale === "zh-CN" ? "操作" : "Actions"}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -1716,6 +1791,11 @@ export default function App() {
                         <td><time>{formatDateTime(locale, row.task.created_at)}</time></td>
                         <td><time>{formatDateTime(locale, row.task.updated_at)}</time></td>
                         <td><span className="task-priority-pill">P{row.task.priority}</span></td>
+                        <td className="task-management-actions-cell">
+                          <button className="danger" type="button" onClick={() => void deleteTask(row.task)} disabled={taskMutationBusy}>
+                            {t("deleteTask")}
+                          </button>
+                        </td>
                       </tr>
                     );
                   })}
@@ -2025,7 +2105,12 @@ export default function App() {
                       <span className="task-id">{selectedTask.id}</span>
                       <h2>{selectedTask.title}</h2>
                     </div>
-                    <StateBadge state={selectedTask.state} locale={locale} />
+                    <div className="detail-heading-actions">
+                      <StateBadge state={selectedTask.state} locale={locale} />
+                      <button className="danger" type="button" onClick={() => void deleteTask(selectedTask)} disabled={taskMutationBusy}>
+                        {t("deleteTask")}
+                      </button>
+                    </div>
                   </div>
                   <p className="description">{selectedTask.description || t("noDescription")}</p>
 
@@ -2094,6 +2179,22 @@ export default function App() {
                         <code>{selectedTask.id}</code>
                       </div>
                     </div>
+                    {selectedTask.state === "done" && (
+                      <div className="task-completion-actions">
+                        <div>
+                          <strong>{t("completedTaskActions")}</strong>
+                          <small>{t("completedTaskActionsHint")}</small>
+                        </div>
+                        <div className="task-completion-action-buttons">
+                          <button onClick={() => void createSelectedTaskRework()} disabled={taskMutationBusy}>
+                            {t("createRework")}
+                          </button>
+                          <button className="secondary" onClick={() => void reopenSelectedTask()} disabled={taskMutationBusy}>
+                            {t("reopenTask")}
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </section>
 
                   <div className="detail-columns">
@@ -2522,6 +2623,28 @@ export default function App() {
                           </button>
                         </div>)}
                         {!collaboration.dependencies.length && <div className="empty compact">{t("noPrerequisites")}</div>}
+                        <h3 className="detail-section-title tone-violet">{t("taskRelationships")}</h3>
+                        {collaboration.relationships.map((relationship) => {
+                          const outgoing = relationship.source_task_id === selectedTask.id;
+                          const relatedTaskId = outgoing ? relationship.target_task_id : relationship.source_task_id;
+                          const round = relationship.metadata.rework_round;
+                          const reason = relationship.metadata.reason;
+                          return <div className="context-card" key={`${relationship.source_task_id}:${relationship.target_task_id}:${relationship.relation_type}`}>
+                            <div className="mini-card-row">
+                              <strong>
+                                {relationship.relation_type === "rework_of"
+                                  ? (outgoing ? t("reworkOf") : t("reworkTask"))
+                                  : relationship.relation_type}
+                              </strong>
+                              {typeof round === "number" && <span className="badge">#{round}</span>}
+                            </div>
+                            <button onClick={() => selectTask(relatedTaskId)}>
+                              {tasks.find((task) => task.id === relatedTaskId)?.title || shortId(relatedTaskId)}
+                            </button>
+                            {typeof reason === "string" && <p>{reason}</p>}
+                          </div>;
+                        })}
+                        {!collaboration.relationships.length && <div className="empty compact">{t("noTaskRelationships")}</div>}
                       </>}
                       <h3 className="detail-section-title tone-blue">{t("eventTimeline")}</h3>
                       <div className="timeline">

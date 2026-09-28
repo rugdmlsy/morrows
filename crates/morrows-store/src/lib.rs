@@ -18,6 +18,7 @@ mod git_memory;
 mod identity;
 mod milestone;
 mod runtime;
+mod task_rework;
 
 enum ContextRevisionWrite {
     Replace(CreateContextRevision),
@@ -404,6 +405,81 @@ impl Store {
         Ok(Some(self.get_task(task_id).await?))
     }
 
+    pub async fn delete_task(&self, task_id: Id) -> Result<(), DomainError> {
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(storage)?;
+        let task = row_to_task(
+            sqlx::query("SELECT * FROM tasks WHERE id=?")
+                .bind(task_id.to_string())
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(storage)?
+                .ok_or_else(|| DomainError::NotFound(format!("task {task_id}")))?,
+        )?;
+        let has_history: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM assignments WHERE task_id=?)
+                OR EXISTS(SELECT 1 FROM sessions WHERE task_id=?)
+                OR EXISTS(SELECT 1 FROM context_revisions WHERE task_id=?)
+                OR EXISTS(SELECT 1 FROM assignment_requests WHERE task_id=?)
+                OR EXISTS(SELECT 1 FROM artifacts WHERE task_id=?)
+                OR EXISTS(SELECT 1 FROM decisions WHERE task_id=?)
+                OR EXISTS(SELECT 1 FROM message_threads WHERE task_id=?)
+                OR EXISTS(SELECT 1 FROM handoffs WHERE task_id=?)
+                OR EXISTS(SELECT 1 FROM task_dependencies WHERE task_id=? OR depends_on_task_id=?)
+                OR EXISTS(SELECT 1 FROM task_relationships WHERE source_task_id=? OR target_task_id=?)
+                OR EXISTS(SELECT 1 FROM run_milestones WHERE task_id=?)",
+        )
+        .bind(task_id.to_string())
+        .bind(task_id.to_string())
+        .bind(task_id.to_string())
+        .bind(task_id.to_string())
+        .bind(task_id.to_string())
+        .bind(task_id.to_string())
+        .bind(task_id.to_string())
+        .bind(task_id.to_string())
+        .bind(task_id.to_string())
+        .bind(task_id.to_string())
+        .bind(task_id.to_string())
+        .bind(task_id.to_string())
+        .bind(task_id.to_string())
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(storage)?;
+        if has_history || task.current_context_revision_id.is_some() {
+            return Err(DomainError::Conflict(
+                "task has execution, collaboration, context, or relationship history and cannot be hard-deleted; cancel/withdraw it instead".into(),
+            ));
+        }
+        sqlx::query("DELETE FROM tasks WHERE id=?")
+            .bind(task_id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(|_| DomainError::Conflict(
+                "task has dependent records and cannot be hard-deleted; cancel/withdraw it instead".into(),
+            ))?;
+        sqlx::query("DELETE FROM events WHERE entity_type='task' AND entity_id=?")
+            .bind(task_id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?;
+        append_event_tx(
+            &mut tx,
+            "human",
+            "webui",
+            "task",
+            task_id,
+            "task.deleted",
+            json!({"title":task.title,"project_id":task.project_id}),
+            None,
+        )
+        .await?;
+        tx.commit().await.map_err(storage)?;
+        Ok(())
+    }
+
     pub async fn set_task_assignment_mode(
         &self,
         task_id: Id,
@@ -766,6 +842,186 @@ impl Store {
         .await?;
         tx.commit().await.map_err(storage)?;
         self.get_assignment(id).await
+    }
+
+    pub async fn recover_assignment(
+        &self,
+        assignment_id: Id,
+        run_id: Id,
+        actor_agent_id: Id,
+        lease_seconds: i64,
+        reason: &str,
+    ) -> Result<TaskClaim, DomainError> {
+        let reason = reason.trim();
+        if reason.is_empty() || reason.chars().count() > 1000 {
+            return Err(DomainError::InvalidInput(
+                "recovery reason must contain 1 to 1000 characters".into(),
+            ));
+        }
+
+        let now = Utc::now();
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(storage)?;
+
+        let assignment_row = sqlx::query("SELECT * FROM assignments WHERE id=?")
+            .bind(assignment_id.to_string())
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(storage)?
+            .ok_or_else(|| DomainError::NotFound(format!("assignment {assignment_id}")))?;
+        let previous_released_at: Option<String> =
+            assignment_row.try_get("released_at").map_err(storage)?;
+        let previous_release_reason: Option<String> =
+            assignment_row.try_get("release_reason").map_err(storage)?;
+        let assignment = row_to_assignment(assignment_row)?;
+
+        if assignment.agent_instance_id != actor_agent_id {
+            return Err(DomainError::Conflict(
+                "expired assignment belongs to another agent instance".into(),
+            ));
+        }
+        if assignment.role != "executor" {
+            return Err(DomainError::Conflict(
+                "only executor assignments can be recovered".into(),
+            ));
+        }
+
+        let lease_expired = assignment.expires_at <= now;
+        match assignment.status.as_str() {
+            "active" if !lease_expired => {
+                return Err(DomainError::Conflict(
+                    "assignment lease is still active; use assignment_renew".into(),
+                ));
+            }
+            "active" => {}
+            "expired" if previous_release_reason.as_deref() == Some("lease_expired") => {}
+            "expired" => {
+                return Err(DomainError::Conflict(
+                    "assignment was not released by lease expiry and cannot be recovered".into(),
+                ));
+            }
+            status => {
+                return Err(DomainError::Conflict(format!(
+                    "assignment is {status} and cannot be recovered"
+                )));
+            }
+        }
+
+        let task_state: String = sqlx::query_scalar("SELECT state FROM tasks WHERE id=?")
+            .bind(assignment.task_id.to_string())
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(storage)?
+            .ok_or_else(|| DomainError::NotFound(format!("task {}", assignment.task_id)))?;
+        if task_state != "in_progress" {
+            return Err(DomainError::Conflict(format!(
+                "task is {task_state}; expired assignment recovery requires in_progress"
+            )));
+        }
+
+        let conflicting_executor: bool = sqlx::query_scalar(
+            "SELECT EXISTS(
+                SELECT 1 FROM assignments
+                WHERE task_id=? AND role='executor' AND status='active' AND id<>?
+            )",
+        )
+        .bind(assignment.task_id.to_string())
+        .bind(assignment.id.to_string())
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(storage)?;
+        if conflicting_executor {
+            return Err(DomainError::Conflict(
+                "task already has another active executor assignment".into(),
+            ));
+        }
+
+        let run_row = sqlx::query(
+            "SELECT runs.*, rcr.context_revision_id
+             FROM runs
+             LEFT JOIN run_context_revisions rcr ON rcr.run_id=runs.id
+             WHERE runs.id=?",
+        )
+        .bind(run_id.to_string())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(storage)?
+        .ok_or_else(|| DomainError::NotFound(format!("run {run_id}")))?;
+        let run = row_to_run(run_row)?;
+        if run.assignment_id != assignment.id
+            || run.task_id != assignment.task_id
+            || run.agent_instance_id != actor_agent_id
+        {
+            return Err(DomainError::Conflict(
+                "run does not belong to the expired assignment and agent".into(),
+            ));
+        }
+        if !matches!(run.status.as_str(), "running" | "paused") {
+            return Err(DomainError::Conflict(format!(
+                "run is {}; only running or paused runs can be recovered",
+                run.status
+            )));
+        }
+
+        let new_expires_at = now + Duration::seconds(lease_seconds.max(30));
+        let update = sqlx::query(
+            "UPDATE assignments
+             SET status='active', renewed_at=?, expires_at=?, released_at=NULL, release_reason=NULL
+             WHERE id=? AND (status='expired' OR (status='active' AND expires_at<=?))",
+        )
+        .bind(now.to_rfc3339())
+        .bind(new_expires_at.to_rfc3339())
+        .bind(assignment.id.to_string())
+        .bind(now.to_rfc3339())
+        .execute(&mut *tx)
+        .await;
+        match update {
+            Ok(result) if result.rows_affected() == 1 => {}
+            Ok(_) => {
+                return Err(DomainError::Conflict(
+                    "assignment changed while recovery was being attempted".into(),
+                ));
+            }
+            Err(error)
+                if error.as_database_error().and_then(|d| d.code()).as_deref() == Some("2067") =>
+            {
+                return Err(DomainError::Conflict(
+                    "task already has another active executor assignment".into(),
+                ));
+            }
+            Err(error) => return Err(storage(error)),
+        }
+
+        append_event_tx(
+            &mut tx,
+            "agent_instance",
+            &actor_agent_id.to_string(),
+            "task",
+            assignment.task_id,
+            "assignment.recovered",
+            json!({
+                "assignment_id": assignment.id,
+                "run_id": run.id,
+                "agent_instance_id": actor_agent_id,
+                "previous_status": assignment.status,
+                "previous_expires_at": assignment.expires_at,
+                "previous_released_at": previous_released_at,
+                "previous_release_reason": previous_release_reason,
+                "new_expires_at": new_expires_at,
+                "reason": reason,
+            }),
+            None,
+        )
+        .await?;
+        tx.commit().await.map_err(storage)?;
+
+        Ok(TaskClaim {
+            assignment: self.get_assignment(assignment.id).await?,
+            run: self.get_run(run.id).await?,
+        })
     }
 
     pub async fn expire_stale_assignments(&self) -> Result<u64, DomainError> {

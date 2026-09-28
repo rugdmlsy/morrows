@@ -98,10 +98,47 @@ impl Store {
         };
 
         let decisions = self.task_decisions(work_item_id).await?;
-        let decision_refs: Vec<Id> = decisions.into_iter().map(|d| d.id).collect();
+        let mut decision_refs: Vec<Id> = decisions.iter().map(|d| d.id).collect();
 
         let artifacts = self.task_artifacts(work_item_id).await?;
-        let artifact_refs: Vec<Id> = artifacts.into_iter().map(|a| a.id).collect();
+        let mut artifact_refs: Vec<Id> = artifacts.iter().map(|a| a.id).collect();
+
+        let relationships = self.task_relationships(work_item_id).await?;
+        let rework_source = if let Some(relation) = relationships.iter().find(|relation| {
+            relation.source_task_id == work_item_id && relation.relation_type == "rework_of"
+        }) {
+            let source_task = self.get_task(relation.target_task_id).await?;
+            let source_decisions = self.task_decisions(source_task.id).await?;
+            let source_artifacts = self.task_artifacts(source_task.id).await?;
+            decision_refs.extend(source_decisions.iter().map(|decision| decision.id));
+            artifact_refs.extend(source_artifacts.iter().map(|artifact| artifact.id));
+
+            let source_runs = self.task_runs(source_task.id).await?;
+            let latest_completed_run = source_runs
+                .iter()
+                .find(|run| run.status == "completed")
+                .cloned();
+            let latest_milestone = sqlx::query(
+                "SELECT * FROM run_milestones WHERE task_id=? ORDER BY created_at DESC,sequence DESC LIMIT 1",
+            )
+            .bind(source_task.id.to_string())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(storage)?
+            .map(super::milestone::row_to_run_milestone)
+            .transpose()?;
+
+            Some(json!({
+                "task": source_task,
+                "relationship": relation,
+                "latest_completed_run": latest_completed_run,
+                "latest_milestone": latest_milestone,
+                "artifacts": source_artifacts,
+                "decisions": source_decisions,
+            }))
+        } else {
+            None
+        };
 
         let handoffs = self.task_handoffs(work_item_id).await?;
         let context = match task.current_context_revision_id {
@@ -152,11 +189,26 @@ impl Store {
                 next_action_source = Some("context.current_summary");
             }
         }
+        if next_action.is_empty()
+            && let Some(relation) = relationships.iter().find(|relation| {
+                relation.source_task_id == work_item_id && relation.relation_type == "rework_of"
+            })
+            && let Some(reason) = relation.metadata.get("reason").and_then(Value::as_str)
+        {
+            next_action = format!("Address rework reason: {reason}");
+            next_action_source = Some("rework_relationship.reason");
+        }
 
         self.create_context_package(CreateContextPackage {
             work_item_id,
             objective,
-            summary: Some(json!({"context":context, "project":project, "next_action_source":next_action_source})),
+            summary: Some(json!({
+                "context":context,
+                "project":project,
+                "relationships":relationships,
+                "rework_source":rework_source,
+                "next_action_source":next_action_source
+            })),
             context_snapshot_id: task.current_context_revision_id,
             memory_refs,
             decision_refs,

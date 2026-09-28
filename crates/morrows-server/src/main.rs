@@ -96,6 +96,18 @@ struct SetTaskProjectBody {
 }
 
 #[derive(Deserialize)]
+struct CreateTaskReworkBody {
+    reason: String,
+    title: Option<String>,
+    description: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ReopenTaskBody {
+    reason: String,
+}
+
+#[derive(Deserialize)]
 struct SetTaskAssignmentModeBody {
     assignment_mode: AssignmentMode,
 }
@@ -220,8 +232,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/projects/{id}", get(get_project))
         .route("/tasks", get(list_tasks).post(create_task))
         .route("/tasks/management", get(list_task_management))
-        .route("/tasks/{id}", get(get_task))
+        .route("/tasks/{id}", get(get_task).delete(delete_task))
         .route("/tasks/{id}/project", post(set_task_project))
+        .route("/tasks/{id}/rework", post(create_task_rework))
+        .route("/tasks/{id}/reopen", post(reopen_task))
         .route(
             "/tasks/{id}/assignment-mode",
             post(set_task_assignment_mode),
@@ -470,6 +484,14 @@ async fn get_task(
     ))
 }
 
+async fn delete_task(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    state.store.delete_task(id).await?;
+    Ok(Json(json!({"task_id":id,"deleted":true})))
+}
+
 async fn set_task_project(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
@@ -477,6 +499,35 @@ async fn set_task_project(
 ) -> Result<Json<Value>, ApiError> {
     Ok(Json(
         serde_json::to_value(state.store.set_task_project(id, body.project_id).await?).unwrap(),
+    ))
+}
+
+async fn create_task_rework(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<CreateTaskReworkBody>,
+) -> Result<Json<Value>, ApiError> {
+    let (task, relationship) = state
+        .store
+        .create_rework_task(
+            id,
+            "human:webui".into(),
+            "human:webui".into(),
+            body.title,
+            body.description,
+            body.reason,
+        )
+        .await?;
+    Ok(Json(json!({"task":task,"relationship":relationship})))
+}
+
+async fn reopen_task(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<ReopenTaskBody>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        serde_json::to_value(state.store.reopen_task(id, body.reason).await?).unwrap(),
     ))
 }
 

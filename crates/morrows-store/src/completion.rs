@@ -75,7 +75,7 @@ pub(super) async fn completion_check_conn(
     }
     if assignment.status != "active" || assignment.expires_at <= Utc::now() {
         blockers.push(
-            "assignment is not active; renew a live lease or use the recovery workflow".into(),
+            "assignment is not active; use assignment_renew for a live lease or assignment_recover for the original expired executor lease".into(),
         );
     }
     if matches!(task.state, TaskState::Done | TaskState::Cancelled) {

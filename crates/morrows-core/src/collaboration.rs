@@ -179,6 +179,15 @@ pub struct TaskDependency {
     pub created_at: DateTime<Utc>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskRelationship {
+    pub source_task_id: Id,
+    pub target_task_id: Id,
+    pub relation_type: String,
+    pub created_by_actor_id: String,
+    pub metadata: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Collaboration {
     pub handoffs: Vec<Handoff>,
     pub artifacts: Vec<Artifact>,
@@ -186,6 +195,7 @@ pub struct Collaboration {
     pub threads: Vec<MessageThread>,
     pub messages: Vec<Message>,
     pub dependencies: Vec<TaskDependency>,
+    pub relationships: Vec<TaskRelationship>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HandoffContext {
