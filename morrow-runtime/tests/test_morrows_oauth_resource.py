@@ -1,6 +1,7 @@
 """Exercise the public split between the MCP audience and OAuth route prefix."""
 
-from urllib.parse import parse_qs, urlsplit
+from html.parser import HTMLParser
+from urllib.parse import parse_qs, urljoin, urlsplit
 
 from starlette.applications import Starlette
 from starlette.routing import Mount, Route
@@ -40,6 +41,7 @@ def test_split_issuer_resource_discovery_and_pkce(tmp_path, monkeypatch):
             Route("/.well-known/oauth-protected-resource", oauth.oauth_protected_resource),
             Route("/.well-known/oauth-authorization-server", oauth.oauth_server_metadata),
             Route("/oauth/register", oauth.oauth_register, methods=["POST"]),
+            Route("/oauth/authorize", oauth.oauth_authorize_get, methods=["GET"]),
             Route("/oauth/authorize", oauth.oauth_authorize_post, methods=["POST"]),
             Route("/oauth/token", oauth.oauth_token, methods=["POST"]),
         ]
@@ -85,9 +87,22 @@ def test_split_issuer_resource_discovery_and_pkce(tmp_path, monkeypatch):
             "pin": "test-only-pin",
             "resource": resource,
         }
-        authorized = client.post(
-            server["authorization_endpoint"], data=params, follow_redirects=False
-        )
+        # Follow the rendered form like a browser. Posting directly to metadata's
+        # endpoint misses a template that accidentally targets standalone LSM.
+        class ConsentForm(HTMLParser):
+            action = None
+
+            def handle_starttag(self, tag, attrs):
+                if tag == "form":
+                    self.action = dict(attrs).get("action")
+
+        page = client.get(server["authorization_endpoint"], params=params)
+        form = ConsentForm()
+        form.feed(page.text)
+        assert form.action is not None
+        target = urljoin(str(page.url), form.action)
+        assert target == server["authorization_endpoint"]
+        authorized = client.post(target, data=params, follow_redirects=False)
         assert authorized.status_code in (302, 303)
         code = parse_qs(urlsplit(authorized.headers["location"]).query)["code"][0]
         exchanged = client.post(

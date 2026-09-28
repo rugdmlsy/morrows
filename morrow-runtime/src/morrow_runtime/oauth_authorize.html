@@ -242,7 +242,8 @@
         <ul class="permissions">$scope_items</ul>
         <div class="resource"><span>Resource</span><code title="$resource_title">$resource</code></div>
         $error_html
-        <form method="post" action="/oauth/authorize">
+        <!-- Preserve the mounted issuer prefix when the browser submits consent. -->
+        <form method="post" action="authorize">
           $hidden_inputs
           $pin_field
           <div class="actions">
