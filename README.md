@@ -227,7 +227,7 @@ PKCE，并把 OAuth token 仅保存在当前标签页的 `sessionStorage` 中。
 当前员工 MCP 工具包括：
 
 - `session_inbox`、`session_get`、`session_reply`：接收并回复发给当前 Agent 的 Session。
-- `work_request_submit`：提交新的工作请求；可选 `project_id` 会在创建事务内绑定既有 Project，省略时明确创建未绑定项目的任务；无效 Project 会直接拒绝，不会静默降级。仍不能自行选择优先级、负责人或 launcher。
+- `work_request_submit`：提交新的工作请求；发布者应描述目标、约束、验收条件、证据要求与已知不确定性，但不得预设 Human Interview 问卷，也不得要求未来 executor 按固定问题清单提问。executor 必须在读取 Project Memory、ContextPackage、任务证据及相关 repo/runtime 状态后，自主判断仍未解决且会影响实施的问题，并跳过上下文已经回答的内容。可选 `project_id` 会在创建事务内绑定既有 Project，省略时明确创建未绑定项目的任务；无效 Project 会直接拒绝，不会静默降级。仍不能自行选择优先级、负责人或 launcher。
 - `morrows task-bind-project --task-id … --project-id … --database …`：operator 修复旧的未绑定 Task；只允许首绑，同目标重试幂等，不允许借修复命令把已绑定 Task 改到其他 Project。
 - `whoami`：确认当前 Agent 身份与默认查询范围。
 - `task_list`：默认列出分配给当前 Agent 的未完成任务；支持指定 Agent、项目、状态、分页，或用 `scope=all` 查询其他任务。

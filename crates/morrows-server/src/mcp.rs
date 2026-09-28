@@ -334,6 +334,11 @@ pub struct ProjectRequest {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct WorkRequestSubmitRequest {
     pub title: String,
+    /// Describe the work goal, constraints, acceptance criteria, evidence requirements, and known
+    /// uncertainties. Do not prewrite a Human Interview questionnaire or instruct the future
+    /// executor to ask a fixed list of questions. The executor owns clarification: after reading
+    /// Project Memory, ContextPackage, task evidence, and relevant repo/runtime state, it decides
+    /// which material uncertainties actually remain and asks only those questions.
     #[serde(default)]
     pub description: String,
     /// Optional existing Project UUID. Omit to create an explicitly unbound work request.
@@ -1188,7 +1193,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Submit a work request to Morrows for company scheduling. Optionally bind it atomically to an existing visible Project with project_id; omit project_id to create an explicitly unbound task. Invalid or unavailable Project IDs are rejected and never fall back to unbound. The caller becomes the request owner; employees cannot set dispatch priority or choose an assignee/launcher."
+        description = "Submit a work request to Morrows for company scheduling. Describe goals, constraints, acceptance criteria, evidence requirements, and known uncertainties; do NOT predefine Human Interview questions or turn the task description into a fixed interview checklist. Clarification belongs to the executor after it has read Project Memory, ContextPackage, task evidence, and relevant repo/runtime state; it should ask only material questions that remain unresolved and must not repeat facts already established by context. Optionally bind the task atomically to an existing visible Project with project_id; omit project_id to create an explicitly unbound task. Invalid or unavailable Project IDs are rejected and never fall back to unbound. The caller becomes the request owner; employees cannot set dispatch priority or choose an assignee/launcher."
     )]
     async fn work_request_submit(
         &self,
@@ -1540,7 +1545,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Start or resume the mandatory multi-turn Human Interview after task_intake has fully read current Project Memory and ContextPackage. Morrows binds the Assignment to its durable Task Session and moves it to human_interview. Use session_reply in that Session to ask the human questions, incorporate replies, and present a final synthesis/implementation plan. There is no separate operator approval step."
+        description = "Start or resume the mandatory multi-turn Human Interview after task_intake has fully read current Project Memory and ContextPackage. Morrows binds the Assignment to its durable Task Session and moves it to human_interview. The executor must derive its own questions from the current context: publisher-authored lists of decisions, uncertainties, or preconditions are requirements to resolve, not a preset questionnaire. Ask only material questions that remain unresolved after context/evidence/repo review, skip facts already established, and ask different questions when the actual uncertainty demands it. Use session_reply to incorporate replies and present a final synthesis/implementation plan. There is no separate operator approval step."
     )]
     async fn task_interview_start(
         &self,
@@ -3038,6 +3043,30 @@ mod tests {
             store.get_task(source.id).await.unwrap().state,
             TaskState::Done
         );
+    }
+
+    #[tokio::test]
+    async fn publishing_and_interview_tools_advertise_executor_owned_clarification() {
+        let store = Store::connect("sqlite::memory:").await.unwrap();
+        let mcp = MorrowsMcp::new(store);
+
+        let tools = serde_json::to_string(&mcp.tool_router.list_all()).unwrap();
+        assert!(
+            tools.contains("do NOT predefine Human Interview questions"),
+            "work_request_submit must tell publishers not to script the interview"
+        );
+        assert!(
+            tools.contains("not a preset questionnaire"),
+            "task_interview_start must tell executors to derive questions after intake"
+        );
+
+        let schema = rmcp::schemars::schema_for!(WorkRequestSubmitRequest);
+        let schema = serde_json::to_value(schema).unwrap();
+        let description = schema["properties"]["description"]["description"]
+            .as_str()
+            .unwrap();
+        assert!(description.contains("Do not prewrite a Human Interview questionnaire"));
+        assert!(description.contains("executor owns clarification"));
     }
 
     #[tokio::test]
