@@ -59,7 +59,7 @@ Morrows 是一个本地优先、Agent 原生的工作协作系统，用于协调
 - 每个受管 Codex Account 使用独立认证目录；认证文件不写入 Morrows 数据库，也不会提交到 Git
 - 可复用的本地部署脚本 `scripts/deploy.sh`，负责构建、重启 tmux 服务并执行健康检查
 
-尚未实现：所有外部 Agent 产品的直接进程控制、交互式多用户账号/SSO、内置 TLS 终止、分布式部署。当前 external adapter 会邀请已有 Agent Session，而不会自动打开对应产品。
+尚未实现：所有外部 Agent 产品的统一直接进程控制、交互式多用户账号/SSO、内置 TLS 终止，以及多控制器/高可用分布式控制面。Codex / CodeBuddy 已可通过 morrow-runtime 在绑定 Machine 上运行；其他 external adapter 仍以邀请已有 Agent Session 为主。
 
 ## 运行
 
