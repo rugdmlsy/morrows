@@ -51,7 +51,8 @@ export async function startMorrowsOAuth() {
   authorize.searchParams.set("client_id", pending.client_id);
   authorize.searchParams.set("redirect_uri", pending.redirect_uri);
   authorize.searchParams.set("scope", SCOPES);
-  authorize.searchParams.set("resource", `${window.location.origin}/morrows/auth`);
+  // The authorization server lives under /auth; the protected resource is /morrows.
+  authorize.searchParams.set("resource", `${window.location.origin}/morrows`);
   authorize.searchParams.set("code_challenge", await challenge(verifier));
   authorize.searchParams.set("code_challenge_method", "S256");
   authorize.searchParams.set("state", state);
