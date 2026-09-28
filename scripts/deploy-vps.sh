@@ -177,7 +177,7 @@ while (( SECONDS < deadline )); do
     runtime_env_names="$(tr '\0' '\n' < "/proc/$runtime_pid/environ")"
     grep -q '^LOCAL_SHELL_MCP_AUTH_MODE=oauth$' <<<"$runtime_env_names"
     grep -q '^LOCAL_SHELL_MCP_OAUTH_ISSUER=https://mcp.xycdev.com/morrows/auth$' <<<"$runtime_env_names"
-    grep -q '^LOCAL_SHELL_MCP_OAUTH_RESOURCE=https://mcp.xycdev.com/morrows/auth$' <<<"$runtime_env_names"
+    grep -q '^LOCAL_SHELL_MCP_OAUTH_RESOURCE=https://mcp.xycdev.com/morrows$' <<<"$runtime_env_names"
     python3 -c 'import json,sys; data=json.loads(sys.stdin.read()); assert data["memory_search"]["enabled"] is True and data["memory_search"]["engine"] == "ripgrep"' <<<"$body"
     ! grep -q '^CLOUDFLARE_TUNNEL_TOKEN=' <<<"$env_names"
     ! grep -q '^LOCAL_SHELL_MCP_OAUTH_ADMIN_PIN=' <<<"$env_names"
@@ -210,6 +210,9 @@ while (( SECONDS < deadline )); do
     test "$(systemctl is-active morrows-cloudflared.service)" = active
     ! systemctl show morrows-cloudflared.service -p Requires --value | grep -q 'local-shell-mcp'
     curl -fsS https://mcp.xycdev.com/morrows/health >/dev/null
+    # Discovery must name the MCP resource, not the separately mounted issuer.
+    curl -fsS https://mcp.xycdev.com/morrows/auth/.well-known/oauth-protected-resource |
+      "$root/morrow-runtime/.venv/bin/python" -c 'import json,sys; metadata=json.load(sys.stdin); assert metadata["resource"] == "https://mcp.xycdev.com/morrows"; assert metadata["authorization_servers"] == ["https://mcp.xycdev.com/morrows/auth"]'
 
     # Keep only current + immediately previous successful release.
     for stale_release in "$guard_dir"/release.*; do

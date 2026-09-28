@@ -108,3 +108,19 @@ The rollout is intentionally non-disruptive:
 6. migrate additional profiles selectively.
 
 There is no requirement to migrate standalone LSM workers or disable standalone LSM.
+
+## Public OAuth resource binding
+
+Morrows MCP is the protected resource `https://mcp.xycdev.com/morrows`.
+Its OAuth issuer and registration/authorization/token endpoints are hosted under
+`https://mcp.xycdev.com/morrows/auth`. These URIs serve different purposes: token
+`aud` and protected-resource metadata name `/morrows`, while `iss` names
+`/morrows/auth`. The 401 challenge links to metadata hosted under the issuer's
+route prefix, independently of the audience URI. Advertising `/morrows/auth` as
+the resource causes strict MCP clients to reject metadata before sending even
+previously stored credentials.
+
+The deployment probe checks both fields through the public edge. Existing
+standalone-LSM token migration stays restricted to the existing Morrows path
+and configured legacy issuer, audience and signing secret; the new resource
+binding does not broaden that compatibility rule.

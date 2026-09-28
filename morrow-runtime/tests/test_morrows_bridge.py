@@ -217,7 +217,7 @@ def test_morrows_bridge_accepts_legacy_lsm_token_on_morrows_path(tmp_path, monke
     monkeypatch.setenv("LOCAL_SHELL_MCP_AUTH_MODE", "oauth")
     monkeypatch.setenv("LOCAL_SHELL_MCP_OAUTH_JWT_SECRET", new_secret)
     monkeypatch.setenv("LOCAL_SHELL_MCP_OAUTH_ISSUER", "http://testserver/morrows/auth")
-    monkeypatch.setenv("LOCAL_SHELL_MCP_OAUTH_RESOURCE", "http://testserver/morrows/auth")
+    monkeypatch.setenv("LOCAL_SHELL_MCP_OAUTH_RESOURCE", "http://testserver/morrows")
     monkeypatch.setenv("LOCAL_SHELL_MCP_OAUTH_LEGACY_JWT_SECRET", legacy_secret)
     monkeypatch.setenv("LOCAL_SHELL_MCP_OAUTH_LEGACY_ISSUER", "http://testserver")
     monkeypatch.setenv("LOCAL_SHELL_MCP_OAUTH_LEGACY_RESOURCE", "http://testserver")
