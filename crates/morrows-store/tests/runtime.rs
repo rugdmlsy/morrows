@@ -159,6 +159,48 @@ async fn cancelling_is_not_cancelled_until_cleanup_confirms() {
 }
 
 #[tokio::test]
+async fn cancelling_active_task_preserves_lsm_cleanup_and_terminal_task_state() {
+    let (store, assignment_id, profile_id) = prepared().await;
+    let assignment = store.get_assignment(assignment_id).await.unwrap();
+    let attempt = store
+        .enqueue_launch(input(json!({
+            "assignment_id":assignment_id,"launch_profile_id":profile_id
+        })))
+        .await
+        .unwrap();
+    store.claim_launch_job().await.unwrap().unwrap();
+    let execution = store.begin_launch_attempt(attempt.id).await.unwrap();
+    store
+        .bind_run_lsm(execution.run.id, "s_task_cancel")
+        .await
+        .unwrap();
+
+    let task = store.cancel_task(assignment.task_id).await.unwrap();
+    assert_eq!(task.state, TaskState::Cancelled);
+    assert_eq!(
+        store.get_run(execution.run.id).await.unwrap().status,
+        "cancelling"
+    );
+    assert_eq!(
+        store.get_assignment(assignment_id).await.unwrap().status,
+        "released"
+    );
+    assert_eq!(
+        store.get_launch_attempt(attempt.id).await.unwrap().status,
+        "cancelled"
+    );
+    assert!(store.launch_stop_requested(attempt.id).await.unwrap());
+
+    let final_run = store.complete_lsm_cleanup(execution.run.id).await.unwrap();
+    assert_eq!(final_run.status, "cancelled");
+    assert_eq!(
+        store.get_task(assignment.task_id).await.unwrap().state,
+        TaskState::Cancelled,
+        "runtime cleanup must not reopen a task that was explicitly cancelled"
+    );
+}
+
+#[tokio::test]
 async fn one_semantic_event_can_have_multiple_execution_evidence_refs() {
     let (store, assignment_id, profile_id) = prepared().await;
     let assignment = store.get_assignment(assignment_id).await.unwrap();

@@ -279,7 +279,6 @@ impl Store {
         agent_id: Id,
         delete: bool,
     ) -> Result<Option<Task>, DomainError> {
-        let now = Utc::now();
         let mut tx = self
             .pool
             .begin_with("BEGIN IMMEDIATE")
@@ -289,18 +288,6 @@ impl Store {
         if task.owner_actor_id != format!("agent:{agent_id}") {
             return Err(DomainError::Conflict(
                 "only the agent that published the task may withdraw or delete it".into(),
-            ));
-        }
-        let active_implementation: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM assignments WHERE task_id=? AND status='active' AND role='executor' AND phase='implementing')",
-        )
-        .bind(task_id.to_string())
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(storage)?;
-        if active_implementation {
-            return Err(DomainError::Conflict(
-                "task is already being implemented; stop/cancel the active execution before withdrawing it".into(),
             ));
         }
 
@@ -358,52 +345,44 @@ impl Store {
             return Ok(None);
         }
 
-        if task.state == TaskState::Cancelled {
-            tx.commit().await.map_err(storage)?;
-            return Ok(Some(task));
-        }
-        if task.state == TaskState::Done {
-            return Err(DomainError::Conflict(
-                "completed tasks cannot be withdrawn".into(),
-            ));
-        }
-        sqlx::query("UPDATE runs SET status='cancelled',stop_reason='task_withdrawn',ended_at=? WHERE task_id=? AND status IN ('running','paused','interrupted','cancelling')")
-            .bind(now.to_rfc3339())
-            .bind(task_id.to_string())
-            .execute(&mut *tx)
-            .await
-            .map_err(storage)?;
-        sqlx::query("UPDATE assignments SET status='released',released_at=?,release_reason='task_withdrawn' WHERE task_id=? AND status='active'")
-            .bind(now.to_rfc3339())
-            .bind(task_id.to_string())
-            .execute(&mut *tx)
-            .await
-            .map_err(storage)?;
-        sqlx::query("UPDATE assignment_requests SET status='withdrawn',resolved_at=?,resolution='task_withdrawn' WHERE task_id=? AND status='pending'")
-            .bind(now.to_rfc3339())
-            .bind(task_id.to_string())
-            .execute(&mut *tx)
-            .await
-            .map_err(storage)?;
-        sqlx::query("UPDATE tasks SET state='cancelled',updated_at=? WHERE id=?")
-            .bind(now.to_rfc3339())
-            .bind(task_id.to_string())
-            .execute(&mut *tx)
-            .await
-            .map_err(storage)?;
-        append_event_tx(
+        cancel_task_tx(
             &mut tx,
+            &task,
             "agent_instance",
             &agent_id.to_string(),
-            "task",
-            task_id,
             "task.withdrawn",
-            json!({"previous_state":task.state}),
-            None,
+            "task_withdrawn",
         )
         .await?;
         tx.commit().await.map_err(storage)?;
         Ok(Some(self.get_task(task_id).await?))
+    }
+
+    pub async fn cancel_task(&self, task_id: Id) -> Result<Task, DomainError> {
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(storage)?;
+        let task = row_to_task(
+            sqlx::query("SELECT * FROM tasks WHERE id=?")
+                .bind(task_id.to_string())
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(storage)?
+                .ok_or_else(|| DomainError::NotFound(format!("task {task_id}")))?,
+        )?;
+        cancel_task_tx(
+            &mut tx,
+            &task,
+            "human",
+            "webui",
+            "task.cancelled",
+            "task_cancelled",
+        )
+        .await?;
+        tx.commit().await.map_err(storage)?;
+        self.get_task(task_id).await
     }
 
     pub async fn delete_task(&self, task_id: Id) -> Result<(), DomainError> {
@@ -1803,6 +1782,125 @@ async fn start_run_tx(
         ended_at: None,
         context_revision_id,
     })
+}
+
+async fn cancel_task_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    task: &Task,
+    actor_type: &str,
+    actor_id: &str,
+    event_type: &str,
+    reason: &str,
+) -> Result<(), DomainError> {
+    if task.state == TaskState::Cancelled {
+        return Ok(());
+    }
+    if task.state == TaskState::Done {
+        return Err(DomainError::Conflict(
+            "completed tasks cannot be cancelled".into(),
+        ));
+    }
+
+    let now = Utc::now();
+    let task_id = task.id.to_string();
+
+    // Stop queued/running launch work first. Launcher processes observe either the
+    // cancelled attempt or the released Assignment and terminate their child.
+    sqlx::query(
+        "UPDATE jobs SET status='cancelled',last_error=?
+         WHERE id IN (
+           SELECT job_id FROM launch_attempts
+           WHERE task_id=? AND job_id IS NOT NULL
+             AND status IN ('queued','starting','awaiting_agent','running')
+         ) AND status NOT IN ('done','failed','cancelled')",
+    )
+    .bind(reason)
+    .bind(&task_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(storage)?;
+    sqlx::query(
+        "UPDATE launch_attempts
+         SET status='cancelled',error=COALESCE(error,?),ended_at=COALESCE(ended_at,?)
+         WHERE task_id=? AND status IN ('queued','starting','awaiting_agent','running')",
+    )
+    .bind(reason)
+    .bind(now.to_rfc3339())
+    .bind(&task_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(storage)?;
+
+    // LSM-backed Runs must remain non-terminal until runtime cleanup confirms the
+    // Session has been revoked and cleaned. Non-LSM Runs can become terminal now.
+    sqlx::query(
+        "UPDATE runs SET status='cancelling',stop_reason=?,ended_at=NULL
+         WHERE task_id=?
+           AND status IN ('running','paused','interrupted','cancelling','cleanup_pending')
+           AND (
+             EXISTS(SELECT 1 FROM run_lsm_bindings b WHERE b.run_id=runs.id)
+             OR EXISTS(SELECT 1 FROM run_lsm_provisioning p WHERE p.run_id=runs.id)
+           )",
+    )
+    .bind(reason)
+    .bind(&task_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(storage)?;
+    sqlx::query(
+        "UPDATE runs SET status='cancelled',stop_reason=?,ended_at=?
+         WHERE task_id=?
+           AND status IN ('running','paused','interrupted','cancelling','cleanup_pending')
+           AND NOT (
+             EXISTS(SELECT 1 FROM run_lsm_bindings b WHERE b.run_id=runs.id)
+             OR EXISTS(SELECT 1 FROM run_lsm_provisioning p WHERE p.run_id=runs.id)
+           )",
+    )
+    .bind(reason)
+    .bind(now.to_rfc3339())
+    .bind(&task_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(storage)?;
+
+    sqlx::query(
+        "UPDATE assignments SET status='released',released_at=?,release_reason=?
+         WHERE task_id=? AND status='active'",
+    )
+    .bind(now.to_rfc3339())
+    .bind(reason)
+    .bind(&task_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(storage)?;
+    sqlx::query(
+        "UPDATE assignment_requests SET status='withdrawn',resolved_at=?,resolution=?
+         WHERE task_id=? AND status='pending'",
+    )
+    .bind(now.to_rfc3339())
+    .bind(reason)
+    .bind(&task_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(storage)?;
+    sqlx::query("UPDATE tasks SET state='cancelled',updated_at=? WHERE id=?")
+        .bind(now.to_rfc3339())
+        .bind(&task_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(storage)?;
+    append_event_tx(
+        tx,
+        actor_type,
+        actor_id,
+        "task",
+        task.id,
+        event_type,
+        json!({"previous_state":task.state,"reason":reason}),
+        None,
+    )
+    .await?;
+    Ok(())
 }
 
 // Reuse the exact claim checks for operator assignment and approved employee requests.

@@ -157,6 +157,39 @@ async fn run_cancel(
     Ok(Json(json!(run)))
 }
 
+pub(crate) async fn revoke_task_cancelling_runs(store: &Store, task_id: Id) {
+    let runs = match store.task_runs(task_id).await {
+        Ok(runs) => runs
+            .into_iter()
+            .filter(|run| run.status == "cancelling")
+            .map(|run| run.id)
+            .collect::<Vec<_>>(),
+        Err(err) => {
+            tracing::warn!(%task_id, %err, "cannot enumerate Runs after Task cancellation");
+            return;
+        }
+    };
+    if runs.is_empty() {
+        return;
+    }
+    let control = match MorrowRuntimeControl::from_env() {
+        Ok(Some(control)) => control,
+        Ok(None) => {
+            tracing::warn!(%task_id, "LSM control is not configured; Task Run cleanup remains pending");
+            return;
+        }
+        Err(err) => {
+            tracing::warn!(%task_id, %err, "LSM control is invalid; Task Run cleanup remains pending");
+            return;
+        }
+    };
+    for run_id in runs {
+        if let Err(err) = control.revoke_for_run(store, run_id).await {
+            tracing::warn!(%task_id, %run_id, %err, "capability revocation pending after Task cancellation");
+        }
+    }
+}
+
 async fn run_execution(
     State(s): State<AppState>,
     Path(id): Path<Id>,

@@ -243,6 +243,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/tasks", get(list_tasks).post(create_task))
         .route("/tasks/management", get(list_task_management))
         .route("/tasks/{id}", get(get_task).delete(delete_task))
+        .route("/tasks/{id}/cancel", post(cancel_task))
         .route("/tasks/{id}/project", post(set_task_project))
         .route("/tasks/{id}/rework", post(create_task_rework))
         .route("/tasks/{id}/reopen", post(reopen_task))
@@ -533,6 +534,15 @@ async fn delete_task(
 ) -> Result<Json<Value>, ApiError> {
     state.store.delete_task(id).await?;
     Ok(Json(json!({"task_id":id,"deleted":true})))
+}
+
+async fn cancel_task(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    let task = state.store.cancel_task(id).await?;
+    launch::revoke_task_cancelling_runs(&state.store, id).await;
+    Ok(Json(serde_json::to_value(task).unwrap()))
 }
 
 async fn set_task_project(

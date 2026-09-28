@@ -71,6 +71,8 @@ type TaskManagementSummary = {
 };
 
 type TaskManagementFilter = "all" | "unclaimed" | "assigned" | "running" | "review" | "blocked" | "done" | "cancelled";
+type TaskManagementSortKey = "status" | "task" | "project" | "publisher" | "assignee" | "created" | "updated" | "priority";
+type TaskManagementSortDirection = "asc" | "desc";
 
 type Collaboration = {
   handoffs: {
@@ -597,6 +599,10 @@ export default function App() {
   const [taskManagement, setTaskManagement] = useState<TaskManagementSummary[]>([]);
   const [taskManagementFilter, setTaskManagementFilter] = useState<TaskManagementFilter>("all");
   const [taskManagementQuery, setTaskManagementQuery] = useState("");
+  const [taskManagementSort, setTaskManagementSort] = useState<{
+    key: TaskManagementSortKey;
+    direction: TaskManagementSortDirection;
+  }>({ key: "created", direction: "desc" });
   const [agents, setAgents] = useState<FleetEntry[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [assignments, setAssignments] = useState<Assignment[]>([]);
@@ -750,20 +756,58 @@ export default function App() {
 
   const filteredTaskManagement = useMemo(() => {
     const query = taskManagementQuery.trim().toLocaleLowerCase(locale);
-    return taskManagement.filter((row) => {
-      const status = taskManagementStatus(row);
-      if (taskManagementFilter !== "all" && status !== taskManagementFilter) return false;
-      if (!query) return true;
-      return [
-        row.task.title,
-        row.task.description,
-        row.project_name || "",
-        row.task.owner_actor_id,
-        row.executor_agent_display_name || "",
-        row.executor_agent_instance_id || "",
-      ].some((value) => value.toLocaleLowerCase(locale).includes(query));
+    const statusRank: Record<Exclude<TaskManagementFilter, "all">, number> = {
+      unclaimed: 0,
+      assigned: 1,
+      running: 2,
+      review: 3,
+      blocked: 4,
+      done: 5,
+      cancelled: 6,
+    };
+    const rows = taskManagement
+      .map((row, sourceIndex) => ({ row, sourceIndex }))
+      .filter(({ row }) => {
+        const status = taskManagementStatus(row);
+        if (taskManagementFilter !== "all" && status !== taskManagementFilter) return false;
+        if (!query) return true;
+        return [
+          row.task.title,
+          row.task.description,
+          row.project_name || "",
+          actorDisplayName(row.task.owner_actor_id),
+          row.task.owner_actor_id,
+          row.executor_agent_display_name || "",
+          row.executor_agent_instance_id || "",
+        ].some((value) => value.toLocaleLowerCase(locale).includes(query));
+      });
+
+    const sortValue = (row: TaskManagementSummary): string | number | null => {
+      switch (taskManagementSort.key) {
+        case "status": return statusRank[taskManagementStatus(row) as Exclude<TaskManagementFilter, "all">];
+        case "task": return row.task.title;
+        case "project": return row.project_name?.trim() || null;
+        case "publisher": return actorDisplayName(row.task.owner_actor_id);
+        case "assignee": return row.executor_agent_display_name?.trim() || null;
+        case "created": return new Date(row.task.created_at).getTime();
+        case "updated": return new Date(row.task.updated_at).getTime();
+        case "priority": return row.task.priority;
+      }
+    };
+    rows.sort((a, b) => {
+      const left = sortValue(a.row);
+      const right = sortValue(b.row);
+      if (left === null && right === null) return a.sourceIndex - b.sourceIndex;
+      if (left === null) return 1;
+      if (right === null) return -1;
+      const compared = typeof left === "number" && typeof right === "number"
+        ? left - right
+        : String(left).localeCompare(String(right), locale, { sensitivity: "base", numeric: true });
+      if (compared !== 0) return taskManagementSort.direction === "asc" ? compared : -compared;
+      return a.sourceIndex - b.sourceIndex;
     });
-  }, [taskManagement, taskManagementFilter, taskManagementQuery, locale]);
+    return rows.map(({ row }) => row);
+  }, [taskManagement, taskManagementFilter, taskManagementQuery, taskManagementSort, locale]);
 
   const t = (key: TranslationKey) => translate(locale, key);
 
@@ -1345,6 +1389,27 @@ export default function App() {
     }
   }
 
+  async function cancelTask(task: Task) {
+    const message = t("cancelTaskConfirm").replace("{title}", task.title);
+    if (!window.confirm(message)) return;
+    setTaskMutationBusy(true);
+    try {
+      const next = await api<Task>(`/api/tasks/${task.id}/cancel`, { method: "POST" });
+      setTasks((current) => current.map((item) => item.id === next.id ? next : item));
+      setTaskManagement((current) => current.map((row) => row.task.id === next.id ? { ...row, task: next } : row));
+      await Promise.all([
+        refreshQueueBase(),
+        refreshTaskManagement(),
+        ...(selectedId === task.id ? [refreshDetail()] : []),
+      ]);
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setTaskMutationBusy(false);
+    }
+  }
+
   async function deleteTask(task: Task) {
     const message = t("deleteTaskConfirm").replace("{title}", task.title);
     if (!window.confirm(message)) return;
@@ -1424,6 +1489,30 @@ export default function App() {
   function openTaskFromManagement(taskId: string) {
     selectTask(taskId);
     setView("queue");
+  }
+
+  function toggleTaskManagementSort(key: TaskManagementSortKey) {
+    setTaskManagementSort((current) => current.key === key
+      ? { key, direction: current.direction === "asc" ? "desc" : "asc" }
+      : { key, direction: "asc" });
+  }
+
+  function taskManagementSortHeader(key: TaskManagementSortKey, label: string) {
+    const active = taskManagementSort.key === key;
+    const direction = active ? taskManagementSort.direction : null;
+    return (
+      <th aria-sort={active ? (direction === "asc" ? "ascending" : "descending") : "none"}>
+        <button
+          type="button"
+          className={`task-sort-button${active ? " active" : ""}`}
+          onClick={() => toggleTaskManagementSort(key)}
+          title={locale === "zh-CN" ? `按${label}排序` : `Sort by ${label}`}
+        >
+          <span>{label}</span>
+          <span className="task-sort-indicator" aria-hidden="true">{active ? (direction === "asc" ? "↑" : "↓") : "↕"}</span>
+        </button>
+      </th>
+    );
   }
 
   function beginProjectsResize(event: ReactPointerEvent<HTMLDivElement>) {
@@ -1729,14 +1818,14 @@ export default function App() {
               <table className="task-management-table">
                 <thead>
                   <tr>
-                    <th>{locale === "zh-CN" ? "状态" : "Status"}</th>
-                    <th>{locale === "zh-CN" ? "任务" : "Task"}</th>
-                    <th>{locale === "zh-CN" ? "项目" : "Project"}</th>
-                    <th>{locale === "zh-CN" ? "发布人" : "Publisher"}</th>
-                    <th>{locale === "zh-CN" ? "接单人" : "Assignee"}</th>
-                    <th>{locale === "zh-CN" ? "创建时间" : "Created"}</th>
-                    <th>{locale === "zh-CN" ? "更新时间" : "Updated"}</th>
-                    <th>{locale === "zh-CN" ? "优先级" : "Priority"}</th>
+                    {taskManagementSortHeader("status", locale === "zh-CN" ? "状态" : "Status")}
+                    {taskManagementSortHeader("task", locale === "zh-CN" ? "任务" : "Task")}
+                    {taskManagementSortHeader("project", locale === "zh-CN" ? "项目" : "Project")}
+                    {taskManagementSortHeader("publisher", locale === "zh-CN" ? "发布人" : "Publisher")}
+                    {taskManagementSortHeader("assignee", locale === "zh-CN" ? "接单人" : "Assignee")}
+                    {taskManagementSortHeader("created", locale === "zh-CN" ? "创建时间" : "Created")}
+                    {taskManagementSortHeader("updated", locale === "zh-CN" ? "更新时间" : "Updated")}
+                    {taskManagementSortHeader("priority", locale === "zh-CN" ? "优先级" : "Priority")}
                     <th>{locale === "zh-CN" ? "操作" : "Actions"}</th>
                   </tr>
                 </thead>
@@ -1792,6 +1881,11 @@ export default function App() {
                         <td><time>{formatDateTime(locale, row.task.updated_at)}</time></td>
                         <td><span className="task-priority-pill">P{row.task.priority}</span></td>
                         <td className="task-management-actions-cell">
+                          {row.task.state !== "done" && row.task.state !== "cancelled" && (
+                            <button className="secondary" type="button" onClick={() => void cancelTask(row.task)} disabled={taskMutationBusy}>
+                              {t("cancelTask")}
+                            </button>
+                          )}
                           <button className="danger" type="button" onClick={() => void deleteTask(row.task)} disabled={taskMutationBusy}>
                             {t("deleteTask")}
                           </button>
@@ -2107,6 +2201,11 @@ export default function App() {
                     </div>
                     <div className="detail-heading-actions">
                       <StateBadge state={selectedTask.state} locale={locale} />
+                      {selectedTask.state !== "done" && selectedTask.state !== "cancelled" && (
+                        <button className="secondary" type="button" onClick={() => void cancelTask(selectedTask)} disabled={taskMutationBusy}>
+                          {t("cancelTask")}
+                        </button>
+                      )}
                       <button className="danger" type="button" onClick={() => void deleteTask(selectedTask)} disabled={taskMutationBusy}>
                         {t("deleteTask")}
                       </button>

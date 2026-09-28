@@ -1297,6 +1297,9 @@ impl MorrowsMcp {
             .withdraw_task_as_agent(task_id, authenticated_agent(&parts)?, deleted)
             .await
             .map_err(|e| e.to_string())?;
+        if !deleted && task.is_some() {
+            crate::launch::revoke_task_cancelling_runs(&self.store, task_id).await;
+        }
         Ok(json!({"task_id":task_id,"deleted":deleted && task.is_none(),"task":task}).to_string())
     }
 

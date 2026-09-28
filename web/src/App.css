@@ -1148,6 +1148,31 @@ h3 { margin: 20px 0 8px; color: var(--ink-3); font: 700 calc(8px * var(--font-sc
   text-transform: uppercase;
   white-space: nowrap;
 }
+.task-sort-button {
+  width: 100%;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 5px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  cursor: pointer;
+}
+.task-sort-button:hover,
+.task-sort-button.active { color: var(--ink-2); }
+.task-sort-indicator {
+  width: 10px;
+  flex: none;
+  color: var(--muted);
+  font-size: calc(8px * var(--font-scale));
+  line-height: 1;
+}
+.task-sort-button.active .task-sort-indicator { color: var(--accent); }
 .task-management-table td {
   max-width: 260px;
   padding: 11px;
@@ -1952,3 +1977,4 @@ button.danger:hover,
   color: var(--red);
 }
 .task-management-actions-cell { width: 1%; white-space: nowrap; }
+.task-management-actions-cell button + button { margin-left: 6px; }
