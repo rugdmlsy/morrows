@@ -1995,14 +1995,28 @@ impl MorrowsMcp {
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for MorrowsMcp {
     fn get_info(&self) -> ServerConfig {
-        ServerConfig::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
-            format!(
-                "{}\n\n{}\n\n{}",
-                include_str!("mcp_instructions.md"),
-                include_str!("context_capture_instructions.md"),
-                include_str!("execution_workflow_instructions.md")
-            ),
+        ServerConfig::new(
+            ServerCapabilities::builder()
+                .enable_tools()
+                .enable_tool_list_changed()
+                .build(),
         )
+        .with_instructions(format!(
+            "{}\n\n{}\n\n{}",
+            include_str!("mcp_instructions.md"),
+            include_str!("context_capture_instructions.md"),
+            include_str!("execution_workflow_instructions.md")
+        ))
+    }
+
+    async fn on_initialized(&self, context: rmcp::service::NotificationContext<rmcp::RoleServer>) {
+        // The ChatGPT connector may retain a previously discovered tool catalog across
+        // MCP reconnects. Advertise listChanged and proactively request one refresh on
+        // every fresh MCP session so newly deployed first-class employee tools do not
+        // remain hidden behind arbitrary_tool_call.
+        if let Err(error) = context.peer.notify_tool_list_changed().await {
+            tracing::debug!(%error, "client did not accept tools/list_changed notification");
+        }
     }
 }
 
@@ -2181,6 +2195,25 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn mcp_advertises_refreshable_first_class_tool_catalog() {
+        let store = Store::connect("sqlite::memory:").await.unwrap();
+        let mcp = MorrowsMcp::new(store);
+        let info = mcp.get_info();
+        let tools = info.capabilities.tools.expect("tools capability");
+        assert_eq!(tools.list_changed, Some(true));
+        for name in [
+            "task_group_get",
+            "task_chain_get",
+            "task_gate",
+            "dependency_add",
+            "dependency_remove",
+            "task_wait_for_job",
+        ] {
+            assert!(mcp.tool_router.get(name).is_some(), "missing tool {name}");
+        }
     }
 
     #[tokio::test]
