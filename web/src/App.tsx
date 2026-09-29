@@ -73,6 +73,48 @@ type TaskManagementSummary = {
 type TaskManagementFilter = "all" | "unclaimed" | "assigned" | "running" | "review" | "blocked" | "done" | "cancelled";
 type TaskManagementSortKey = "status" | "task" | "project" | "publisher" | "assignee" | "created" | "updated" | "priority";
 type TaskManagementSortDirection = "asc" | "desc";
+type TaskManagementMode = "tasks" | "chains" | "groups";
+
+type EdgeCondition =
+  | { kind: "unconditional" }
+  | { kind: "result_equals"; path: string; value: unknown };
+
+type TaskGate = {
+  task_id: string;
+  join_mode: "all" | "any";
+  state: "eligible" | "waiting" | "excluded";
+  predecessors: {
+    predecessor_id: string;
+    condition: EdgeCondition;
+    state: "eligible" | "waiting" | "excluded";
+    reason: string;
+  }[];
+  successors: string[];
+};
+
+type TaskCollection = {
+  id: string;
+  name: string;
+  description: string;
+  archived: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+type TaskCollectionDetail = {
+  collection: TaskCollection;
+  members: Task[];
+  gates: TaskGate[];
+  edges: { task_id: string; depends_on_task_id: string; condition: EdgeCondition }[];
+};
+
+type BatchAssignmentResult = {
+  task_id: string;
+  status: "assigned" | "blocked" | "failed" | string;
+  assignment?: Assignment | null;
+  gate: TaskGate;
+  error?: string | null;
+};
 
 type Collaboration = {
   handoffs: {
@@ -599,6 +641,27 @@ export default function App() {
   const [taskManagement, setTaskManagement] = useState<TaskManagementSummary[]>([]);
   const [taskManagementFilter, setTaskManagementFilter] = useState<TaskManagementFilter>("all");
   const [taskManagementQuery, setTaskManagementQuery] = useState("");
+  const [taskManagementMode, setTaskManagementMode] = useState<TaskManagementMode>("tasks");
+  const [taskChains, setTaskChains] = useState<TaskCollection[]>([]);
+  const [taskGroups, setTaskGroups] = useState<TaskCollection[]>([]);
+  const [selectedChainId, setSelectedChainId] = useState<string | null>(null);
+  const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null);
+  const [chainDetail, setChainDetail] = useState<TaskCollectionDetail | null>(null);
+  const [groupDetail, setGroupDetail] = useState<TaskCollectionDetail | null>(null);
+  const [newChainName, setNewChainName] = useState("");
+  const [newGroupName, setNewGroupName] = useState("");
+  const [chainMemberTaskId, setChainMemberTaskId] = useState("");
+  const [chainJoinMode, setChainJoinMode] = useState<"all" | "any">("all");
+  const [chainEdgePredecessorId, setChainEdgePredecessorId] = useState("");
+  const [chainEdgeSuccessorId, setChainEdgeSuccessorId] = useState("");
+  const [chainEdgeConditionKind, setChainEdgeConditionKind] = useState<"unconditional" | "result_equals">("unconditional");
+  const [chainEdgePath, setChainEdgePath] = useState("/kind");
+  const [chainEdgeValue, setChainEdgeValue] = useState('"success"');
+  const [groupMemberTaskId, setGroupMemberTaskId] = useState("");
+  const [groupAgentId, setGroupAgentId] = useState("");
+  const [groupAssignResults, setGroupAssignResults] = useState<BatchAssignmentResult[]>([]);
+  const [collectionBusy, setCollectionBusy] = useState(false);
+  const [taskGate, setTaskGate] = useState<TaskGate | null>(null);
   const [taskManagementSort, setTaskManagementSort] = useState<{
     key: TaskManagementSortKey;
     direction: TaskManagementSortDirection;
@@ -894,9 +957,17 @@ export default function App() {
 
   const refreshTaskManagement = useCallback(async () => {
     try {
-      const next = await api<TaskManagementSummary[]>("/api/tasks/management");
+      const [next, chains, groups] = await Promise.all([
+        api<TaskManagementSummary[]>("/api/tasks/management"),
+        api<TaskCollection[]>("/api/task-chains"),
+        api<TaskCollection[]>("/api/task-groups"),
+      ]);
       setTaskManagement(next);
       setTasks(next.map((row) => row.task));
+      setTaskChains(chains);
+      setTaskGroups(groups);
+      setSelectedChainId((current) => current ?? chains.find((item) => !item.archived)?.id ?? chains[0]?.id ?? null);
+      setSelectedGroupId((current) => current ?? groups.find((item) => !item.archived)?.id ?? groups[0]?.id ?? null);
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -906,7 +977,7 @@ export default function App() {
   const refreshDetail = useCallback(async () => {
     if (view !== "queue" || !selectedId || selectedProjectId) return;
     try {
-      const [nextAssignments, nextRuns, nextEvents, nextContext, nextContextPackage, nextCollaboration, nextPolicy, nextPreview, nextDispatchDecisions, nextLaunchAttempts, nextLaunchInstructions, nextTaskSessions] = await Promise.all([
+      const [nextAssignments, nextRuns, nextEvents, nextContext, nextContextPackage, nextCollaboration, nextPolicy, nextPreview, nextDispatchDecisions, nextLaunchAttempts, nextLaunchInstructions, nextTaskSessions, nextGate] = await Promise.all([
         api<Assignment[]>(`/api/tasks/${selectedId}/assignments`),
         api<Run[]>(`/api/tasks/${selectedId}/runs`),
         api<EventItem[]>(`/api/tasks/${selectedId}/events`),
@@ -919,6 +990,7 @@ export default function App() {
         api<LaunchAttempt[]>(`/api/tasks/${selectedId}/launch-attempts`),
         api<LaunchInstruction[]>(`/api/tasks/${selectedId}/launch-instructions`),
         api<TaskSession[]>(`/api/sessions?task_id=${encodeURIComponent(selectedId)}`),
+        api<TaskGate>(`/api/tasks/${selectedId}/gate`),
       ]);
       setAssignments(nextAssignments);
       setRuns(nextRuns);
@@ -932,6 +1004,7 @@ export default function App() {
       setLaunchAttempts(nextLaunchAttempts);
       setLaunchInstructions(nextLaunchInstructions);
       setTaskSessions(nextTaskSessions);
+      setTaskGate(nextGate);
       const intakeAssignment = nextAssignments.find(
         (assignment) => assignment.role === "executor" && assignment.status === "active" && assignment.phase !== "implementing",
       );
@@ -989,6 +1062,28 @@ export default function App() {
     const timer = window.setInterval(() => void refreshDetail(), 3000);
     return () => window.clearInterval(timer);
   }, [refreshDetail]);
+
+  useEffect(() => {
+    if (view !== "tasks" || !selectedChainId) return;
+    let cancelled = false;
+    void api<TaskCollectionDetail>(`/api/task-chains/${selectedChainId}`).then((detail) => {
+      if (!cancelled) setChainDetail(detail);
+    }).catch((e) => {
+      if (!cancelled) setError(e instanceof Error ? e.message : String(e));
+    });
+    return () => { cancelled = true; };
+  }, [view, selectedChainId]);
+
+  useEffect(() => {
+    if (view !== "tasks" || !selectedGroupId) return;
+    let cancelled = false;
+    void api<TaskCollectionDetail>(`/api/task-groups/${selectedGroupId}`).then((detail) => {
+      if (!cancelled) setGroupDetail(detail);
+    }).catch((e) => {
+      if (!cancelled) setError(e instanceof Error ? e.message : String(e));
+    });
+    return () => { cancelled = true; };
+  }, [view, selectedGroupId]);
 
   useEffect(() => {
     if (view !== "queue" || !selectedId || selectedProjectId) return;
@@ -1475,6 +1570,135 @@ export default function App() {
     }
   }
 
+  async function reloadCollectionDetail(chain: boolean, id: string) {
+    const detail = await api<TaskCollectionDetail>(`/api/${chain ? "task-chains" : "task-groups"}/${id}`);
+    if (chain) setChainDetail(detail);
+    else setGroupDetail(detail);
+    return detail;
+  }
+
+  async function createCollection(chain: boolean) {
+    const rawName = chain ? newChainName : newGroupName;
+    const name = rawName.trim();
+    if (!name) return;
+    setCollectionBusy(true);
+    try {
+      const created = await api<TaskCollection>(`/api/${chain ? "task-chains" : "task-groups"}`, {
+        method: "POST",
+        body: JSON.stringify({ name, description: "", archived: false }),
+      });
+      if (chain) {
+        setNewChainName("");
+        setSelectedChainId(created.id);
+      } else {
+        setNewGroupName("");
+        setSelectedGroupId(created.id);
+      }
+      await refreshTaskManagement();
+      await reloadCollectionDetail(chain, created.id);
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setCollectionBusy(false);
+    }
+  }
+
+  async function archiveCollection(chain: boolean, id: string) {
+    setCollectionBusy(true);
+    try {
+      await api<{ archived: boolean }>(`/api/${chain ? "task-chains" : "task-groups"}/${id}/archive`, { method: "POST" });
+      await refreshTaskManagement();
+      await reloadCollectionDetail(chain, id);
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setCollectionBusy(false);
+    }
+  }
+
+  async function changeCollectionMember(chain: boolean, id: string, taskId: string, remove: boolean) {
+    if (!taskId) return;
+    setCollectionBusy(true);
+    try {
+      await api<{ ok: boolean }>(`/api/${chain ? "task-chains" : "task-groups"}/${id}/members/${taskId}`, {
+        method: remove ? "DELETE" : "PUT",
+        ...(chain && !remove ? { body: JSON.stringify({ join_mode: chainJoinMode }) } : {}),
+      });
+      if (chain) setChainMemberTaskId("");
+      else setGroupMemberTaskId("");
+      await reloadCollectionDetail(chain, id);
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setCollectionBusy(false);
+    }
+  }
+
+  async function saveChainEdge() {
+    if (!selectedChainId || !chainEdgePredecessorId || !chainEdgeSuccessorId) return;
+    let condition: EdgeCondition = { kind: "unconditional" };
+    if (chainEdgeConditionKind === "result_equals") {
+      try {
+        condition = { kind: "result_equals", path: chainEdgePath.trim(), value: JSON.parse(chainEdgeValue) };
+      } catch {
+        setError(locale === "zh-CN" ? `条件值必须是有效 JSON，例如 "success"、1、true 或 {"kind":"x"}。` : `Condition value must be valid JSON, e.g. "success", 1, true, or {"kind":"x"}.`);
+        return;
+      }
+    }
+    setCollectionBusy(true);
+    try {
+      await api<{ ok: boolean }>(`/api/task-chains/${selectedChainId}/edges`, {
+        method: "POST",
+        body: JSON.stringify({
+          task_id: chainEdgeSuccessorId,
+          depends_on_task_id: chainEdgePredecessorId,
+          condition,
+        }),
+      });
+      await reloadCollectionDetail(true, selectedChainId);
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setCollectionBusy(false);
+    }
+  }
+
+  async function removeChainEdge(taskId: string, predecessorId: string) {
+    if (!selectedChainId) return;
+    setCollectionBusy(true);
+    try {
+      await api<{ ok: boolean }>(`/api/task-chains/${selectedChainId}/edges/${taskId}/${predecessorId}`, { method: "DELETE" });
+      await reloadCollectionDetail(true, selectedChainId);
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setCollectionBusy(false);
+    }
+  }
+
+  async function assignSelectedGroup() {
+    if (!selectedGroupId || !groupAgentId) return;
+    setCollectionBusy(true);
+    try {
+      const results = await api<BatchAssignmentResult[]>("/api/task-groups/batch-assign", {
+        method: "POST",
+        body: JSON.stringify({ group_id: selectedGroupId, agent_instance_id: groupAgentId, lease_seconds: 3600 }),
+      });
+      setGroupAssignResults(results);
+      await Promise.all([reloadCollectionDetail(false, selectedGroupId), refreshTaskManagement()]);
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setCollectionBusy(false);
+    }
+  }
+
   function actorDisplayName(actorId: string) {
     if (actorId === "human:webui") return locale === "zh-CN" ? "WebUI 用户" : "WebUI user";
     if (actorId === "human:local") return locale === "zh-CN" ? "本地用户" : "Local user";
@@ -1782,6 +2006,19 @@ export default function App() {
 
         {view === "tasks" ? (
           <section className="task-management-page">
+            <div className="task-management-tabs" role="tablist">
+              <button type="button" className={taskManagementMode === "tasks" ? "selected" : ""} onClick={() => setTaskManagementMode("tasks")}>
+                {locale === "zh-CN" ? "任务" : "Tasks"} <span>{taskManagement.length}</span>
+              </button>
+              <button type="button" className={taskManagementMode === "chains" ? "selected" : ""} onClick={() => setTaskManagementMode("chains")}>
+                {locale === "zh-CN" ? "任务链" : "Task Chains"} <span>{taskChains.length}</span>
+              </button>
+              <button type="button" className={taskManagementMode === "groups" ? "selected" : ""} onClick={() => setTaskManagementMode("groups")}>
+                {locale === "zh-CN" ? "任务组" : "Task Groups"} <span>{taskGroups.length}</span>
+              </button>
+            </div>
+
+            {taskManagementMode === "tasks" && (<>
             <div className="task-management-summary">
               {(["all", "unclaimed", "assigned", "running", "review", "blocked", "done", "cancelled"] as TaskManagementFilter[]).map((status) => (
                 <button
@@ -1901,6 +2138,186 @@ export default function App() {
                 </div>
               )}
             </div>
+            </>)}
+
+            {taskManagementMode === "chains" && (
+              <div className="collection-management">
+                <div className="collection-toolbar">
+                  <select value={selectedChainId ?? ""} onChange={(event) => setSelectedChainId(event.target.value || null)}>
+                    <option value="">{locale === "zh-CN" ? "选择任务链…" : "Select task chain…"}</option>
+                    {taskChains.map((chain) => <option key={chain.id} value={chain.id}>{chain.name}{chain.archived ? " · archived" : ""}</option>)}
+                  </select>
+                  <input value={newChainName} onChange={(event) => setNewChainName(event.target.value)} placeholder={locale === "zh-CN" ? "新任务链名称" : "New chain name"} />
+                  <button type="button" disabled={collectionBusy || !newChainName.trim()} onClick={() => void createCollection(true)}>{locale === "zh-CN" ? "创建" : "Create"}</button>
+                  {chainDetail && !chainDetail.collection.archived && (
+                    <button type="button" className="secondary" disabled={collectionBusy} onClick={() => void archiveCollection(true, chainDetail.collection.id)}>
+                      {locale === "zh-CN" ? "归档" : "Archive"}
+                    </button>
+                  )}
+                </div>
+
+                {chainDetail ? (
+                  <div className="collection-detail">
+                    <div className="collection-heading">
+                      <div>
+                        <span className="section-caption">{locale === "zh-CN" ? "任务链 · DAG" : "Task Chain · DAG"}</span>
+                        <h2>{chainDetail.collection.name}</h2>
+                        <small>{chainDetail.members.length} {locale === "zh-CN" ? "个任务" : "tasks"} · {chainDetail.edges.length} {locale === "zh-CN" ? "条边" : "edges"}</small>
+                      </div>
+                    </div>
+
+                    {!chainDetail.collection.archived && (
+                      <div className="collection-form-row">
+                        <select value={chainMemberTaskId} onChange={(event) => setChainMemberTaskId(event.target.value)}>
+                          <option value="">{locale === "zh-CN" ? "添加成员任务…" : "Add member task…"}</option>
+                          {tasks.filter((task) => !chainDetail.members.some((member) => member.id === task.id)).map((task) => <option key={task.id} value={task.id}>{task.title}</option>)}
+                        </select>
+                        <select value={chainJoinMode} onChange={(event) => setChainJoinMode(event.target.value as "all" | "any")}>
+                          <option value="all">ALL</option>
+                          <option value="any">ANY</option>
+                        </select>
+                        <button type="button" disabled={collectionBusy || !chainMemberTaskId} onClick={() => void changeCollectionMember(true, chainDetail.collection.id, chainMemberTaskId, false)}>
+                          {locale === "zh-CN" ? "加入" : "Add"}
+                        </button>
+                      </div>
+                    )}
+
+                    <div className="chain-node-list">
+                      {chainDetail.members.map((member) => {
+                        const gate = chainDetail.gates.find((item) => item.task_id === member.id);
+                        return (
+                          <div className={"chain-node gate-" + (gate?.state || "eligible")} key={member.id}>
+                            <div>
+                              <button type="button" className="text-button" onClick={() => openTaskFromManagement(member.id)}><strong>{member.title}</strong></button>
+                              <small>{shortId(member.id)} · {(gate?.join_mode || "all").toUpperCase()} · {formatState(locale, member.state)}</small>
+                              {gate?.predecessors.length ? <p>{gate.predecessors.map((edge) => edge.reason).join(" · ")}</p> : <p>{locale === "zh-CN" ? "起始节点" : "Root node"}</p>}
+                            </div>
+                            <span className={"chain-gate-pill gate-" + (gate?.state || "eligible")}>{gate?.state || "eligible"}</span>
+                            {!chainDetail.collection.archived && <button type="button" className="secondary compact-action" disabled={collectionBusy} onClick={() => void changeCollectionMember(true, chainDetail.collection.id, member.id, true)}>{locale === "zh-CN" ? "移出" : "Remove"}</button>}
+                          </div>
+                        );
+                      })}
+                      {!chainDetail.members.length && <div className="empty compact">{locale === "zh-CN" ? "任务链还没有成员。" : "This chain has no members."}</div>}
+                    </div>
+
+                    {!chainDetail.collection.archived && (
+                      <div className="chain-edge-editor">
+                        <select value={chainEdgePredecessorId} onChange={(event) => setChainEdgePredecessorId(event.target.value)}>
+                          <option value="">{locale === "zh-CN" ? "前置任务…" : "Predecessor…"}</option>
+                          {chainDetail.members.map((task) => <option key={task.id} value={task.id}>{task.title}</option>)}
+                        </select>
+                        <span>→</span>
+                        <select value={chainEdgeSuccessorId} onChange={(event) => setChainEdgeSuccessorId(event.target.value)}>
+                          <option value="">{locale === "zh-CN" ? "后续任务…" : "Successor…"}</option>
+                          {chainDetail.members.map((task) => <option key={task.id} value={task.id}>{task.title}</option>)}
+                        </select>
+                        <select value={chainEdgeConditionKind} onChange={(event) => setChainEdgeConditionKind(event.target.value as "unconditional" | "result_equals")}>
+                          <option value="unconditional">{locale === "zh-CN" ? "无条件" : "Unconditional"}</option>
+                          <option value="result_equals">result ==</option>
+                        </select>
+                        {chainEdgeConditionKind === "result_equals" && (<>
+                          <input value={chainEdgePath} onChange={(event) => setChainEdgePath(event.target.value)} placeholder="/kind" />
+                          <input className="mono-input" value={chainEdgeValue} onChange={(event) => setChainEdgeValue(event.target.value)} placeholder={'"success"'} />
+                        </>)}
+                        <button type="button" disabled={collectionBusy || !chainEdgePredecessorId || !chainEdgeSuccessorId || chainEdgePredecessorId === chainEdgeSuccessorId} onClick={() => void saveChainEdge()}>
+                          {locale === "zh-CN" ? "保存依赖" : "Save edge"}
+                        </button>
+                      </div>
+                    )}
+
+                    <div className="chain-edge-list">
+                      {chainDetail.edges.map((edge) => (
+                        <div className="chain-edge-row" key={edge.depends_on_task_id + ":" + edge.task_id}>
+                          <button type="button" className="text-button" onClick={() => openTaskFromManagement(edge.depends_on_task_id)}>{tasks.find((task) => task.id === edge.depends_on_task_id)?.title || shortId(edge.depends_on_task_id)}</button>
+                          <span>→</span>
+                          <button type="button" className="text-button" onClick={() => openTaskFromManagement(edge.task_id)}>{tasks.find((task) => task.id === edge.task_id)?.title || shortId(edge.task_id)}</button>
+                          <code>{edge.condition.kind === "unconditional" ? "always" : edge.condition.path + " == " + JSON.stringify(edge.condition.value)}</code>
+                          {!chainDetail.collection.archived && <button type="button" className="secondary compact-action" disabled={collectionBusy} onClick={() => void removeChainEdge(edge.task_id, edge.depends_on_task_id)}>{locale === "zh-CN" ? "删除" : "Remove"}</button>}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : <div className="empty large">{locale === "zh-CN" ? "选择或创建一个任务链。" : "Select or create a task chain."}</div>}
+              </div>
+            )}
+
+            {taskManagementMode === "groups" && (
+              <div className="collection-management">
+                <div className="collection-toolbar">
+                  <select value={selectedGroupId ?? ""} onChange={(event) => { setSelectedGroupId(event.target.value || null); setGroupAssignResults([]); }}>
+                    <option value="">{locale === "zh-CN" ? "选择任务组…" : "Select task group…"}</option>
+                    {taskGroups.map((group) => <option key={group.id} value={group.id}>{group.name}{group.archived ? " · archived" : ""}</option>)}
+                  </select>
+                  <input value={newGroupName} onChange={(event) => setNewGroupName(event.target.value)} placeholder={locale === "zh-CN" ? "新任务组名称" : "New group name"} />
+                  <button type="button" disabled={collectionBusy || !newGroupName.trim()} onClick={() => void createCollection(false)}>{locale === "zh-CN" ? "创建" : "Create"}</button>
+                  {groupDetail && !groupDetail.collection.archived && <button type="button" className="secondary" disabled={collectionBusy} onClick={() => void archiveCollection(false, groupDetail.collection.id)}>{locale === "zh-CN" ? "归档" : "Archive"}</button>}
+                </div>
+
+                {groupDetail ? (
+                  <div className="collection-detail">
+                    <div className="collection-heading">
+                      <div>
+                        <span className="section-caption">{locale === "zh-CN" ? "任务组 · 轻量集合" : "Task Group · Collection"}</span>
+                        <h2>{groupDetail.collection.name}</h2>
+                        <small>{locale === "zh-CN" ? "任务组不创建依赖；每个成员仍保持独立 Assignment / Run。" : "Groups create no dependencies; every member keeps an independent Assignment / Run."}</small>
+                      </div>
+                    </div>
+
+                    {!groupDetail.collection.archived && (
+                      <div className="collection-form-row">
+                        <select value={groupMemberTaskId} onChange={(event) => setGroupMemberTaskId(event.target.value)}>
+                          <option value="">{locale === "zh-CN" ? "添加任务…" : "Add task…"}</option>
+                          {tasks.filter((task) => !groupDetail.members.some((member) => member.id === task.id)).map((task) => <option key={task.id} value={task.id}>{task.title}</option>)}
+                        </select>
+                        <button type="button" disabled={collectionBusy || !groupMemberTaskId} onClick={() => void changeCollectionMember(false, groupDetail.collection.id, groupMemberTaskId, false)}>{locale === "zh-CN" ? "加入" : "Add"}</button>
+                      </div>
+                    )}
+
+                    <div className="group-member-list">
+                      {groupDetail.members.map((member) => {
+                        const gate = groupDetail.gates.find((item) => item.task_id === member.id);
+                        return (
+                          <div className="group-member-row" key={member.id}>
+                            <div>
+                              <button type="button" className="text-button" onClick={() => openTaskFromManagement(member.id)}><strong>{member.title}</strong></button>
+                              <small>{shortId(member.id)} · {formatState(locale, member.state)}</small>
+                            </div>
+                            <span className={"chain-gate-pill gate-" + (gate?.state || "eligible")}>{gate?.state || "eligible"}</span>
+                            {!groupDetail.collection.archived && <button type="button" className="secondary compact-action" disabled={collectionBusy} onClick={() => void changeCollectionMember(false, groupDetail.collection.id, member.id, true)}>{locale === "zh-CN" ? "移出" : "Remove"}</button>}
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    {!groupDetail.collection.archived && (
+                      <div className="group-assignment-panel">
+                        <div>
+                          <strong>{locale === "zh-CN" ? "批量指定 Agent" : "Assign group to Agent"}</strong>
+                          <small>{locale === "zh-CN" ? "链 Gate 阻塞的任务会单独返回 blocked，不会绕过依赖。" : "Chain-gated tasks return blocked individually; dependencies are never bypassed."}</small>
+                        </div>
+                        <select value={groupAgentId} onChange={(event) => setGroupAgentId(event.target.value)}>
+                          <option value="">{locale === "zh-CN" ? "选择 Agent…" : "Select Agent…"}</option>
+                          {orderedAgents.filter((entry) => !entry.instance.archived_at).map((entry) => <option key={entry.instance.id} value={entry.instance.id}>{cleanAgentDisplayName(entry, locale)}</option>)}
+                        </select>
+                        <button type="button" disabled={collectionBusy || !groupAgentId || !groupDetail.members.length} onClick={() => void assignSelectedGroup()}>{locale === "zh-CN" ? "批量分配" : "Assign all"}</button>
+                      </div>
+                    )}
+
+                    {!!groupAssignResults.length && (
+                      <div className="group-assignment-results">
+                        {groupAssignResults.map((result) => (
+                          <div className={"group-assignment-result result-" + result.status} key={result.task_id}>
+                            <strong>{tasks.find((task) => task.id === result.task_id)?.title || shortId(result.task_id)}</strong>
+                            <span>{result.status}</span>
+                            {result.error && <small>{result.error}</small>}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ) : <div className="empty large">{locale === "zh-CN" ? "选择或创建一个任务组。" : "Select or create a task group."}</div>}
+              </div>
+            )}
           </section>
         ) : view === "queue" ? (
           <div
@@ -2295,6 +2712,44 @@ export default function App() {
                       </div>
                     )}
                   </section>
+
+                  {taskGate && (
+                    <section className={"task-chain-gate-card gate-" + taskGate.state}>
+                      <div className="task-chain-gate-head">
+                        <div>
+                          <span className="section-caption">{locale === "zh-CN" ? "任务链 Gate" : "Task Chain Gate"}</span>
+                          <strong>{taskGate.state}</strong>
+                          <small>{locale === "zh-CN" ? "汇合规则" : "Join"} · {taskGate.join_mode.toUpperCase()}</small>
+                        </div>
+                        <span className={"chain-gate-pill gate-" + taskGate.state}>{taskGate.state}</span>
+                      </div>
+                      {!!taskGate.predecessors.length && (
+                        <div className="task-chain-gate-relations">
+                          <strong>{locale === "zh-CN" ? "前置任务" : "Predecessors"}</strong>
+                          {taskGate.predecessors.map((edge) => (
+                            <div className="task-chain-gate-edge" key={edge.predecessor_id}>
+                              <button type="button" className="text-button" onClick={() => selectTask(edge.predecessor_id)}>
+                                {tasks.find((task) => task.id === edge.predecessor_id)?.title || shortId(edge.predecessor_id)}
+                              </button>
+                              <span className={"chain-gate-pill gate-" + edge.state}>{edge.state}</span>
+                              <small>{edge.reason}</small>
+                              <code>{edge.condition.kind === "unconditional" ? "always" : edge.condition.path + " == " + JSON.stringify(edge.condition.value)}</code>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {!!taskGate.successors.length && (
+                        <div className="task-chain-successors">
+                          <strong>{locale === "zh-CN" ? "后续任务" : "Successors"}</strong>
+                          {taskGate.successors.map((taskId) => (
+                            <button type="button" className="text-button" key={taskId} onClick={() => selectTask(taskId)}>
+                              {tasks.find((task) => task.id === taskId)?.title || shortId(taskId)}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </section>
+                  )}
 
                   <div className="detail-columns">
                     <div>

@@ -523,17 +523,13 @@ async fn evaluate_dispatch_conn(
     if !policy.enabled {
         task_reasons.push("policy_disabled".into());
     }
-    if policy.role == "executor" {
-        let blocked: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM task_dependencies d JOIN tasks t ON t.id=d.depends_on_task_id WHERE d.task_id=? AND t.state!='done')",
-        )
-        .bind(task_id.to_string())
-        .fetch_one(&mut *conn)
-        .await
-        .map_err(storage)?;
-        if blocked {
-            task_reasons.push("unfinished_dependencies".into());
-        }
+    let gate = crate::task_graph::gate_conn(conn, task_id).await?;
+    if gate.state != GateState::Eligible {
+        task_reasons.push("unfinished_dependencies".into());
+        task_reasons.push(format!(
+            "chain_gate:{}",
+            serde_json::to_string(&gate).map_err(storage)?
+        ));
     }
     let active_for_role: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM assignments WHERE task_id=? AND role=? AND status='active' AND expires_at>?)",

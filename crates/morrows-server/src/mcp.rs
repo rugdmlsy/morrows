@@ -219,6 +219,16 @@ Current summary: {}",
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct CollectionRequest {
+    /// Omit to list metadata; provide an ID for members, edges and gates.
+    pub id: Option<String>,
+}
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DependencyRequest {
+    pub task_id: String,
+    pub depends_on_task_id: String,
+}
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct TaskIdRequest {
     pub task_id: String,
 }
@@ -628,6 +638,108 @@ pub struct ReviseSessionSummaryRequest {
 
 #[tool_router(router = tool_router)]
 impl MorrowsMcp {
+    #[tool(
+        description = "Read a task's prerequisite gate: eligible, waiting, or excluded; includes predecessor conditions and reasons and successor IDs. Conditions use only completed executor Run results."
+    )]
+    async fn task_gate(
+        &self,
+        Parameters(req): Parameters<TaskIdRequest>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<String, String> {
+        let agent = authenticated_agent(&parts)?;
+        let id = parse_id(&req.task_id)?;
+        self.ensure_task_read_access(id, agent).await?;
+        Ok(json!(self.store.task_gate(id).await.map_err(|e| e.to_string())?).to_string())
+    }
+    #[tool(
+        description = "List Task Chain metadata, or read one chain's members, DAG edges and prerequisite gates. all/any joins apply to chain edges; legacy dependencies remain unconditional-all."
+    )]
+    async fn task_chain_get(
+        &self,
+        Parameters(req): Parameters<CollectionRequest>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<String, String> {
+        authenticated_agent(&parts)?;
+        match req.id {
+            Some(id) => Ok(self
+                .store
+                .task_collection_detail(true, parse_id(&id)?)
+                .await
+                .map_err(|e| e.to_string())?
+                .to_string()),
+            None => Ok(json!(
+                self.store
+                    .list_task_collections(true)
+                    .await
+                    .map_err(|e| e.to_string())?
+            )
+            .to_string()),
+        }
+    }
+    #[tool(
+        description = "List Task Group metadata, or read one group's independent member tasks and gates. Groups are collections only and create no dependencies or shared Runs."
+    )]
+    async fn task_group_get(
+        &self,
+        Parameters(req): Parameters<CollectionRequest>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<String, String> {
+        authenticated_agent(&parts)?;
+        match req.id {
+            Some(id) => Ok(self
+                .store
+                .task_collection_detail(false, parse_id(&id)?)
+                .await
+                .map_err(|e| e.to_string())?
+                .to_string()),
+            None => Ok(json!(
+                self.store
+                    .list_task_collections(false)
+                    .await
+                    .map_err(|e| e.to_string())?
+            )
+            .to_string()),
+        }
+    }
+    #[tool(
+        description = "Add an unconditional legacy prerequisite to a writable task. Rejects cycles; prerequisites must finish before execution."
+    )]
+    async fn dependency_add(
+        &self,
+        Parameters(req): Parameters<DependencyRequest>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<String, String> {
+        let agent = authenticated_agent(&parts)?;
+        let task = parse_id(&req.task_id)?;
+        let predecessor = parse_id(&req.depends_on_task_id)?;
+        self.ensure_task_write_access(task, agent).await?;
+        self.ensure_task_read_access(predecessor, agent).await?;
+        Ok(json!(
+            self.store
+                .add_dependency(task, predecessor, agent)
+                .await
+                .map_err(|e| e.to_string())?
+        )
+        .to_string())
+    }
+    #[tool(
+        description = "Remove a prerequisite from a writable task using the existing dependency removal semantics."
+    )]
+    async fn dependency_remove(
+        &self,
+        Parameters(req): Parameters<DependencyRequest>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<String, String> {
+        let agent = authenticated_agent(&parts)?;
+        let task = parse_id(&req.task_id)?;
+        self.ensure_task_write_access(task, agent).await?;
+        self.store
+            .remove_dependency(task, parse_id(&req.depends_on_task_id)?, agent)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(json!({"removed":true}).to_string())
+    }
+
     #[tool(
         description = "Identify the authenticated technical AgentInstance, trusted authentication provenance, and latest self-reported identity. Self-reported fields are descriptive only and never grant authorization."
     )]
@@ -1192,6 +1304,12 @@ impl MorrowsMcp {
             .map_err(|e| e.to_string())?;
         let mut value = serde_json::to_value(&task).map_err(|e| e.to_string())?;
         value["execution"] = execution;
+        value["gate"] = json!(
+            self.store
+                .task_gate(task_id)
+                .await
+                .map_err(|e| e.to_string())?
+        );
         Ok(value.to_string())
     }
 
@@ -2079,6 +2197,11 @@ mod tests {
             "task_withdraw",
             "arbitrary_tool_call",
             "task_get",
+            "task_gate",
+            "task_chain_get",
+            "task_group_get",
+            "dependency_add",
+            "dependency_remove",
             "whoami",
             "task_list",
             "project_list",
@@ -2152,8 +2275,6 @@ mod tests {
             "launch_instruction_send",
             "task_create",
             "run_start",
-            "dependency_add",
-            "dependency_remove",
         ] {
             assert!(
                 mcp.tool_router.get(name).is_none(),

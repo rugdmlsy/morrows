@@ -19,6 +19,7 @@ mod identity;
 mod job_wait;
 mod milestone;
 mod runtime;
+mod task_graph;
 mod task_rework;
 
 enum ContextRevisionWrite {
@@ -1292,12 +1293,7 @@ impl Store {
         )
         .await?;
         if assignment_role == "executor" {
-            let blocked: bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM task_dependencies d JOIN tasks t ON t.id=d.depends_on_task_id WHERE d.task_id=? AND t.state!='done')").bind(run.task_id.to_string()).fetch_one(&mut *tx).await.map_err(storage)?;
-            if blocked {
-                return Err(DomainError::Conflict(
-                    "task has unfinished dependencies".into(),
-                ));
-            }
+            task_graph::enforce_gate_conn(&mut tx, run.task_id).await?;
             sqlx::query("UPDATE tasks SET state='done', updated_at=? WHERE id=?")
                 .bind(now.to_rfc3339())
                 .bind(run.task_id.to_string())
@@ -1672,7 +1668,7 @@ async fn start_run_tx(
     enforce_intake: bool,
 ) -> Result<Run, DomainError> {
     let row = sqlx::query(
-        "SELECT task_id,agent_instance_id,status,expires_at FROM assignments WHERE id=?",
+        "SELECT task_id,agent_instance_id,role,status,expires_at FROM assignments WHERE id=?",
     )
     .bind(assignment_id.to_string())
     .fetch_optional(&mut **tx)
@@ -1685,6 +1681,10 @@ async fn start_run_tx(
         return Err(DomainError::Conflict("assignment is not active".into()));
     }
     let task_id = parse_id(row.try_get("task_id").map_err(storage)?)?;
+    let role: String = row.try_get("role").map_err(storage)?;
+    if role == "executor" {
+        task_graph::enforce_gate_conn(tx, task_id).await?;
+    }
     let agent_id = parse_id(row.try_get("agent_instance_id").map_err(storage)?)?;
     if agent_id != actor_agent_id {
         return Err(DomainError::Conflict(
@@ -1924,12 +1924,7 @@ async fn claim_task_tx(
         return Err(DomainError::InvalidInput("role cannot be empty".into()));
     }
     if role == "executor" {
-        let blocked: bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM task_dependencies d JOIN tasks t ON t.id=d.depends_on_task_id WHERE d.task_id=? AND t.state!='done')").bind(task_id.to_string()).fetch_one(&mut **tx).await.map_err(storage)?;
-        if blocked {
-            return Err(DomainError::Conflict(
-                "task has unfinished dependencies".into(),
-            ));
-        }
+        task_graph::enforce_gate_conn(tx, task_id).await?;
     }
     let cleanup_blocked: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM runs WHERE task_id=? AND status IN ('interrupted','cleanup_pending','cancelling'))",

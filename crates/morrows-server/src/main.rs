@@ -14,6 +14,7 @@ mod operator_auth;
 mod runtime_executor;
 mod runtime_proxy;
 mod session;
+mod task_graph;
 
 use anyhow::Context;
 use axum::{
@@ -301,6 +302,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(collaboration::routes())
         .merge(session::routes())
         .merge(dispatch::routes())
+        .merge(task_graph::routes())
         .merge(delivery::routes())
         .merge(fleet::routes())
         .merge(intake::routes())
@@ -557,9 +559,9 @@ async fn get_task(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>, ApiError> {
-    Ok(Json(
-        serde_json::to_value(state.store.get_task(id).await?).unwrap(),
-    ))
+    let mut value = json!(state.store.get_task(id).await?);
+    value["gate"] = json!(state.store.task_gate(id).await?);
+    Ok(Json(value))
 }
 
 async fn delete_task(

@@ -175,7 +175,9 @@ pub struct Handoff {
 pub struct TaskDependency {
     pub task_id: Id,
     pub depends_on_task_id: Id,
-    pub created_by: Id,
+    /// Agent creator for legacy/employee-authored dependencies. Operator-authored chain edges leave this null.
+    pub created_by: Option<Id>,
+    pub created_by_actor_id: String,
     pub created_at: DateTime<Utc>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]

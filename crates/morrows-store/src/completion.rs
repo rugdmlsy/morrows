@@ -82,10 +82,12 @@ pub(super) async fn completion_check_conn(
         blockers.push(format!("task is {}", task.state));
     }
     if assignment.role == "executor" {
-        let dependencies: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM task_dependencies d JOIN tasks t ON t.id=d.depends_on_task_id WHERE d.task_id=? AND t.state!='done'")
-            .bind(task.id.to_string()).fetch_one(&mut *conn).await.map_err(storage)?;
-        if dependencies > 0 {
-            blockers.push(format!("task has {dependencies} unfinished dependencies"));
+        let gate = crate::task_graph::gate_conn(conn, task.id).await?;
+        if gate.state != morrows_core::GateState::Eligible {
+            blockers.push(format!(
+                "task chain gate: {}",
+                serde_json::to_string(&gate).map_err(storage)?
+            ));
         }
     }
     if result.get("all_acceptance_criteria_met") == Some(&Value::Bool(false))

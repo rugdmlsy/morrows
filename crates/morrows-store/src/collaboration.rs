@@ -393,8 +393,8 @@ impl Store {
             return Err(DomainError::Conflict("dependency cycle".into()));
         }
         let now = Utc::now();
-        let result=sqlx::query("INSERT OR IGNORE INTO task_dependencies(task_id,depends_on_task_id,created_by,created_at) VALUES(?,?,?,?)")
-            .bind(task_id.to_string()).bind(depends_on.to_string()).bind(actor.to_string()).bind(now.to_rfc3339()).execute(&mut *tx).await.map_err(storage)?;
+        let result=sqlx::query("INSERT OR IGNORE INTO task_dependencies(task_id,depends_on_task_id,created_by,created_by_actor_id,created_at) VALUES(?,?,?,?,?)")
+            .bind(task_id.to_string()).bind(depends_on.to_string()).bind(actor.to_string()).bind(format!("agent:{actor}")).bind(now.to_rfc3339()).execute(&mut *tx).await.map_err(storage)?;
         if result.rows_affected() == 0 {
             return Err(DomainError::Conflict("dependency already exists".into()));
         }
@@ -413,7 +413,8 @@ impl Store {
         Ok(TaskDependency {
             task_id,
             depends_on_task_id: depends_on,
-            created_by: actor,
+            created_by: Some(actor),
+            created_by_actor_id: format!("agent:{actor}"),
             created_at: now,
         })
     }
@@ -873,7 +874,8 @@ fn row_to_dependency(r: sqlx::sqlite::SqliteRow) -> Result<TaskDependency, Domai
     Ok(TaskDependency {
         task_id: parse_id(r.try_get("task_id").map_err(storage)?)?,
         depends_on_task_id: parse_id(r.try_get("depends_on_task_id").map_err(storage)?)?,
-        created_by: parse_id(r.try_get("created_by").map_err(storage)?)?,
+        created_by: parse_opt_id(r.try_get("created_by").map_err(storage)?)?,
+        created_by_actor_id: r.try_get("created_by_actor_id").map_err(storage)?,
         created_at: parse_dt(r.try_get("created_at").map_err(storage)?)?,
     })
 }

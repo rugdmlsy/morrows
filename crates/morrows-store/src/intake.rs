@@ -104,6 +104,7 @@ impl Store {
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(storage)?;
+        crate::task_graph::enforce_gate_conn(&mut tx, task_id).await?;
         let intake = load_intake_tx(&mut tx, assignment.id).await?;
         let blockers = intake_read_blockers_tx(self, &mut tx, &assignment, &intake).await?;
         if !blockers.is_empty() {
@@ -297,6 +298,13 @@ impl Store {
     ) -> Result<Assignment, DomainError> {
         let assignment = self.active_executor_assignment(task_id, agent_id).await?;
         if assignment.phase == INTAKE_PHASE_IMPLEMENTING {
+            let mut tx = self
+                .pool
+                .begin_with("BEGIN IMMEDIATE")
+                .await
+                .map_err(storage)?;
+            crate::task_graph::enforce_gate_conn(&mut tx, task_id).await?;
+            tx.commit().await.map_err(storage)?;
             return Ok(assignment);
         }
         if assignment.phase != INTAKE_PHASE_READY {
@@ -310,6 +318,7 @@ impl Store {
             .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(storage)?;
+        crate::task_graph::enforce_gate_conn(&mut tx, task_id).await?;
         let intake = load_intake_tx(&mut tx, assignment.id).await?;
         let blockers = intake_execution_blockers_tx(self, &mut tx, &assignment, &intake).await?;
         if !blockers.is_empty() {
@@ -626,7 +635,11 @@ pub(super) async fn enforce_execution_phase_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     assignment: &Assignment,
 ) -> Result<(), DomainError> {
-    if assignment.role != "executor" || assignment.phase == INTAKE_PHASE_IMPLEMENTING {
+    if assignment.role != "executor" {
+        return Ok(());
+    }
+    crate::task_graph::enforce_gate_conn(tx, assignment.task_id).await?;
+    if assignment.phase == INTAKE_PHASE_IMPLEMENTING {
         return Ok(());
     }
     if assignment.phase != INTAKE_PHASE_READY {

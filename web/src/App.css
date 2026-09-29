@@ -1978,3 +1978,299 @@ button.danger:hover,
 }
 .task-management-actions-cell { width: 1%; white-space: nowrap; }
 .task-management-actions-cell button + button { margin-left: 6px; }
+
+/* Task chains and task groups */
+.task-management-tabs {
+  display: flex;
+  gap: 8px;
+  padding: 2px 0 14px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.task-management-tabs button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--muted);
+  cursor: pointer;
+}
+.task-management-tabs button.selected {
+  border-color: var(--line-hover);
+  background: var(--panel-2);
+  color: var(--ink);
+}
+.task-management-tabs button span {
+  min-width: 20px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--ink) 7%, transparent);
+  font-size: 11px;
+  text-align: center;
+}
+.collection-management {
+  min-height: 0;
+  display: grid;
+  gap: 14px;
+  padding-top: 14px;
+}
+.collection-toolbar,
+.collection-form-row,
+.chain-edge-editor,
+.group-assignment-panel {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.collection-toolbar select,
+.collection-toolbar input,
+.collection-form-row select,
+.chain-edge-editor select,
+.chain-edge-editor input,
+.group-assignment-panel select {
+  min-width: 180px;
+  max-width: 360px;
+}
+.collection-toolbar select {
+  min-width: 240px;
+}
+.collection-detail {
+  display: grid;
+  gap: 18px;
+  padding: 18px;
+  border: 1px solid var(--line-soft);
+  border-radius: 12px;
+  background: var(--panel);
+}
+.collection-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+.collection-heading h2 {
+  margin: 4px 0;
+  font-size: 18px;
+}
+.collection-heading small,
+.collection-form-row small,
+.group-assignment-panel small {
+  color: var(--muted);
+}
+.chain-node-list,
+.group-member-list,
+.chain-edge-list,
+.group-assignment-results {
+  display: grid;
+  gap: 8px;
+}
+.chain-node,
+.group-member-row,
+.chain-edge-row,
+.group-assignment-result {
+  display: grid;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: 9px;
+  background: var(--panel-2);
+}
+.chain-node {
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  border-left-width: 3px;
+}
+.group-member-row {
+  grid-template-columns: minmax(0, 1fr) auto auto;
+}
+.chain-edge-row {
+  grid-template-columns: minmax(100px, 1fr) auto minmax(100px, 1fr) minmax(120px, auto) auto;
+}
+.chain-node > div,
+.group-member-row > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+.chain-node p {
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.chain-node small,
+.group-member-row small {
+  display: block;
+  color: var(--muted);
+}
+.text-button {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+  text-align: left;
+}
+.text-button:hover {
+  text-decoration: underline;
+}
+.compact-action {
+  padding: 5px 8px !important;
+  font-size: 11px;
+}
+.chain-gate-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: max-content;
+  padding: 3px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+.gate-eligible {
+  --gate-tone: var(--green);
+}
+.gate-waiting {
+  --gate-tone: var(--yellow);
+}
+.gate-excluded {
+  --gate-tone: var(--red);
+}
+.chain-node.gate-eligible,
+.chain-node.gate-waiting,
+.chain-node.gate-excluded {
+  border-left-color: var(--gate-tone);
+}
+.chain-gate-pill.gate-eligible,
+.chain-gate-pill.gate-waiting,
+.chain-gate-pill.gate-excluded {
+  color: var(--gate-tone);
+  border-color: color-mix(in srgb, var(--gate-tone) 40%, var(--line));
+  background: color-mix(in srgb, var(--gate-tone) 9%, transparent);
+}
+.chain-edge-editor {
+  padding-top: 14px;
+  border-top: 1px solid var(--line-soft);
+}
+.chain-edge-editor .mono-input {
+  min-width: 140px;
+}
+.chain-edge-row code {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+}
+.group-assignment-panel {
+  justify-content: space-between;
+  padding: 14px;
+  border: 1px dashed var(--line);
+  border-radius: 10px;
+}
+.group-assignment-panel > div {
+  display: grid;
+  gap: 3px;
+  flex: 1 1 260px;
+}
+.group-assignment-result {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+.group-assignment-result small {
+  grid-column: 1 / -1;
+  color: var(--muted);
+}
+.group-assignment-result.result-assigned {
+  border-left: 3px solid var(--green);
+}
+.group-assignment-result.result-blocked {
+  border-left: 3px solid var(--yellow);
+}
+.group-assignment-result.result-failed {
+  border-left: 3px solid var(--red);
+}
+
+.task-chain-gate-card {
+  display: grid;
+  gap: 12px;
+  margin: 0 0 18px;
+  padding: 14px 16px;
+  border: 1px solid var(--line-soft);
+  border-left: 3px solid var(--gate-tone, var(--line));
+  border-radius: 10px;
+  background: var(--panel);
+}
+.task-chain-gate-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.task-chain-gate-head > div {
+  display: grid;
+  gap: 2px;
+}
+.task-chain-gate-head small {
+  color: var(--muted);
+}
+.task-chain-gate-relations,
+.task-chain-successors {
+  display: grid;
+  gap: 7px;
+}
+.task-chain-gate-edge {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) auto minmax(120px, 1fr) minmax(100px, auto);
+  gap: 8px;
+  align-items: center;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--panel-2);
+}
+.task-chain-gate-edge small,
+.task-chain-gate-edge code {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.task-chain-successors {
+  grid-template-columns: auto repeat(auto-fit, minmax(120px, max-content));
+  align-items: center;
+}
+
+@media (max-width: 900px) {
+  .task-management-tabs,
+  .collection-toolbar,
+  .collection-form-row,
+  .chain-edge-editor,
+  .group-assignment-panel {
+    align-items: stretch;
+  }
+  .collection-toolbar,
+  .collection-form-row,
+  .chain-edge-editor,
+  .group-assignment-panel {
+    flex-direction: column;
+  }
+  .collection-toolbar select,
+  .collection-toolbar input,
+  .collection-form-row select,
+  .chain-edge-editor select,
+  .chain-edge-editor input,
+  .group-assignment-panel select {
+    width: 100%;
+    max-width: none;
+  }
+  .chain-node,
+  .group-member-row,
+  .chain-edge-row,
+  .task-chain-gate-edge {
+    grid-template-columns: 1fr;
+  }
+  .task-chain-successors {
+    grid-template-columns: 1fr;
+  }
+}
