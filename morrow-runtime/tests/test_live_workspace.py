@@ -19,6 +19,7 @@ import morrow_runtime.live_channel_routes as live_routes
 import morrow_runtime.session_runtime as session_runtime_module
 import morrow_runtime.tools as tools_module
 from morrow_runtime.auth import Principal
+from morrow_runtime.internal_tokens import RUNTIME_SCOPES
 from morrow_runtime.live_channel import (
     LIVE_EVENT_LIMIT,
     LIVE_RESOURCE_COMPAT_URIS,
@@ -29,7 +30,6 @@ from morrow_runtime.live_channel import (
     LiveChannelManager,
 )
 from morrow_runtime.main import _build_mcp_http_app
-from morrow_runtime.internal_tokens import RUNTIME_SCOPES
 from morrow_runtime.session_runtime import SessionRuntimeManager
 from morrow_runtime.settings import get_settings
 from morrow_runtime.tools import (

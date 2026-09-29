@@ -18,8 +18,8 @@ from starlette.testclient import TestClient
 
 import morrow_runtime.human_ui as ui
 from morrow_runtime.auth import AuthMiddleware, Principal
-from morrow_runtime.live_channel import get_live_channel_manager
 from morrow_runtime.internal_tokens import RUNTIME_SCOPES
+from morrow_runtime.live_channel import get_live_channel_manager
 from morrow_runtime.settings import get_settings
 
 

@@ -153,7 +153,11 @@ async def _node_call(
             if tool == "shell_kill":
                 return await kill_shell(str(args["session_id"]))
             if tool in {"runtime_agent_launch", "runtime_agent_status", "runtime_agent_stop"}:
-                from .runtime_agent import launch_runtime_agent, runtime_agent_status, stop_runtime_agent
+                from .runtime_agent import (
+                    launch_runtime_agent,
+                    runtime_agent_status,
+                    stop_runtime_agent,
+                )
                 if tool == "runtime_agent_launch":
                     return await launch_runtime_agent(args)
                 if tool == "runtime_agent_status":
