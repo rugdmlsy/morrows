@@ -147,6 +147,52 @@ async fn normalized_and_legacy_registration_preserve_identity() {
 }
 
 #[tokio::test]
+async fn morrows_oauth_reuses_the_pre_cutover_lsm_oauth_agent_instance() {
+    let store = Store::connect("sqlite::memory:").await.unwrap();
+    let client_id = "local-shell-mcp-existing-client";
+    let legacy_profile = store
+        .register_profile(input(json!({
+            "name":"LSM OAuth Client",
+            "provider":"lsm",
+            "kind":"external",
+            "metadata":{"auth_source":"lsm_oauth"}
+        })))
+        .await
+        .unwrap();
+    let legacy = store
+        .register_agent_instance(input(json!({
+            "profile_id":legacy_profile.id,
+            "name":format!("lsm-oauth:{client_id}"),
+            "external_instance_ref":client_id
+        })))
+        .await
+        .unwrap();
+
+    let current_profile = store
+        .register_profile(input(json!({
+            "name":"Morrows OAuth Client",
+            "provider":"morrows",
+            "kind":"external",
+            "metadata":{"auth_source":"morrows_oauth"}
+        })))
+        .await
+        .unwrap();
+    let duplicate = store
+        .register_agent_instance(input(json!({
+            "profile_id":current_profile.id,
+            "name":format!("morrows-oauth:{client_id}"),
+            "external_instance_ref":client_id
+        })))
+        .await
+        .unwrap();
+    assert_ne!(legacy.id, duplicate.id);
+
+    let resolved = store.resolve_morrows_oauth_agent(client_id).await.unwrap();
+    assert_eq!(resolved.id, legacy.id);
+    assert_eq!(resolved.external_instance_ref.as_deref(), Some(client_id));
+}
+
+#[tokio::test]
 async fn account_credential_reference_is_external_and_rebindable() {
     let store = Store::connect("sqlite::memory:").await.unwrap();
     let account = store

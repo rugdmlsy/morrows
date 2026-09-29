@@ -309,6 +309,44 @@ impl Store {
         if client_id.chars().count() > 256 || client_id.chars().any(char::is_control) {
             return Err(DomainError::InvalidInput("invalid OAuth client id".into()));
         }
+        // Preserve the technical AgentInstance across the LSM -> Morrows OAuth
+        // ownership cutover. The authenticated client_id stayed the same, so a
+        // new profile/name prefix must not split historical Task/Run ownership.
+        // Prefer the oldest matching OAuth identity; this also heals the brief
+        // cutover window where both prefixes may exist for one client_id.
+        let legacy_name = format!("lsm-oauth:{client_id}");
+        let morrows_name = format!("morrows-oauth:{client_id}");
+        if let Some(row) = sqlx::query(
+            "SELECT ai.*
+             FROM agent_instances ai
+             JOIN agent_profiles p ON p.id=ai.profile_id
+             WHERE ai.external_instance_ref=?
+               AND (ai.name=? OR ai.name=?)
+               AND p.provider IN ('lsm','morrows')
+             ORDER BY ai.created_at ASC, ai.id ASC
+             LIMIT 1",
+        )
+        .bind(client_id)
+        .bind(&legacy_name)
+        .bind(&morrows_name)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage)?
+        {
+            let existing = row_to_agent(row)?;
+            let now = Utc::now().to_rfc3339();
+            sqlx::query(
+                "UPDATE agent_instances
+                 SET status='online',last_heartbeat_at=?,archived_at=NULL
+                 WHERE id=?",
+            )
+            .bind(&now)
+            .bind(existing.id.to_string())
+            .execute(&self.pool)
+            .await
+            .map_err(storage)?;
+            return self.get_agent(existing.id).await;
+        }
         let profile = self
             .register_profile(RegisterProfile {
                 name: "Morrows OAuth Client".into(),
@@ -322,7 +360,7 @@ impl Store {
             profile_id: profile.id,
             account_id: None,
             machine_id: None,
-            name: format!("morrows-oauth:{client_id}"),
+            name: morrows_name,
             display_name: None,
             capabilities: None,
             external_instance_ref: Some(client_id.to_owned()),
