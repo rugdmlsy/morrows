@@ -872,8 +872,6 @@ impl Store {
             ("handoffs", "created_by"),
             ("launch_attempts", "agent_instance_id"),
             ("launch_profiles", "agent_instance_id"),
-            ("memory_entries", "agent_instance_id"),
-            ("memory_publications", "agent_instance_id"),
             ("message_threads", "created_by"),
             ("messages", "created_by"),
             ("messages", "recipient_agent_instance_id"),

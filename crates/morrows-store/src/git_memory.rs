@@ -614,6 +614,21 @@ async fn index_snapshot(
         }
         pending = next;
     }
+    // Git is authoritative after cutover. Publications have no inbound
+    // foreign-key references, so replace the project-local projection exactly.
+    // This repairs stale provenance keys (for example after an Agent identity
+    // canonicalization) without deleting MemoryEntry history.
+    sqlx::query(
+        "DELETE FROM memory_publications
+         WHERE memory_id IN (
+           SELECT id FROM memory_entries
+           WHERE scope_type='project' AND visibility='shared' AND project_id=?
+         )",
+    )
+    .bind(&data.project)
+    .execute(&mut *conn)
+    .await
+    .map_err(storage)?;
     for publication in &data.publications {
         insert_record(
             conn,
@@ -858,6 +873,26 @@ mod tests {
             store.get_memory_entry(result.id).await.unwrap().title,
             result.title
         );
+
+        // Publication provenance is also part of the Git-authoritative snapshot.
+        // Rebuild must remove a stale rewritten key rather than retaining both.
+        let alias = store.register_agent("alias", &[]).await.unwrap();
+        sqlx::query("UPDATE memory_publications SET agent_instance_id=? WHERE memory_id=?")
+            .bind(alias.id.to_string())
+            .bind(updated.id.to_string())
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        assert!(store.get_memory_entry(updated.id).await.is_err());
+        store.rebuild_project_memory_projection(a).await.unwrap();
+        let publisher: String = sqlx::query_scalar(
+            "SELECT agent_instance_id FROM memory_publications WHERE memory_id=?",
+        )
+        .bind(updated.id.to_string())
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(publisher, agent.to_string());
     }
 
     #[tokio::test]
