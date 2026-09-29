@@ -115,10 +115,10 @@ Caddy edge 直接转发到 `127.0.0.1:8787`。OAuth client、授权码、access 
 和 refresh token 的状态保存在 Morrows SQLite 中，不依赖 runtime 或独立 LSM。
 
 ChatGPT、`~/.codex`、`~/.codex-personal`、`~/.codex-mentor2` 分别注册独立
-client，统一连接 `https://mcp.xycdev.com/morrows`。授权要求 S256 PKCE 和
-`MORROWS_OAUTH_ADMIN_PIN`（至少 16 位随机字符）。access token 有效期一小时；
-refresh token 每次使用后轮换，重放会撤销整个授权族；授权族最长 90 天。
-WebUI 使用显式 `morrows:control` scope，MCP 默认使用 `morrows` scope。
+client，统一连接 `https://mcp.xycdev.com/morrows`。授权要求 S256 PKCE，并复用
+Morrows operator 登录/SSH 审批：普通 `morrows` scope 需要 operator 或 admin，
+`morrows:control` 需要 admin；不再维护单独的 OAuth approval secret。access token
+有效期一小时；refresh token 每次使用后轮换，重放会撤销整个授权族；授权族最长 90 天。
 
 旧 LSM/runtime token 不再接受；上线后每个客户端需要一次重新授权。
 `mrw_agent_*` 仅保留在内部 Run/CLI 路径，provider MCP 配置不再注入它。
@@ -151,7 +151,7 @@ MORROWS_MCP_URL=https://mcp.xycdev.com/morrows
 
 # 所有公网客户端使用上述 MORROWS_MCP_URL 和独立 OAuth client
 MORROWS_OAUTH_ISSUER=https://mcp.xycdev.com/morrows/auth
-# MORROWS_OAUTH_ADMIN_PIN 仅配置在 service.env，至少 16 位随机字符
+# OAuth consent 复用 Morrows operator 登录/审批，不需要单独 approval secret。
 
 # 内置 morrow-runtime sidecar（生产默认 loopback :8790）
 MORROWS_RUNTIME_CONTROL_URL=http://127.0.0.1:8790

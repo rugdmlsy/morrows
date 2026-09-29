@@ -50,9 +50,6 @@ export MORROWS_RUNTIME_PROXY_URL="${MORROWS_RUNTIME_PROXY_URL:-http://127.0.0.1:
 export MORROWS_RUNTIME_MCP_URL="${MORROWS_RUNTIME_MCP_URL:-https://mcp.xycdev.com/morrows/ui/runtime/mcp}"
 export MORROWS_MCP_URL="${MORROWS_MCP_URL:-https://mcp.xycdev.com/morrows}"
 export MORROWS_OAUTH_ISSUER="${MORROWS_OAUTH_ISSUER:-https://mcp.xycdev.com/morrows/auth}"
-morrows_oauth_pin="${MORROWS_OAUTH_ADMIN_PIN:-}"
-[[ ${#morrows_oauth_pin} -ge 16 ]] || deployment_guard_error
-unset morrows_oauth_pin
 export MORROWS_RUNTIME_SUBJECT="${MORROWS_RUNTIME_SUBJECT:-morrows-runtime}"
 unset runtime_control_key
 

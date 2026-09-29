@@ -34,7 +34,6 @@ export MORROWS_DEPLOY_GUARD_FILE="$fixture/guard"
 export MORROWS_SYSTEMD_UNIT="$fixture/unit"
 export MORROWS_RUNTIME_SYSTEMD_UNIT="$fixture/runtime-unit"
 export MORROWS_RUNTIME_ENV="$fixture/runtime.env"
-export MORROWS_OAUTH_ADMIN_PIN="test-morrows-oauth-pin"
 launch() { bash "$fixture/repo/scripts/run-vps.sh"; }
 expect_rejected() {
   local status=0

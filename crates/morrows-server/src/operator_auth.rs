@@ -1,7 +1,10 @@
 use super::*;
 use axum::{
     body::Body,
-    http::{Method, Request, header::AUTHORIZATION},
+    http::{
+        HeaderValue, Method, Request,
+        header::{AUTHORIZATION, COOKIE, SET_COOKIE},
+    },
     middleware::Next,
 };
 
@@ -51,8 +54,10 @@ pub async fn authenticate_operator_requests(
     let method = request.method().clone();
     let path = request.uri().path().to_owned();
 
+    let oauth_consent_approval =
+        method == Method::POST && path == "/morrows/auth/oauth/authorize/approve";
     if method == Method::OPTIONS
-        || !path.starts_with("/api/")
+        || (!path.starts_with("/api/") && !oauth_consent_approval)
         || path == "/api/health"
         || path == "/api/internal/runtime/job-events"
         || path == "/api/internal/lsm/job-events"
@@ -62,12 +67,27 @@ pub async fn authenticate_operator_requests(
         return next.run(request).await;
     }
 
-    if let Some(token) = request
+    let header_token = request
         .headers()
         .get(AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-    {
+        .and_then(|v| v.strip_prefix("Bearer "));
+    let oauth_cookie_token = oauth_consent_approval
+        .then(|| {
+            request
+                .headers()
+                .get(COOKIE)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|cookies| {
+                    cookies.split(';').find_map(|part| {
+                        part.trim()
+                            .strip_prefix("morrows_oauth_operator=")
+                            .filter(|value| !value.is_empty())
+                    })
+                })
+        })
+        .flatten();
+    if let Some(token) = header_token.or(oauth_cookie_token) {
         if let Some(identity) = crate::oauth::verify(&state.store, token).await {
             if !identity.control {
                 return unauthorized("Morrows control scope required");
@@ -80,12 +100,8 @@ pub async fn authenticate_operator_requests(
         }
     }
     let required = required_control_role(&method, &path);
-    let authorization = request
-        .headers()
-        .get(AUTHORIZATION)
-        .and_then(|value| value.to_str().ok());
-
-    let Some(authorization) = authorization else {
+    let token = header_token.or(oauth_cookie_token);
+    let Some(token) = token else {
         if state.require_operator_auth {
             return unauthorized("Bearer operator credential required");
         }
@@ -93,9 +109,6 @@ pub async fn authenticate_operator_requests(
             json!({"authenticated":false,"role":"local","auth_required":false}),
         ));
         return next.run(request).await;
-    };
-    let Some(token) = authorization.strip_prefix("Bearer ") else {
-        return unauthorized("Authorization must use Bearer credentials");
     };
 
     let mut identity =
@@ -130,7 +143,7 @@ pub async fn authenticate_operator_requests(
 }
 
 #[derive(Clone)]
-struct OperatorIdentity(Value);
+pub(crate) struct OperatorIdentity(pub(crate) Value);
 
 fn is_operator_login_route(method: &Method, path: &str) -> bool {
     // Neither endpoint approves anything. The random browser secret is required
@@ -140,6 +153,9 @@ fn is_operator_login_route(method: &Method, path: &str) -> bool {
 }
 
 fn required_control_role(method: &Method, path: &str) -> ControlRole {
+    if path == "/morrows/auth/oauth/authorize/approve" {
+        return ControlRole::Operator;
+    }
     if is_admin_route(method, path) {
         return ControlRole::Admin;
     }
@@ -240,7 +256,21 @@ async fn login_status(
         .store
         .operator_login_status(input.id, &input.token)
         .await?;
-    Ok(([("Cache-Control", "no-store")], Json(status)).into_response())
+    let approved = status.get("status").and_then(Value::as_str) == Some("approved");
+    let mut response = ([("Cache-Control", "no-store")], Json(status)).into_response();
+    if approved {
+        let cookie = format!(
+            "morrows_oauth_operator={}; Path=/morrows/auth; Secure; HttpOnly; SameSite=Strict; Max-Age=86400",
+            input.token
+        );
+        response.headers_mut().append(
+            SET_COOKIE,
+            HeaderValue::from_str(&cookie).map_err(|err| {
+                DomainError::Storage(format!("invalid operator OAuth cookie: {err}"))
+            })?,
+        );
+    }
+    Ok(response)
 }
 
 async fn issue_credential(
@@ -428,6 +458,26 @@ mod tests {
             .approve_operator_login(&login.code, "operator", 600)
             .await
             .unwrap();
+        let login_status = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/operator-login/status")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&json!({"id":login.id,"token":login.token})).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(login_status.status(), StatusCode::OK);
+        let oauth_cookie = login_status.headers()["set-cookie"].to_str().unwrap();
+        assert!(oauth_cookie.starts_with("morrows_oauth_operator=mrw_operator_"));
+        assert!(oauth_cookie.contains("Path=/morrows/auth"));
+        assert!(oauth_cookie.contains("HttpOnly"));
+        assert!(oauth_cookie.contains("SameSite=Strict"));
         let response = app
             .clone()
             .oneshot(request(
@@ -455,6 +505,51 @@ mod tests {
             .unwrap()
             .status(),
             StatusCode::FORBIDDEN
+        );
+    }
+
+    #[tokio::test]
+    async fn oauth_consent_approval_accepts_only_operator_or_admin_cookie() {
+        let store = Store::connect("sqlite::memory:").await.unwrap();
+        let viewer = store
+            .issue_operator_credential("viewer", "viewer", 600)
+            .await
+            .unwrap();
+        let operator = store
+            .issue_operator_credential("operator", "operator", 600)
+            .await
+            .unwrap();
+        let app = Router::new()
+            .route(
+                "/morrows/auth/oauth/authorize/approve",
+                post(|| async { "approved" }),
+            )
+            .layer(axum::middleware::from_fn_with_state(
+                OperatorAuthState::new(store, true, None),
+                authenticate_operator_requests,
+            ));
+        let consent = |token: &str| {
+            Request::builder()
+                .method(Method::POST)
+                .uri("/morrows/auth/oauth/authorize/approve")
+                .header("cookie", format!("morrows_oauth_operator={token}"))
+                .body(Body::empty())
+                .unwrap()
+        };
+        assert_eq!(
+            app.clone()
+                .oneshot(consent(&viewer.token))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            app.oneshot(consent(&operator.token))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
         );
     }
 

@@ -11,9 +11,12 @@ Neither standalone LSM nor morrow-runtime participates in public authentication.
 - Registration always creates a distinct client; names and redirects never deduplicate
   identities. Each Codex profile keeps its own client registration and credentials.
 - An authorization screen displays the client, redirect and requested scope and
-  requires `MORROWS_OAUTH_ADMIN_PIN` (at least 16 random characters). Missing/short
-  configuration disables authorization. Browser approval uses a single-use CSRF
-  token and a Secure/HttpOnly/SameSite cookie, with a global failed-approval limit.
+  reuses Morrows operator authentication. Normal `morrows` consent accepts operator
+  or admin authority; `morrows:control` requires admin. If the browser has no usable
+  operator session, the consent page starts the existing SSH-approved operator-login
+  flow and resumes automatically after approval. There is no separate OAuth approval
+  secret. Browser approval retains a single-use CSRF prompt and a scoped
+  Secure/HttpOnly/SameSite operator cookie.
 - Authorization codes expire after five minutes and are single use. Redirect URI,
   client, resource and S256 verifier must match. Only HTTPS or loopback HTTP
   redirect URIs are accepted, without fragments or embedded credentials.
@@ -45,7 +48,8 @@ Discovery URLs:
 The managed production deploy performs a one-time compatibility migration without
 making LSM or morrow-runtime a continuing authentication dependency:
 
-- it generates a Morrows-owned approval secret when none exists;
+- it removes the retired `MORROWS_OAUTH_ADMIN_PIN`; OAuth approval is delegated to
+  the existing Morrows operator login/approval model;
 - it copies the existing Cloudflare tunnel credential into Morrows private
   `service.env`, after which the Morrows connector no longer reads the LSM env;
 - it copies the previous morrow-runtime and standalone-LSM OAuth signing secrets
@@ -72,9 +76,9 @@ profile to complete OAuth beforehand; unattended launch does not approve itself.
 
 1. Review and merge the Mac commit, then push and deploy using the managed deploy
    script. Do not edit production source. This task does not perform deployment.
-2. Before deployment, back up the Morrows database. The managed deploy creates a
-   private Morrows approval PIN when needed and performs the bounded legacy-token /
-   client-registration migration described above; it does not print the secrets.
+2. Before deployment, back up the Morrows database. The managed deploy removes any
+   retired OAuth approval PIN and performs the bounded legacy-token / client-registration
+   migration described above; it does not print authentication secrets.
 3. Remove obsolete Agent-MCP and runtime public OAuth settings after verification.
    Runtime uses `LOCAL_SHELL_MCP_AUTH_MODE=internal`; its private signing secret
    defaults to its own persisted runtime state. Re-enroll any old private container
@@ -83,7 +87,9 @@ profile to complete OAuth beforehand; unattended launch does not approve itself.
    metadata, an unauthenticated MCP 401 challenge, authorization, refresh and revoke.
 5. Reinstall/update `~/.codex`, `~/.codex-personal`, `~/.codex-mentor2` to `/morrows`,
    removing old bearer/header overrides. Each Codex profile performs its own OAuth
-   login and stores its own client/access/refresh credentials. Existing ChatGPT and
+   login and stores its own client/access/refresh credentials. Consent reuses an
+   already-approved Morrows operator session or displays the existing SSH approval
+   command; normal MCP clients do not require admin approval. Existing ChatGPT and
    WebUI legacy bearer sessions remain usable during the fixed migration window and
    can reauthorize onto the new issuer without depending on runtime state.
 6. Verify MCP and refresh while runtime is stopped/restarted, then while standalone

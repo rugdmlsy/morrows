@@ -119,11 +119,13 @@ Public MCP, OAuth, WebUI and control-plane API authentication are owned by
 in the Morrows database across both server and runtime restarts.
 
 ChatGPT and all Codex profiles use `https://mcp.xycdev.com/morrows` with independent
-OAuth clients, S256 PKCE and rotating refresh tokens. Provider MCP configurations
-never inject `mrw_agent_*`; those credentials remain internal/run-bound. Legacy
-LSM/runtime tokens require one-time reauthorization. See [OAuth migration and
-production checks](docs/morrows-oauth.md). Standalone LSM and runtime restarts do
-not own or affect public OAuth state.
+OAuth clients, S256 PKCE and rotating refresh tokens. OAuth consent reuses Morrows
+operator authentication: the normal `morrows` scope requires operator/admin approval,
+while `morrows:control` requires admin. There is no separate OAuth approval secret.
+Provider MCP configurations never inject `mrw_agent_*`; those credentials remain
+internal/run-bound. Legacy LSM/runtime tokens require one-time reauthorization. See
+[OAuth migration and production checks](docs/morrows-oauth.md). Standalone LSM and
+runtime restarts do not own or affect public OAuth state.
 
 For local development, the previous tmux deployment remains available:
 
@@ -143,7 +145,7 @@ MORROWS_WEB_DIR=web/dist
 MORROWS_LAUNCH_DIR=data/launches
 MORROWS_MCP_URL=https://mcp.xycdev.com/morrows
 MORROWS_OAUTH_ISSUER=https://mcp.xycdev.com/morrows/auth
-# Set MORROWS_OAUTH_ADMIN_PIN in private service.env (16+ random characters).
+# OAuth consent reuses Morrows operator login/approval; no separate approval secret.
 # rmcp Host validation automatically allows the hostname from MORROWS_MCP_URL.
 # Add any extra Hosts as a comma-separated list when needed:
 # MORROWS_MCP_ALLOWED_HOSTS=internal.example:9443

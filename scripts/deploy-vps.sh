@@ -123,7 +123,6 @@ legacy_lsm_env=/home/morrow/.config/local-shell-mcp/service.env
 legacy_runtime_oauth_secret=/home/morrow/.local/state/morrow-runtime/oauth-jwt-secret
 python3 - "$service_env" "$legacy_lsm_env" "$legacy_runtime_oauth_secret" <<'PY'
 from pathlib import Path
-import secrets
 import sys
 import time
 
@@ -156,9 +155,7 @@ lines = service_path.read_text(encoding="utf-8").splitlines() if service_path.ex
 current = parse(service_path)
 legacy = parse(lsm_path)
 
-pin = current.get("MORROWS_OAUTH_ADMIN_PIN", "")
-if len(pin) < 16:
-    upsert(lines, "MORROWS_OAUTH_ADMIN_PIN", "mrw_oauth_pin_" + secrets.token_urlsafe(32))
+lines = [line for line in lines if not line.startswith("MORROWS_OAUTH_ADMIN_PIN=")]
 
 if not current.get("CLOUDFLARE_TUNNEL_TOKEN") and legacy.get("CLOUDFLARE_TUNNEL_TOKEN"):
     upsert(lines, "CLOUDFLARE_TUNNEL_TOKEN", legacy["CLOUDFLARE_TUNNEL_TOKEN"])
@@ -249,7 +246,7 @@ while (( SECONDS < deadline )); do
     grep -q '^MORROWS_RUNTIME_MCP_URL=https://mcp.xycdev.com/morrows/ui/runtime/mcp$' <<<"$env_names"
     grep -q '^MORROWS_MCP_URL=https://mcp.xycdev.com/morrows$' <<<"$env_names"
     grep -q '^MORROWS_OAUTH_ISSUER=https://mcp.xycdev.com/morrows/auth$' <<<"$env_names"
-    grep -q '^MORROWS_OAUTH_ADMIN_PIN=.' <<<"$env_names"
+    ! grep -q '^MORROWS_OAUTH_ADMIN_PIN=' <<<"$env_names"
     test "$(systemctl is-active morrow-runtime.service)" = active
     curl -fsS http://127.0.0.1:8790/healthz >/dev/null
     runtime_pid="$(systemctl show morrow-runtime.service -p MainPID --value)"

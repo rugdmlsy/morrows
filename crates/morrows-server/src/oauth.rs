@@ -2,8 +2,8 @@
 use super::*;
 use axum::{
     extract::{Form, Query},
-    http::{HeaderMap, HeaderValue},
-    response::{Html, Redirect},
+    http::{HeaderMap, HeaderValue, header::CONTENT_TYPE},
+    response::Html,
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use hmac::{Hmac, Mac};
@@ -14,12 +14,12 @@ use std::collections::BTreeMap;
 const RESOURCE: &str = "https://mcp.xycdev.com/morrows";
 const ACCESS_TTL: i64 = 3600;
 const FAMILY_TTL: i64 = 90 * 86400;
+const CONSENT_JS: &str = include_str!("oauth_consent.js");
 #[derive(Clone)]
 pub struct OAuthState {
     pub store: Store,
     pub resource: String,
     pub issuer: String,
-    pub pin: String,
 }
 impl OAuthState {
     pub fn from_env(store: Store) -> anyhow::Result<Self> {
@@ -42,7 +42,6 @@ impl OAuthState {
             store,
             resource,
             issuer: issuer.trim_end_matches('/').into(),
-            pin: env::var("MORROWS_OAUTH_ADMIN_PIN").unwrap_or_default(),
         })
     }
 }
@@ -58,8 +57,6 @@ struct Registry {
     tokens: BTreeMap<String, Token>,
     #[serde(default)]
     prompts: BTreeMap<String, Prompt>,
-    #[serde(default)]
-    failures: Vec<i64>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct Client {
@@ -107,17 +104,6 @@ fn secret() -> String {
 }
 fn hash(s: &str) -> String {
     URL_SAFE_NO_PAD.encode(Sha256::digest(s.as_bytes()))
-}
-fn constant_time_eq(a: &str, b: &str) -> bool {
-    let (a, b) = (a.as_bytes(), b.as_bytes());
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut difference = 0u8;
-    for (&left, &right) in a.iter().zip(b) {
-        difference |= left ^ right;
-    }
-    difference == 0
 }
 fn legacy_audience_matches(claims: &Value, resource: &str) -> bool {
     match claims.get("aud") {
@@ -243,7 +229,6 @@ async fn update<T: Send>(
             // Keep spent refresh hashes until the family's absolute expiry for replay detection.
             r.tokens
                 .retain(|_, t| r.grants.contains_key(&t.family) && (t.refresh || t.expires > n));
-            r.failures.retain(|t| *t > n - 300);
             let result = f(&mut r);
             *raw = serde_json::to_value(r).map_err(|e| DomainError::Storage(e.to_string()))?;
             Ok(result)
@@ -284,10 +269,12 @@ pub fn routes(state: OAuthState) -> Router {
             get(server_metadata),
         )
         .route("/morrows/auth/oauth/register", post(register))
+        .route("/morrows/auth/oauth/authorize", get(authorize_get))
         .route(
-            "/morrows/auth/oauth/authorize",
-            get(authorize_get).post(authorize_post),
+            "/morrows/auth/oauth/authorize/approve",
+            post(authorize_approve),
         )
+        .route("/morrows/auth/oauth/consent.js", get(consent_js))
         .route("/morrows/auth/oauth/token", post(token))
         .route("/morrows/auth/oauth/revoke", post(revoke))
         .with_state(state)
@@ -304,7 +291,7 @@ async fn no_store(request: Request<Body>, next: middleware::Next) -> Response {
     response.headers_mut().insert(
         "content-security-policy",
         HeaderValue::from_static(
-            "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+            "default-src 'none'; script-src 'self'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
         ),
     );
     response
@@ -391,7 +378,6 @@ struct Authorization {
     resource: Option<String>,
     scope: Option<String>,
     state: Option<String>,
-    pin: Option<String>,
     csrf: Option<String>,
 }
 fn approval_binding(a: &Authorization) -> String {
@@ -436,74 +422,146 @@ fn valid_authorization(s: &OAuthState, r: &Registry, a: &Authorization) -> bool 
         && requested_scope(a.scope.as_deref()).is_some()
         && a.state.as_ref().is_none_or(|v| v.len() <= 4096)
 }
+async fn consent_js() -> Response {
+    (
+        [(CONTENT_TYPE, "application/javascript; charset=utf-8")],
+        CONSENT_JS,
+    )
+        .into_response()
+}
+
+fn approval_role_allows(identity: &crate::operator_auth::OperatorIdentity, scope: &str) -> bool {
+    let role = identity.0.get("role").and_then(Value::as_str).unwrap_or("");
+    let needs_admin = scope
+        .split_whitespace()
+        .any(|value| value == "morrows:control");
+    if needs_admin {
+        role == "admin"
+    } else {
+        matches!(role, "operator" | "admin")
+    }
+}
+
 async fn authorize_get(
     State(s): State<OAuthState>,
     Query(a): Query<Authorization>,
 ) -> Result<Response, ApiError> {
-    if s.pin.len() < 16 {
-        return Ok((
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Morrows OAuth approval is not configured",
-        )
-            .into_response());
-    }
     Ok(update(&s.store, |r| {
-        if !valid_authorization(&s, r, &a) { return error("invalid_request"); }
-        if r.prompts.len() >= 1000 { return error("temporarily_unavailable"); }
-        let csrf = secret();
-        r.prompts.insert(hash(&csrf), Prompt { expires: now() + 300, binding: approval_binding(&a) });
-        let mut fields = String::new();
-        for (k,v) in serde_json::to_value(&a).unwrap().as_object().unwrap() {
-            if let Some(v) = v.as_str() { if k != "pin" && k != "csrf" { fields.push_str(&format!("<input type=\"hidden\" name=\"{}\" value=\"{}\">",escape(k),escape(v))); } }
+        if !valid_authorization(&s, r, &a) {
+            return error("invalid_request");
         }
+        if r.prompts.len() >= 1000 {
+            return error("temporarily_unavailable");
+        }
+        let csrf = secret();
+        r.prompts.insert(
+            hash(&csrf),
+            Prompt {
+                expires: now() + 300,
+                binding: approval_binding(&a),
+            },
+        );
+        let mut fields = String::new();
+        for (key, value) in serde_json::to_value(&a).unwrap().as_object().unwrap() {
+            if let Some(value) = value.as_str() {
+                if key != "csrf" {
+                    fields.push_str(&format!(
+                        "<input type=\"hidden\" name=\"{}\" value=\"{}\">",
+                        escape(key),
+                        escape(value)
+                    ));
+                }
+            }
+        }
+        let scope = requested_scope(a.scope.as_deref()).unwrap();
+        let needs_admin = scope
+            .split_whitespace()
+            .any(|value| value == "morrows:control");
         let name = &r.clients[&a.client_id].name;
-        let mut response = Html(format!("<!doctype html><title>Morrows authorization</title><h1>Authorize Morrows</h1><p>Allow {} to access Morrows?</p><p>Permissions: {}</p><p>Redirect: {}</p><form method=\"post\">{}<input type=\"hidden\" name=\"csrf\" value=\"{}\"><label>Morrows approval secret <input type=\"password\" name=\"pin\" required autocomplete=\"off\"></label><button>Authorize</button></form>", escape(name),escape(a.scope.as_deref().unwrap_or("morrows")),escape(&a.redirect_uri),fields,csrf)).into_response();
-        response.headers_mut().insert("set-cookie", HeaderValue::from_str(&format!("morrows_oauth_csrf={csrf}; Path=/morrows/auth; Secure; HttpOnly; SameSite=Strict; Max-Age=300")).unwrap());
+        let role = if needs_admin { "admin" } else { "operator" };
+        let mut response = Html(format!(
+            "<!doctype html><meta charset=\"utf-8\"><title>Morrows authorization</title>\
+             <h1>Authorize Morrows</h1>\
+             <p>Allow {} to access Morrows?</p>\
+             <p>Permissions: {}</p>\
+             <p>Redirect: {}</p>\
+             <p>This approval reuses your Morrows {} login. No separate OAuth secret is required.</p>\
+             <form id=\"oauth-consent\" action=\"/morrows/auth/oauth/authorize/approve\" data-requires-admin=\"{}\">\
+             {}<input type=\"hidden\" name=\"csrf\" value=\"{}\">\
+             <button id=\"oauth-approve\" type=\"button\">Authorize with Morrows</button></form>\
+             <p id=\"oauth-status\" role=\"status\"></p><pre id=\"oauth-command\"></pre>\
+             <script src=\"/morrows/auth/oauth/consent.js\" defer></script>",
+            escape(name),
+            escape(&scope),
+            escape(&a.redirect_uri),
+            role,
+            needs_admin,
+            fields,
+            csrf
+        ))
+        .into_response();
+        response.headers_mut().insert(
+            "set-cookie",
+            HeaderValue::from_str(&format!(
+                "morrows_oauth_csrf={csrf}; Path=/morrows/auth; Secure; HttpOnly; SameSite=Strict; Max-Age=300"
+            ))
+            .unwrap(),
+        );
         response
-    }).await?)
+    })
+    .await?)
 }
-async fn authorize_post(
+
+async fn authorize_approve(
     State(s): State<OAuthState>,
     headers: HeaderMap,
+    axum::Extension(identity): axum::Extension<crate::operator_auth::OperatorIdentity>,
     Form(a): Form<Authorization>,
 ) -> Result<Response, ApiError> {
     Ok(update(&s.store, |r| {
-        if s.pin.len() < 16 || !valid_authorization(&s, r, &a) {
+        if !valid_authorization(&s, r, &a) {
             return error("invalid_request");
         }
         let csrf = a.csrf.as_deref().unwrap_or("");
         let cookie_ok = headers
             .get("cookie")
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|v| {
-                v.split(';')
-                    .any(|p| p.trim() == format!("morrows_oauth_csrf={csrf}"))
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|cookies| {
+                cookies
+                    .split(';')
+                    .any(|part| part.trim() == format!("morrows_oauth_csrf={csrf}"))
             });
         if !cookie_ok
             || !r
                 .prompts
                 .get(&hash(csrf))
-                .is_some_and(|p| p.binding == approval_binding(&a))
+                .is_some_and(|prompt| prompt.binding == approval_binding(&a))
         {
             return error("invalid_request");
         }
-        r.prompts.remove(&hash(csrf));
-        if r.failures.len() >= 10 {
+        let scope = requested_scope(a.scope.as_deref()).unwrap();
+        if !approval_role_allows(&identity, &scope) {
             return (
-                StatusCode::TOO_MANY_REQUESTS,
-                Json(json!({"error":"temporarily_unavailable"})),
+                StatusCode::FORBIDDEN,
+                Json(json!({
+                    "error": if scope.split_whitespace().any(|value| value == "morrows:control") {
+                        "Morrows admin approval required"
+                    } else {
+                        "Morrows operator approval required"
+                    }
+                })),
             )
                 .into_response();
         }
-        if !constant_time_eq(&hash(a.pin.as_deref().unwrap_or("")), &hash(&s.pin)) {
-            r.failures.push(now());
-            return error("access_denied");
-        }
+
+        // Consume the prompt only after identity and role checks pass. A stale or
+        // insufficient operator session can therefore sign in and retry safely.
+        r.prompts.remove(&hash(csrf));
         let code = secret();
         r.codes.insert(
             hash(&code),
             Code {
-                scope: requested_scope(a.scope.as_deref()).unwrap(),
+                scope,
                 client: a.client_id,
                 redirect: a.redirect_uri.clone(),
                 challenge: a.code_challenge,
@@ -515,7 +573,7 @@ async fn authorize_post(
         if let Some(state) = a.state {
             target.query_pairs_mut().append_pair("state", &state);
         }
-        Redirect::to(target.as_str()).into_response()
+        Json(json!({"redirect_to": target.as_str()})).into_response()
     })
     .await?)
 }
@@ -700,7 +758,6 @@ pub(crate) mod tests {
             store,
             resource: RESOURCE.into(),
             issuer: format!("{RESOURCE}/auth"),
-            pin: "test-secret-long-enough".into(),
         }
     }
     async fn post(app: &Router, endpoint: &str, fields: &[(&str, &str)]) -> Response {
@@ -1066,9 +1123,12 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn discovery_registration_consent_and_csrf() {
+    async fn discovery_registration_consent_and_operator_approval() {
         let s = state(Store::connect("sqlite::memory:").await.unwrap());
-        let app = routes(s.clone());
+        let app = routes(s.clone()).layer(middleware::from_fn_with_state(
+            crate::operator_auth::OperatorAuthState::new(s.store.clone(), true, None),
+            crate::operator_auth::authenticate_operator_requests,
+        ));
         let metadata = body(
             app.clone()
                 .oneshot(
@@ -1127,27 +1187,62 @@ pub(crate) mod tests {
             .next()
             .unwrap()
             .to_owned();
-        let csrf = cookie.split_once('=').unwrap().1;
-        url.query_pairs_mut()
-            .append_pair("pin", &s.pin)
-            .append_pair("csrf", csrf);
-        let make = |cookie: &str| {
-            Request::builder()
-                .method("POST")
-                .uri(url.path())
-                .header("cookie", cookie)
-                .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from(url.query().unwrap().to_owned()))
+        let page_text = String::from_utf8(
+            axum::body::to_bytes(page.into_body(), usize::MAX)
+                .await
                 .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(page_text.contains("reuses your Morrows operator login"));
+        assert!(!page_text.contains("approval secret"));
+        let csrf = cookie.split_once('=').unwrap().1;
+        url.query_pairs_mut().append_pair("csrf", csrf);
+        let form = url.query().unwrap().to_owned();
+        let make = |cookie: &str, token: Option<&str>| {
+            let mut request = Request::builder()
+                .method("POST")
+                .uri("/morrows/auth/oauth/authorize/approve")
+                .header("cookie", cookie)
+                .header("content-type", "application/x-www-form-urlencoded");
+            if let Some(token) = token {
+                request = request.header("authorization", format!("Bearer {token}"));
+            }
+            request.body(Body::from(form.clone())).unwrap()
         };
         assert_eq!(
-            app.clone().oneshot(make("")).await.unwrap().status(),
+            app.clone()
+                .oneshot(make(&cookie, None))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let login = s
+            .store
+            .request_operator_login("OAuth consent")
+            .await
+            .unwrap();
+        s.store
+            .approve_operator_login(&login.code, "operator", 600)
+            .await
+            .unwrap();
+        assert_eq!(
+            app.clone()
+                .oneshot(make("", Some(&login.token)))
+                .await
+                .unwrap()
+                .status(),
             StatusCode::BAD_REQUEST
         );
-        let redirect = app.clone().oneshot(make(&cookie)).await.unwrap();
-        assert_eq!(redirect.status(), StatusCode::SEE_OTHER);
-        let location =
-            reqwest::Url::parse(redirect.headers()["location"].to_str().unwrap()).unwrap();
+        let approved = app
+            .clone()
+            .oneshot(make(&cookie, Some(&login.token)))
+            .await
+            .unwrap();
+        assert_eq!(approved.status(), StatusCode::OK);
+        let approved = body(approved).await;
+        let location = reqwest::Url::parse(approved["redirect_to"].as_str().unwrap()).unwrap();
         let fields: BTreeMap<_, _> = location.query_pairs().into_owned().collect();
         assert_eq!(fields["state"], "state-value");
         assert_eq!(
@@ -1157,10 +1252,102 @@ pub(crate) mod tests {
             StatusCode::OK
         );
         assert_eq!(
-            app.clone().oneshot(make(&cookie)).await.unwrap().status(),
+            app.clone()
+                .oneshot(make(&cookie, Some(&login.token)))
+                .await
+                .unwrap()
+                .status(),
             StatusCode::BAD_REQUEST
         );
         assert!(!valid_redirect("https://example.com/callback#fragment"));
         assert!(!valid_redirect("http://evil.example/callback"));
+    }
+
+    #[tokio::test]
+    async fn control_scope_requires_admin_without_consuming_consent() {
+        let s = state(Store::connect("sqlite::memory:").await.unwrap());
+        update(&s.store, |r| {
+            r.clients.insert(
+                "control-client".into(),
+                Client {
+                    name: "Morrows WebUI".into(),
+                    redirects: vec!["http://localhost:1455/callback".into()],
+                },
+            );
+        })
+        .await
+        .unwrap();
+        let app = routes(s.clone()).layer(middleware::from_fn_with_state(
+            crate::operator_auth::OperatorAuthState::new(s.store.clone(), true, None),
+            crate::operator_auth::authenticate_operator_requests,
+        ));
+        let verifier = "c".repeat(43);
+        let challenge = hash(&verifier);
+        let mut url = reqwest::Url::parse("https://unused/morrows/auth/oauth/authorize").unwrap();
+        url.query_pairs_mut().extend_pairs([
+            ("client_id", "control-client"),
+            ("redirect_uri", "http://localhost:1455/callback"),
+            ("response_type", "code"),
+            ("code_challenge", &challenge),
+            ("code_challenge_method", "S256"),
+            ("resource", RESOURCE),
+            ("scope", "morrows morrows:control"),
+        ]);
+        let page = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("{}?{}", url.path(), url.query().unwrap()))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let cookie = page.headers()["set-cookie"]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let csrf = cookie.split_once('=').unwrap().1;
+        url.query_pairs_mut().append_pair("csrf", csrf);
+        let form = url.query().unwrap().to_owned();
+        let make = |token: &str| {
+            Request::builder()
+                .method("POST")
+                .uri("/morrows/auth/oauth/authorize/approve")
+                .header("cookie", &cookie)
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(form.clone()))
+                .unwrap()
+        };
+        let operator = s.store.request_operator_login("operator").await.unwrap();
+        s.store
+            .approve_operator_login(&operator.code, "operator", 600)
+            .await
+            .unwrap();
+        assert_eq!(
+            app.clone()
+                .oneshot(make(&operator.token))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        let admin = s.store.request_operator_login("admin").await.unwrap();
+        s.store
+            .approve_operator_login(&admin.code, "admin", 600)
+            .await
+            .unwrap();
+        assert_eq!(
+            app.clone()
+                .oneshot(make(&admin.token))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::OK
+        );
     }
 }
