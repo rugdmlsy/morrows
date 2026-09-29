@@ -1992,6 +1992,10 @@ impl MorrowsMcp {
     }
 }
 
+fn should_eager_tool_list_refresh(client_name: &str) -> bool {
+    client_name != "codex-mcp-client"
+}
+
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for MorrowsMcp {
     fn get_info(&self) -> ServerConfig {
@@ -2011,11 +2015,22 @@ impl ServerHandler for MorrowsMcp {
 
     async fn on_initialized(&self, context: rmcp::service::NotificationContext<rmcp::RoleServer>) {
         // The ChatGPT connector may retain a previously discovered tool catalog across
-        // MCP reconnects. Advertise listChanged and proactively request one refresh on
-        // every fresh MCP session so newly deployed first-class employee tools do not
-        // remain hidden behind arbitrary_tool_call.
+        // MCP reconnects, so keep the eager refresh workaround for those clients.
+        //
+        // Codex already builds its tool catalog during initialization. Sending an
+        // immediate list-changed notification after an OAuth challenge/retry can make
+        // Codex refresh and cancel the just-authenticated client, leaving the earlier
+        // AuthRequired startup state cached as unavailable.
+        let client_name = context
+            .peer
+            .peer_info()
+            .map(|info| info.client_info.name.clone())
+            .unwrap_or_default();
+        if !should_eager_tool_list_refresh(&client_name) {
+            return;
+        }
         if let Err(error) = context.peer.notify_tool_list_changed().await {
-            tracing::debug!(%error, "client did not accept tools/list_changed notification");
+            tracing::debug!(%error, %client_name, "client did not accept tools/list_changed notification");
         }
     }
 }
@@ -2195,6 +2210,13 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[test]
+    fn eager_tool_list_refresh_skips_codex_but_keeps_connector_compatibility() {
+        assert!(!should_eager_tool_list_refresh("codex-mcp-client"));
+        assert!(should_eager_tool_list_refresh("chatgpt"));
+        assert!(should_eager_tool_list_refresh(""));
     }
 
     #[tokio::test]
