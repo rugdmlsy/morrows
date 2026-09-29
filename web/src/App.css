@@ -1040,8 +1040,8 @@ h3 { margin: 20px 0 8px; color: var(--ink-3); font: 700 calc(8px * var(--font-sc
 .task-management-page {
   height: 100%;
   min-height: 0;
-  display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr);
+  display: flex;
+  flex-direction: column;
   gap: 14px;
   overflow: hidden;
 }
@@ -1122,6 +1122,7 @@ h3 { margin: 20px 0 8px; color: var(--ink-3); font: 700 calc(8px * var(--font-sc
 }
 
 .task-management-table-wrap {
+  flex: 1 1 0;
   min-height: 0;
   overflow: auto;
   border: 1px solid var(--line-soft);
