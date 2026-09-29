@@ -81,6 +81,10 @@ uv sync --project morrow-runtime --frozen --no-dev
   npm ci
   npm run build
 )
+# sqlx::migrate! embeds migration files at compile time, but Cargo does not reliably
+# invalidate morrows-store when a commit changes only migrations. Clean that package
+# so every deployment embeds the exact migration set from the deployed commit.
+cargo clean -p morrows-store
 cargo build --release -p morrows-server -p morrows-cli
 mkdir -p "$HOME/.local/bin"
 install -m 0755 target/release/morrows "$HOME/.local/bin/morrows"
