@@ -30,7 +30,8 @@ async fn restart_recovery_fails_session_runtime_revokes_credential_and_requeues_
                 "agent_instance_id": agent.id,
                 "program": "/bin/echo",
                 "default_cwd": temp,
-                "enabled": true
+                "enabled": true,
+                "metadata": {"execution_backend": "local"}
             }))
             .unwrap(),
         )

@@ -32,7 +32,7 @@ Morrows separates the system into three decoupled planes with explicit boundarie
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
-Standalone LSM is not the managed execution plane. It remains an independent service for ChatGPT/WebUI OAuth, administration, repair and ARP. The managed provider execution path uses the forked `morrow-runtime`; see [morrow-runtime.md](morrow-runtime.md).
+Standalone LSM is not the managed execution plane. Ordinary Morrows Tasks default to `morrow-runtime`; standalone LSM is retained only for compatibility/OAuth, diagnostics, emergency rescue and ARP, and must not create a parallel Task execution lifecycle. See [morrow-runtime.md](morrow-runtime.md).
 
 ## Terminology Normalization & Naming Model (去歧义术语规范)
 
@@ -46,7 +46,7 @@ To prevent severe ambiguity caused by bare usages of common words like `session`
 | **工作分配** | `WorkAssignment` | `Assignment` | 某个 Agent 实例对工作项中某特定角色的有期限责任（带租约 Lease） |
 | **工作执行**（前端：执行记录） | `WorkExecution` | `Run` | 某个 Agent 对一次工作分配的具体逻辑执行过程 |
 | **启动记录 / 启动尝试** | `AgentLaunch` | `LaunchAttempt` | 系统为推进工作执行，实际启动一次具体 Agent 进程的记录 |
-| **运行空间** | `RuntimeScope` | morrow-runtime `Logical Session` | morrow-runtime 为一次工作执行划定的安全隔离执行范围与权限作用域 |
+| **运行空间** | `RuntimeScope` | `RunRuntimeBinding.runtime_scope_id` | morrow-runtime 内部执行隔离范围；底层 legacy Logical Session 仅是实现细节，不拥有工作生命周期 |
 | **执行任务** | `RuntimeJob` | morrow-runtime `Job` | 在运行空间内异步执行的具体机器任务（如 `cargo test`） |
 | **持久终端 / 终端** | `PersistentShell` | `shell session` | 运行空间内维持环境与状态的常驻命令行交互终端 |
 | **浏览器实例** | `BrowserInstance` | `browser session` | 运行空间内受控的有状态浏览器实例 |

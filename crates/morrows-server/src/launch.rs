@@ -11,6 +11,10 @@ use tokio::{fs, io::AsyncWriteExt, process::Command};
 
 pub fn routes() -> Router<AppState> {
     Router::new()
+        .route(
+            "/internal/runtime/job-events",
+            post(ingest_runtime_job_event),
+        )
         .route("/internal/lsm/job-events", post(ingest_lsm_job_event))
         .route("/launch-profiles", get(profile_list).post(profile_create))
         .route("/launch-profiles/{id}", get(profile_get))
@@ -38,6 +42,32 @@ pub fn routes() -> Router<AppState> {
         .route("/tasks/{id}/launch-instructions", get(task_instructions))
 }
 
+async fn ingest_runtime_job_event(
+    State(s): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(event): Json<RuntimeJobTerminalEvent>,
+) -> Result<Json<Value>, ApiError> {
+    let configured = std::env::var("MORROWS_RUNTIME_CONTROL_KEY")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            ApiError(DomainError::Storage(
+                "morrow-runtime event ingest is not configured".into(),
+            ))
+        })?;
+    let supplied = headers
+        .get("x-morrow-runtime-control-key")
+        .and_then(|value| value.to_str().ok());
+    if supplied != Some(configured.as_str()) {
+        return Err(ApiError(DomainError::InvalidInput(
+            "valid morrow-runtime control credential required".into(),
+        )));
+    }
+    let inserted = s.store.ingest_runtime_job_terminal_event(event).await?;
+    Ok(Json(json!({"accepted":true,"duplicate":!inserted})))
+}
+
 async fn ingest_lsm_job_event(
     State(s): State<AppState>,
     headers: axum::http::HeaderMap,
@@ -49,7 +79,7 @@ async fn ingest_lsm_job_event(
         .filter(|value| !value.is_empty())
         .ok_or_else(|| {
             ApiError(DomainError::Storage(
-                "LSM event ingest is not configured".into(),
+                "standalone LSM compatibility event ingest is not configured".into(),
             ))
         })?;
     let supplied = headers
@@ -57,11 +87,13 @@ async fn ingest_lsm_job_event(
         .and_then(|value| value.to_str().ok());
     if supplied != Some(configured.as_str()) {
         return Err(ApiError(DomainError::InvalidInput(
-            "valid LSM control credential required".into(),
+            "valid standalone LSM compatibility credential required".into(),
         )));
     }
     let inserted = s.store.ingest_lsm_job_terminal_event(event).await?;
-    Ok(Json(json!({"accepted":true,"duplicate":!inserted})))
+    Ok(Json(
+        json!({"accepted":true,"duplicate":!inserted,"compatibility":"standalone_lsm"}),
+    ))
 }
 
 async fn profile_list(State(s): State<AppState>) -> Result<Json<Value>, ApiError> {
@@ -101,10 +133,10 @@ async fn launch_stop(
     Path(id): Path<Id>,
 ) -> Result<Json<Value>, ApiError> {
     if let Some(run_id) = s.store.get_launch_attempt(id).await?.run_id
-        && s.store.has_lsm_runtime(run_id).await?
+        && s.store.has_managed_runtime(run_id).await?
     {
         return Err(ApiError(DomainError::Conflict(
-            "LSM-bound Runs must be cancelled through /runs/{id}/cancel".into(),
+            "managed-runtime Runs must be cancelled through /runs/{id}/cancel".into(),
         )));
     }
     Ok(Json(json!(s.store.stop_launch_attempt(id).await?)))
@@ -121,12 +153,12 @@ async fn run_restart(
             run.status
         ))));
     }
-    if s.store.run_lsm_binding(id).await?.is_none() && s.store.has_lsm_runtime(id).await? {
+    if s.store.run_runtime_binding(id).await?.is_none() && s.store.has_managed_runtime(id).await? {
         let control = MorrowRuntimeControl::from_env()
             .map_err(|err| ApiError(DomainError::Storage(err.to_string())))?
             .ok_or_else(|| {
                 ApiError(DomainError::Conflict(
-                    "LSM control is not configured".into(),
+                    "morrow-runtime control is not configured".into(),
                 ))
             })?;
         let task = s.store.get_task(run.task_id).await?;
@@ -151,8 +183,12 @@ async fn run_cancel(
                 tracing::warn!(%id, %err, "capability revocation pending after Run cancel");
             }
         }
-        Ok(None) => tracing::warn!(%id, "LSM control is not configured; Run cleanup pending"),
-        Err(err) => tracing::warn!(%id, %err, "LSM control is invalid; Run cleanup pending"),
+        Ok(None) => {
+            tracing::warn!(%id, "morrow-runtime control is not configured; Run cleanup pending")
+        }
+        Err(err) => {
+            tracing::warn!(%id, %err, "morrow-runtime control is invalid; Run cleanup pending")
+        }
     }
     Ok(Json(json!(run)))
 }
@@ -175,11 +211,11 @@ pub(crate) async fn revoke_task_cancelling_runs(store: &Store, task_id: Id) {
     let control = match MorrowRuntimeControl::from_env() {
         Ok(Some(control)) => control,
         Ok(None) => {
-            tracing::warn!(%task_id, "LSM control is not configured; Task Run cleanup remains pending");
+            tracing::warn!(%task_id, "morrow-runtime control is not configured; Task Run cleanup remains pending");
             return;
         }
         Err(err) => {
-            tracing::warn!(%task_id, %err, "LSM control is invalid; Task Run cleanup remains pending");
+            tracing::warn!(%task_id, %err, "morrow-runtime control is invalid; Task Run cleanup remains pending");
             return;
         }
     };
@@ -194,16 +230,16 @@ async fn run_execution(
     State(s): State<AppState>,
     Path(id): Path<Id>,
 ) -> Result<Json<Value>, ApiError> {
-    let binding = s.store.run_lsm_binding(id).await?;
+    let binding = s.store.run_runtime_binding(id).await?;
     let Some(binding) = binding else {
         return Ok(Json(json!({"binding":null,"observation":null})));
     };
     let observation = match MorrowRuntimeControl::from_env() {
-        Ok(Some(control)) => match control.observe(&binding.logical_session_id).await {
+        Ok(Some(control)) => match control.observe(&binding.runtime_scope_id).await {
             Ok(data) => data,
             Err(err) => json!({"error":err.to_string()}),
         },
-        Ok(None) => json!({"error":"LSM control is not configured"}),
+        Ok(None) => json!({"error":"morrow-runtime control is not configured"}),
         Err(err) => json!({"error":err.to_string()}),
     };
     let evidence = s.store.run_execution_evidence(id).await?;
@@ -241,19 +277,19 @@ async fn run_job_output(
 ) -> Result<Json<Value>, ApiError> {
     let binding = s
         .store
-        .run_lsm_binding(id)
+        .run_runtime_binding(id)
         .await?
-        .ok_or_else(|| ApiError(DomainError::NotFound("Run LSM binding".into())))?;
+        .ok_or_else(|| ApiError(DomainError::NotFound("Run runtime binding".into())))?;
     let control = MorrowRuntimeControl::from_env()
         .map_err(|err| ApiError(DomainError::Storage(err.to_string())))?
         .ok_or_else(|| {
             ApiError(DomainError::Conflict(
-                "LSM control is not configured".into(),
+                "morrow-runtime control is not configured".into(),
             ))
         })?;
     let output = control
         .job_tail(
-            &binding.logical_session_id,
+            &binding.runtime_scope_id,
             &job_id,
             query.machine.as_deref().unwrap_or("local"),
         )
@@ -275,31 +311,31 @@ pub async fn runtime_sweep(store: Store) {
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
     loop {
         interval.tick().await;
-        if let Ok(runs) = store.unbound_lsm_runs().await {
+        if let Ok(runs) = store.unbound_runtime_runs().await {
             for run_id in runs {
                 let run = match store.get_run(run_id).await {
                     Ok(run) => run,
                     Err(err) => {
-                        tracing::warn!(%run_id, %err, "cannot read unbound LSM Run");
+                        tracing::warn!(%run_id, %err, "cannot read unbound managed-runtime Run");
                         continue;
                     }
                 };
                 let task = match store.get_task(run.task_id).await {
                     Ok(task) => task,
                     Err(err) => {
-                        tracing::warn!(%run_id, %err, "cannot read LSM Run Task");
+                        tracing::warn!(%run_id, %err, "cannot read managed-runtime Run Task");
                         continue;
                     }
                 };
                 if let Err(err) = control.provision_run(&store, run_id, &task.title).await {
-                    tracing::warn!(%run_id, %err, "LSM provisioning replay remains pending");
+                    tracing::warn!(%run_id, %err, "runtime provisioning replay remains pending");
                 }
             }
         }
         if let Err(err) = store.renew_interrupted_assignments().await {
             tracing::error!(%err, "failed renewing interrupted Assignments");
         }
-        if let Ok(runs) = store.interrupted_lsm_runs().await {
+        if let Ok(runs) = store.interrupted_runtime_runs().await {
             for run_id in runs {
                 if let Err(err) = control.revoke_for_run(&store, run_id).await {
                     tracing::warn!(%run_id, %err, "failed revoking interrupted Agent capability");
@@ -313,7 +349,7 @@ pub async fn runtime_sweep(store: Store) {
                 }
             }
         }
-        if let Ok(runs) = store.pending_lsm_cleanup_runs().await {
+        if let Ok(runs) = store.pending_runtime_cleanup_runs().await {
             for run_id in runs {
                 if store
                     .has_active_launch_attempt(run_id)
@@ -322,7 +358,7 @@ pub async fn runtime_sweep(store: Store) {
                 {
                     continue;
                 }
-                let Some(binding) = store.run_lsm_binding(run_id).await.ok().flatten() else {
+                let Some(binding) = store.run_runtime_binding(run_id).await.ok().flatten() else {
                     continue;
                 };
                 if let Err(err) = control.revoke_for_run(&store, run_id).await {
@@ -330,20 +366,20 @@ pub async fn runtime_sweep(store: Store) {
                     continue;
                 }
                 match control
-                    .cleanup_run(&store, run_id, &binding.logical_session_id, false)
+                    .cleanup_run(&store, run_id, &binding.runtime_scope_id, false)
                     .await
                 {
                     Ok(true) => {
-                        if let Err(err) = store.complete_lsm_cleanup(run_id).await {
+                        if let Err(err) = store.complete_runtime_cleanup(run_id).await {
                             tracing::error!(%run_id, %err, "failed recording completed cleanup");
                         }
                     }
-                    Ok(false) => tracing::warn!(%run_id, "LSM cleanup remains pending"),
-                    Err(err) => tracing::warn!(%run_id, %err, "LSM cleanup failed; will retry"),
+                    Ok(false) => tracing::warn!(%run_id, "runtime cleanup remains pending"),
+                    Err(err) => tracing::warn!(%run_id, %err, "runtime cleanup failed; will retry"),
                 }
             }
         }
-        if let Ok(runs) = store.completed_lsm_runs().await {
+        if let Ok(runs) = store.completed_runtime_runs().await {
             for run_id in runs {
                 if store
                     .has_active_launch_attempt(run_id)
@@ -352,7 +388,7 @@ pub async fn runtime_sweep(store: Store) {
                 {
                     continue;
                 }
-                let Some(binding) = store.run_lsm_binding(run_id).await.ok().flatten() else {
+                let Some(binding) = store.run_runtime_binding(run_id).await.ok().flatten() else {
                     continue;
                 };
                 if let Err(err) = control.revoke_for_run(&store, run_id).await {
@@ -360,17 +396,17 @@ pub async fn runtime_sweep(store: Store) {
                     continue;
                 }
                 match control
-                    .cleanup_run(&store, run_id, &binding.logical_session_id, true)
+                    .cleanup_run(&store, run_id, &binding.runtime_scope_id, true)
                     .await
                 {
                     Ok(true) => {
-                        if let Err(err) = store.mark_lsm_terminalized(run_id).await {
+                        if let Err(err) = store.mark_runtime_scope_terminalized(run_id).await {
                             tracing::error!(%run_id, %err, "failed recording Session finish");
                         }
                     }
-                    Ok(false) => tracing::warn!(%run_id, "LSM Session finish remains pending"),
+                    Ok(false) => tracing::warn!(%run_id, "runtime scope finish remains pending"),
                     Err(err) => {
-                        tracing::warn!(%run_id, %err, "LSM Session finish failed; will retry")
+                        tracing::warn!(%run_id, %err, "runtime scope finish failed; will retry")
                     }
                 }
             }
@@ -465,7 +501,7 @@ pub async fn delivery_worker_loop(store: Store) {
         let wait_candidates = match store.run_job_wait_resume_candidates().await {
             Ok(value) => value,
             Err(err) => {
-                tracing::error!(%err, "LSM job wait resume scan failed");
+                tracing::error!(%err, "runtime job wait resume scan failed");
                 continue;
             }
         };
@@ -474,11 +510,11 @@ pub async fn delivery_worker_loop(store: Store) {
                 Ok(attempt) => tracing::info!(
                     %outbox_id,
                     launch_attempt_id = %attempt.id,
-                    "queued same-Run continuation for LSM job terminal event"
+                    "queued same-Run continuation for runtime job terminal event"
                 ),
                 Err(DomainError::Conflict(_)) => {}
                 Err(err) => {
-                    tracing::error!(%outbox_id, %err, "failed to queue LSM job continuation")
+                    tracing::error!(%outbox_id, %err, "failed to queue runtime job continuation")
                 }
             }
         }
@@ -559,7 +595,7 @@ async fn execute_claimed_launch(store: Store, job: ClaimedLaunchJob) -> anyhow::
     let execution_result = match &target {
         RuntimeExecutorTarget::Local => {
             store
-                .begin_launch_attempt_with_lsm(job.attempt.id, subject)
+                .begin_launch_attempt_with_local_compat(job.attempt.id, subject)
                 .await
         }
         RuntimeExecutorTarget::MorrowRuntime { .. } => {
@@ -690,7 +726,7 @@ async fn execute_remote_agent(
         None
     };
     let runtime_session_id = match agent_binding.as_ref() {
-        Some(binding) => binding.logical_session_id.clone(),
+        Some(binding) => binding.runtime_scope_id.clone(),
         None => {
             control
                 .provision_run(&store, execution.run.id, &execution.task.title)
@@ -716,8 +752,8 @@ async fn execute_remote_agent(
     }
     if let Some(binding) = &agent_binding {
         prompt.push_str(&format!(
-            "\nmorrow-runtime execution context: {}. Use only this Logical Session for runtime calls. Morrows owns Session lifecycle; do not start, finish, cancel, or delete it.\n",
-            binding.logical_session_id,
+            "\nMorrows internal execution scope for this Run: {}. Use it only when a low-level morrow-runtime tool requires a scope identifier. It is not a Morrows Session, Task, or Run identity; do not create, finish, cancel, or delete execution scopes yourself.\n",
+            binding.runtime_scope_id,
         ));
     } else {
         prompt.push_str("\nThis is an intake-only launch. Morrows has not issued morrow-runtime execution capability. Complete task_intake, then call task_interview_start and resolve material uncertainties with the Human. When nothing material remains unresolved, call task_interview_finalize. Do not implement or modify external state until a later launch has Assignment phase=implementing.\n");
@@ -1005,8 +1041,20 @@ pub async fn recover_remote_launch_monitors(store: Store) -> anyhow::Result<usiz
             tracing::error!(launch_attempt_id=%attempt.id, "remote launch resolved to non-runtime target during recovery");
             continue;
         };
-        let Some(binding) = store.run_lsm_binding(run_id).await? else {
-            tracing::error!(launch_attempt_id=%attempt.id, %run_id, "remote launch has no runtime Session binding during recovery");
+        let binding = if let Some(binding) = store.run_runtime_binding(run_id).await? {
+            binding
+        } else if store.has_managed_runtime(run_id).await? {
+            let task = store.get_task(attempt.task_id).await?;
+            control.provision_run(&store, run_id, &task.title).await?;
+            store.run_runtime_binding(run_id).await?.ok_or_else(|| {
+                anyhow::anyhow!("runtime scope replay did not persist a Run binding")
+            })?
+        } else {
+            tracing::error!(
+                launch_attempt_id=%attempt.id,
+                %run_id,
+                "remote launch has no managed-runtime provisioning intent during recovery"
+            );
             continue;
         };
         let child_store = store.clone();
@@ -1019,7 +1067,7 @@ pub async fn recover_remote_launch_monitors(store: Store) -> anyhow::Result<usiz
                 run_id,
                 child_control,
                 worker_name,
-                binding.logical_session_id,
+                binding.runtime_scope_id,
                 attempt.external_session_ref.clone(),
             )
             .await
@@ -1268,8 +1316,8 @@ async fn execute_codebuddy_with_root(
     }
     if let Some(binding) = &agent_binding {
         prompt.push_str(&format!(
-            "\nmorrow-runtime execution context: {}. Use only this Logical Session for runtime calls. Morrows owns Session lifecycle; do not start, finish, cancel, or delete it.\n",
-            binding.logical_session_id,
+            "\nMorrows internal execution scope for this Run: {}. Use it only when a low-level morrow-runtime tool requires a scope identifier. It is not a Morrows Session, Task, or Run identity; do not create, finish, cancel, or delete execution scopes yourself.\n",
+            binding.runtime_scope_id,
         ));
     } else {
         prompt.push_str("\nThis is an intake-only launch. Morrows has not issued morrow-runtime execution capability. Complete task_intake, then call task_interview_start and resolve material uncertainties with the Human. The discussion may happen in the Morrows Task Session or in your current provider conversation. When nothing material remains unresolved, call task_interview_finalize with the current understanding, implementation plan, and unresolved_questions=[]. Session message IDs are optional audit metadata, not a gate. There is no separate operator approval step. After finalize, stop this read-only turn; Morrows will relaunch the implementation runtime automatically. Do not implement or modify external state until a new launch has Assignment phase=implementing.\n");
@@ -1578,8 +1626,8 @@ async fn execute_codex_with_root(
     }
     if let Some(binding) = &agent_binding {
         prompt.push_str(&format!(
-            "\nmorrow-runtime execution context: {}. Use only this Logical Session for runtime calls. Morrows owns Session lifecycle; do not start, finish, cancel, or delete it. morrow-runtime will reject old Session IDs from resumed Session history.\n",
-            binding.logical_session_id,
+            "\nMorrows internal execution scope for this Run: {}. Use it only when a low-level morrow-runtime tool requires a scope identifier. It is not a Morrows Session, Task, or Run identity; do not manage its lifecycle. morrow-runtime rejects stale scope identifiers from resumed provider history.\n",
+            binding.runtime_scope_id,
         ));
     } else {
         prompt.push_str("\nThis is an intake-only launch. Morrows has not issued morrow-runtime execution capability. Complete task_intake, then call task_interview_start and resolve material uncertainties with the Human. The discussion may happen in the Morrows Task Session or in your current provider conversation. When nothing material remains unresolved, call task_interview_finalize with the current understanding, implementation plan, and unresolved_questions=[]. Session message IDs are optional audit metadata, not a gate. There is no separate operator approval step. After finalize, stop this read-only turn; Morrows will relaunch the implementation runtime automatically. Do not implement or modify external state until a new launch has Assignment phase=implementing.\n");
@@ -1861,12 +1909,12 @@ async fn build_job_wait_resume_prompt(
     }
     let mode = wait.resume_mode.as_deref().unwrap_or("continue");
     let directive = if mode == "reconcile" {
-        "The LSM outcome is lost, not success. Reconcile the referenced job and its durable output/status evidence before deciding whether to retry, fail, or continue; do not represent the awaited work as completed."
+        "The runtime job outcome is lost, not success. Reconcile the referenced job and its durable output/status evidence before deciding whether to retry, fail, or continue; do not represent the awaited work as completed."
     } else {
         "Continue this same Run from the saved resume plan. Treat the terminal status as an observed job outcome, not as proof that the overall Task is complete."
     };
     Ok(format!(
-        "\nLSM job wait resumed: machine={machine}; job_id={job_id}; terminal_status={status}; terminal_reason={terminal_reason}; resume_mode={mode}. Saved reason: {reason}. Saved resume plan: {plan}. {directive} Summary/result reference: {summary}.\n",
+        "\nRuntime job wait resumed: machine={machine}; job_id={job_id}; terminal_status={status}; terminal_reason={terminal_reason}; resume_mode={mode}. Saved reason: {reason}. Saved resume plan: {plan}. {directive} Summary/result reference: {summary}.\n",
         machine = wait.source_machine,
         job_id = wait.job_id,
         status = wait.terminal_status.as_deref().unwrap_or("unknown"),
@@ -2141,7 +2189,7 @@ mod tests {
             .unwrap();
         store.claim_launch_job().await.unwrap().unwrap();
         let run = store
-            .begin_launch_attempt_with_lsm(attempt.id, Some("shared-runtime"))
+            .begin_launch_attempt_with_local_compat(attempt.id, Some("shared-runtime"))
             .await
             .unwrap()
             .run;

@@ -3,9 +3,9 @@
 `morrow-runtime` is Morrows' managed execution plane. It is forked from the standalone Local Shell MCP (LSM) runtime code, but it has a different ownership boundary:
 
 - **Morrows Control Plane** owns Project, Task, Assignment, Run, Session, AgentInstance, Account, Machine, dispatch, permissions, Human Interview, Memory/Milestone/Handoff and provider lifecycle semantics.
-- **morrow-runtime** owns worker registration/heartbeat, machine-local process execution, RuntimeScope/Logical Session, Job/Shell/files, provider process supervision and low-level audit/evidence.
+- **morrow-runtime** owns worker registration/heartbeat, machine-local process execution, internal RuntimeScope, Job/Shell/files, provider process supervision and low-level audit/evidence. Its historical `Logical Session` object is an implementation detail, not a second Morrows work/session lifecycle.
 - **Provider Plane** owns provider-private model threads and resume references.
-- **Standalone LSM remains independent.** It may continue to provide ChatGPT/WebUI OAuth, administration, repair and ARP workflows. Morrows does not use its control key as the provider execution runtime.
+- **Standalone LSM remains independent and rescue-only for ordinary Morrows work.** It may provide OAuth compatibility, diagnostics, emergency repair and ARP, but Task execution does not depend on a standalone-LSM Logical Session.
 
 ## Machine authority
 
@@ -40,7 +40,7 @@ Both Task LaunchAttempts and direct Morrows Session runtime attempts use the sam
 
 For `morrow_runtime`:
 
-1. Morrows creates or replays a runtime Logical Session with an idempotency key.
+1. Morrows creates or replays one internal RuntimeScope with an idempotency key derived from the Run. The legacy `/sessions` API is an implementation detail; Morrows records only `RunRuntimeBinding.runtime_scope_id`.
 2. Morrows issues a scoped runtime capability when the Agent is authorized to execute.
 3. Morrows issues the normal short-lived `mrw_agent_*` employee credential.
 4. The target worker materializes private generated files and starts the provider process as a durable runtime Job.
@@ -48,7 +48,7 @@ For `morrow_runtime`:
 
 Task intake may have transport without an execution capability. Implementation authority is still controlled by the Morrows Assignment phase.
 
-Direct Session runtimes receive a dedicated runtime Logical Session and scoped capability; they remain Morrows Sessions rather than Task Runs.
+Direct Morrows Session runtimes receive a dedicated internal RuntimeScope and scoped capability; the conversation remains a Morrows Session while RuntimeScope is execution plumbing.
 
 ## Restart and lost-response behavior
 
@@ -127,3 +127,12 @@ The deployment probe checks both fields through the public edge. Existing
 standalone-LSM token migration stays restricted to the existing Morrows path
 and configured legacy issuer, audience and signing secret; the new resource
 binding does not broaden that compatibility rule.
+
+
+## Default execution policy
+
+For `codex_cli` and `codebuddy_cli` LaunchProfiles, omitted `metadata.execution_backend` now means `morrow_runtime`. Migration 0036 freezes pre-cutover profiles that relied on the old implicit behavior by writing `execution_backend=local`. `local` remains an explicit compatibility/test backend; standalone LSM is not a normal execution backend.
+
+The control-plane identity chain is `Task -> Assignment -> Run -> RunRuntimeBinding -> RuntimeScope -> worker/process/jobs`. Only Task/Assignment/Run own context, milestones, handoffs and completion. RuntimeScope is low-level execution state. A runtime restart or lost scope-binding response replays onto the same Run rather than creating a second work execution.
+
+Migration 0036 copies legacy `run_lsm_bindings` / `run_lsm_provisioning` into canonical runtime tables and converts job-wait correlation from `logical_session_id` to `runtime_scope_id`. `RuntimeJobTerminalEvent` and `/internal/runtime/job-events` are canonical; `/internal/lsm/job-events` remains a standalone-LSM compatibility adapter.

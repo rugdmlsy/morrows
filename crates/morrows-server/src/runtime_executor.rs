@@ -19,7 +19,7 @@ pub async fn resolve(
         .metadata
         .get("execution_backend")
         .and_then(|value| value.as_str())
-        .unwrap_or("local");
+        .unwrap_or("morrow_runtime");
     match backend {
         "local" => Ok(RuntimeExecutorTarget::Local),
         "morrow_runtime" => {
@@ -84,11 +84,11 @@ mod tests {
                 "adapter":"codex_cli",
                 "agent_instance_id":agent.id,
                 "program":"/opt/codex/bin/codex",
-                "default_cwd":"/srv/work",
-                "metadata":{"execution_backend":"morrow_runtime"}
+                "default_cwd":"/srv/work"
             })))
             .await
             .unwrap();
+        assert_eq!(launch.metadata["execution_backend"], "morrow_runtime");
         match resolve(&store, &launch, agent.id).await.unwrap() {
             RuntimeExecutorTarget::MorrowRuntime {
                 machine,

@@ -42,7 +42,7 @@ async fn interrupted_run_restarts_with_one_primary_session() {
     store.claim_launch_job().await.unwrap().unwrap();
     let first_execution = store.begin_launch_attempt(first.id).await.unwrap();
     let run_id = first_execution.run.id;
-    store.bind_run_lsm(run_id, "s_first").await.unwrap();
+    store.bind_run_runtime(run_id, "s_first").await.unwrap();
     store
         .try_adopt_run_capability(run_id, "cap_1")
         .await
@@ -57,7 +57,7 @@ async fn interrupted_run_restarts_with_one_primary_session() {
         "active"
     );
     let deadline = store
-        .run_lsm_binding(run_id)
+        .run_runtime_binding(run_id)
         .await
         .unwrap()
         .unwrap()
@@ -73,17 +73,17 @@ async fn interrupted_run_restarts_with_one_primary_session() {
     assert_eq!(second_execution.run.id, run_id);
     assert_eq!(
         store
-            .run_lsm_binding(run_id)
+            .run_runtime_binding(run_id)
             .await
             .unwrap()
             .unwrap()
-            .logical_session_id,
+            .runtime_scope_id,
         "s_first"
     );
     assert_eq!(store.get_run(run_id).await.unwrap().status, "running");
     assert!(
         store
-            .run_lsm_binding(run_id)
+            .run_runtime_binding(run_id)
             .await
             .unwrap()
             .unwrap()
@@ -104,7 +104,7 @@ async fn cancelling_is_not_cancelled_until_cleanup_confirms() {
     store.claim_launch_job().await.unwrap().unwrap();
     let execution = store.begin_launch_attempt(attempt.id).await.unwrap();
     store
-        .bind_run_lsm(execution.run.id, "s_cancel")
+        .bind_run_runtime(execution.run.id, "s_cancel")
         .await
         .unwrap();
     store.request_run_cancel(execution.run.id).await.unwrap();
@@ -121,7 +121,10 @@ async fn cancelling_is_not_cancelled_until_cleanup_confirms() {
         store.get_run(execution.run.id).await.unwrap().status,
         "cancelling"
     );
-    let final_run = store.complete_lsm_cleanup(execution.run.id).await.unwrap();
+    let final_run = store
+        .complete_runtime_cleanup(execution.run.id)
+        .await
+        .unwrap();
     assert_eq!(final_run.status, "cancelled");
     assert_eq!(final_run.failure_reason, None);
     let old_assignment = store.get_assignment(assignment_id).await.unwrap();
@@ -144,16 +147,16 @@ async fn cancelling_is_not_cancelled_until_cleanup_confirms() {
     let next_execution = store.begin_launch_attempt(next_attempt.id).await.unwrap();
     assert_ne!(next_execution.run.id, execution.run.id);
     store
-        .bind_run_lsm(next_execution.run.id, "s_new")
+        .bind_run_runtime(next_execution.run.id, "s_new")
         .await
         .unwrap();
     assert_eq!(
         store
-            .run_lsm_binding(next_execution.run.id)
+            .run_runtime_binding(next_execution.run.id)
             .await
             .unwrap()
             .unwrap()
-            .logical_session_id,
+            .runtime_scope_id,
         "s_new"
     );
 }
@@ -171,7 +174,7 @@ async fn cancelling_active_task_preserves_lsm_cleanup_and_terminal_task_state() 
     store.claim_launch_job().await.unwrap().unwrap();
     let execution = store.begin_launch_attempt(attempt.id).await.unwrap();
     store
-        .bind_run_lsm(execution.run.id, "s_task_cancel")
+        .bind_run_runtime(execution.run.id, "s_task_cancel")
         .await
         .unwrap();
 
@@ -191,7 +194,10 @@ async fn cancelling_active_task_preserves_lsm_cleanup_and_terminal_task_state() 
     );
     assert!(store.launch_stop_requested(attempt.id).await.unwrap());
 
-    let final_run = store.complete_lsm_cleanup(execution.run.id).await.unwrap();
+    let final_run = store
+        .complete_runtime_cleanup(execution.run.id)
+        .await
+        .unwrap();
     assert_eq!(final_run.status, "cancelled");
     assert_eq!(
         store.get_task(assignment.task_id).await.unwrap().state,
@@ -249,7 +255,7 @@ async fn one_semantic_event_can_have_multiple_execution_evidence_refs() {
 }
 
 #[tokio::test]
-async fn unbound_lsm_run_recovers_after_launcher_restart() {
+async fn active_unbound_runtime_binding_is_replayable_after_daemon_restart() {
     let (store, assignment_id, profile_id) = prepared().await;
     let attempt = store
         .enqueue_launch(input(json!({
@@ -259,51 +265,38 @@ async fn unbound_lsm_run_recovers_after_launcher_restart() {
         .unwrap();
     store.claim_launch_job().await.unwrap().unwrap();
     let execution = store
-        .begin_launch_attempt_with_lsm(attempt.id, Some("shared-runtime"))
+        .begin_launch_attempt_with_runtime(attempt.id, Some("shared-runtime"))
         .await
         .unwrap();
     let run_id = execution.run.id;
     assert_eq!(
         store
-            .run_lsm_provisioning_subject(run_id)
+            .run_runtime_provisioning_subject(run_id)
             .await
             .unwrap()
             .as_deref(),
         Some("shared-runtime")
     );
-    assert!(store.run_lsm_binding(run_id).await.unwrap().is_none());
+    assert!(store.run_runtime_binding(run_id).await.unwrap().is_none());
 
-    // The LSM POST may already have succeeded when the Morrows process dies.
-    // Startup recovery must retain the Run and its Assignment for keyed replay.
-    assert_eq!(store.recover_launch_jobs_after_restart().await.unwrap(), 1);
-    assert_eq!(store.get_run(run_id).await.unwrap().status, "interrupted");
+    // The morrow-runtime scope POST may already have succeeded when Morrows dies.
+    // Managed processes are not terminalized like local children. The same Run stays
+    // active, its durable provisioning key is discoverable, and replay binds the
+    // recovered scope to that Run without creating a second work execution.
+    assert_eq!(store.recover_launch_jobs_after_restart().await.unwrap(), 0);
+    assert_eq!(store.get_run(run_id).await.unwrap().status, "running");
     assert_eq!(
         store.get_assignment(assignment_id).await.unwrap().status,
         "active"
     );
-    assert_eq!(store.unbound_lsm_runs().await.unwrap(), vec![run_id]);
-    store.renew_interrupted_assignments().await.unwrap();
-    let recovered = store.bind_run_lsm(run_id, "s_replayed").await.unwrap();
-    assert!(recovered.restart_deadline_at.is_some());
-    assert!(
-        store
-            .get_assignment(assignment_id)
-            .await
-            .unwrap()
-            .expires_at
-            >= recovered.restart_deadline_at.unwrap()
-    );
-    let restart = store.enqueue_run_restart(run_id).await.unwrap();
-    assert_eq!(restart.restart_run_id, Some(run_id));
-    assert_eq!(
-        store
-            .run_lsm_binding(run_id)
-            .await
-            .unwrap()
-            .unwrap()
-            .logical_session_id,
-        "s_replayed"
-    );
+    assert_eq!(store.unbound_runtime_runs().await.unwrap(), vec![run_id]);
+    let recovered = store
+        .bind_run_runtime(run_id, "scope_replayed")
+        .await
+        .unwrap();
+    assert_eq!(recovered.run_id, run_id);
+    assert_eq!(recovered.runtime_scope_id, "scope_replayed");
+    assert!(recovered.restart_deadline_at.is_none());
 }
 
 #[tokio::test]
@@ -317,7 +310,7 @@ async fn cancellation_intent_persists_before_an_unbound_session_is_recovered() {
         .unwrap();
     store.claim_launch_job().await.unwrap().unwrap();
     let execution = store
-        .begin_launch_attempt_with_lsm(attempt.id, Some("shared-runtime"))
+        .begin_launch_attempt_with_local_compat(attempt.id, Some("shared-runtime"))
         .await
         .unwrap();
     let run_id = execution.run.id;
@@ -326,7 +319,7 @@ async fn cancellation_intent_persists_before_an_unbound_session_is_recovered() {
         "cancelling"
     );
     assert_eq!(
-        store.pending_lsm_cleanup_runs().await.unwrap(),
+        store.pending_runtime_cleanup_runs().await.unwrap(),
         vec![run_id]
     );
     store
@@ -334,11 +327,11 @@ async fn cancellation_intent_persists_before_an_unbound_session_is_recovered() {
         .await
         .unwrap();
     store
-        .bind_run_lsm(run_id, "s_recovered_for_cleanup")
+        .bind_run_runtime(run_id, "s_recovered_for_cleanup")
         .await
         .unwrap();
     assert_eq!(
-        store.complete_lsm_cleanup(run_id).await.unwrap().status,
+        store.complete_runtime_cleanup(run_id).await.unwrap().status,
         "cancelled"
     );
 }
@@ -354,12 +347,15 @@ async fn cancellation_wins_while_capability_issuance_is_paused() {
         .unwrap();
     store.claim_launch_job().await.unwrap().unwrap();
     let run_id = store
-        .begin_launch_attempt_with_lsm(attempt.id, Some("shared-runtime"))
+        .begin_launch_attempt_with_local_compat(attempt.id, Some("shared-runtime"))
         .await
         .unwrap()
         .run
         .id;
-    store.bind_run_lsm(run_id, "s_issue_race").await.unwrap();
+    store
+        .bind_run_runtime(run_id, "s_issue_race")
+        .await
+        .unwrap();
 
     let (issued_tx, issued_rx) = tokio::sync::oneshot::channel();
     let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
@@ -383,7 +379,7 @@ async fn cancellation_wins_while_capability_issuance_is_paused() {
     ));
     assert!(
         store
-            .run_lsm_binding(run_id)
+            .run_runtime_binding(run_id)
             .await
             .unwrap()
             .unwrap()
@@ -413,12 +409,15 @@ async fn old_revoke_cannot_clear_a_newly_adopted_capability() {
         .unwrap();
     store.claim_launch_job().await.unwrap().unwrap();
     let run_id = store
-        .begin_launch_attempt_with_lsm(attempt.id, Some("shared-runtime"))
+        .begin_launch_attempt_with_local_compat(attempt.id, Some("shared-runtime"))
         .await
         .unwrap()
         .run
         .id;
-    store.bind_run_lsm(run_id, "s_rotation_race").await.unwrap();
+    store
+        .bind_run_runtime(run_id, "s_rotation_race")
+        .await
+        .unwrap();
     store
         .try_adopt_run_capability(run_id, "old-capability")
         .await
@@ -433,7 +432,7 @@ async fn old_revoke_cannot_clear_a_newly_adopted_capability() {
         .unwrap();
     assert_eq!(
         store
-            .run_lsm_binding(run_id)
+            .run_runtime_binding(run_id)
             .await
             .unwrap()
             .unwrap()
@@ -454,11 +453,11 @@ async fn repeated_restart_uses_the_latest_known_codex_conversation() {
         .unwrap();
     store.claim_launch_job().await.unwrap().unwrap();
     let execution = store
-        .begin_launch_attempt_with_lsm(first.id, Some("shared-runtime"))
+        .begin_launch_attempt_with_local_compat(first.id, Some("shared-runtime"))
         .await
         .unwrap();
     store
-        .bind_run_lsm(execution.run.id, "s_same_run")
+        .bind_run_runtime(execution.run.id, "s_same_run")
         .await
         .unwrap();
     store
@@ -497,7 +496,7 @@ async fn pending_delivery_can_resume_interrupted_codex_run_without_new_run() {
     store.claim_launch_job().await.unwrap().unwrap();
     let execution = store.begin_launch_attempt(first.id).await.unwrap();
     let run_id = execution.run.id;
-    store.bind_run_lsm(run_id, "s_delivery").await.unwrap();
+    store.bind_run_runtime(run_id, "s_delivery").await.unwrap();
     store
         .mark_launch_running(
             first.id,
@@ -546,11 +545,11 @@ async fn pending_delivery_can_resume_interrupted_codex_run_without_new_run() {
     assert_eq!(store.get_run(run_id).await.unwrap().status, "running");
     assert_eq!(
         store
-            .run_lsm_binding(run_id)
+            .run_runtime_binding(run_id)
             .await
             .unwrap()
             .unwrap()
-            .logical_session_id,
+            .runtime_scope_id,
         "s_delivery"
     );
 }
@@ -569,7 +568,7 @@ async fn queued_delivery_makes_interrupted_codex_run_eligible_for_automatic_resu
     store.claim_launch_job().await.unwrap().unwrap();
     let execution = store.begin_launch_attempt(first.id).await.unwrap();
     let run_id = execution.run.id;
-    store.bind_run_lsm(run_id, "s_delivery").await.unwrap();
+    store.bind_run_runtime(run_id, "s_delivery").await.unwrap();
     store
         .finish_launch_attempt(
             first.id,
@@ -629,7 +628,7 @@ async fn handoff_waits_for_child_exit_and_lsm_terminalization() {
     store.claim_launch_job().await.unwrap().unwrap();
     let execution = store.begin_launch_attempt(attempt.id).await.unwrap();
     store
-        .bind_run_lsm(execution.run.id, "s_handoff")
+        .bind_run_runtime(execution.run.id, "s_handoff")
         .await
         .unwrap();
     let milestone = store
@@ -671,7 +670,7 @@ async fn handoff_waits_for_child_exit_and_lsm_terminalization() {
     );
     assert!(
         store
-            .completed_lsm_runs()
+            .completed_runtime_runs()
             .await
             .unwrap()
             .contains(&execution.run.id)
@@ -682,7 +681,10 @@ async fn handoff_waits_for_child_exit_and_lsm_terminalization() {
             .await
             .is_err()
     );
-    store.mark_lsm_terminalized(execution.run.id).await.unwrap();
+    store
+        .mark_runtime_scope_terminalized(execution.run.id)
+        .await
+        .unwrap();
     let next = store
         .claim_task(assignment.task_id, successor.id, "executor", 600)
         .await
@@ -779,7 +781,7 @@ async fn lsm_job_wait_terminal_event_resumes_same_run_without_new_run() {
     store.claim_launch_job().await.unwrap().unwrap();
     let execution = store.begin_launch_attempt(first.id).await.unwrap();
     let run_id = execution.run.id;
-    store.bind_run_lsm(run_id, "s_job_wait").await.unwrap();
+    store.bind_run_runtime(run_id, "s_job_wait").await.unwrap();
 
     let wait = store
         .register_run_job_wait(
@@ -803,7 +805,7 @@ async fn lsm_job_wait_terminal_event_resumes_same_run_without_new_run() {
     assert_eq!(store.get_run(run_id).await.unwrap().status, "interrupted");
     assert_eq!(
         store
-            .run_lsm_binding(run_id)
+            .run_runtime_binding(run_id)
             .await
             .unwrap()
             .unwrap()
@@ -858,7 +860,7 @@ async fn lsm_job_wait_terminal_event_resumes_same_run_without_new_run() {
             .is_empty()
     );
 
-    let binding = store.run_lsm_binding(run_id).await.unwrap().unwrap();
+    let binding = store.run_runtime_binding(run_id).await.unwrap().unwrap();
     assert!(
         binding.restart_deadline_at.is_some(),
         "the short restart window starts only after the awaited event arrives"
@@ -879,11 +881,11 @@ async fn lsm_job_wait_terminal_event_resumes_same_run_without_new_run() {
     assert_eq!(store.get_run(run_id).await.unwrap().status, "running");
     assert_eq!(
         store
-            .run_lsm_binding(run_id)
+            .run_runtime_binding(run_id)
             .await
             .unwrap()
             .unwrap()
-            .logical_session_id,
+            .runtime_scope_id,
         "s_job_wait"
     );
 }
@@ -902,7 +904,10 @@ async fn lsm_terminal_event_before_wait_registration_is_not_lost() {
     store.claim_launch_job().await.unwrap().unwrap();
     let execution = store.begin_launch_attempt(first.id).await.unwrap();
     let run_id = execution.run.id;
-    store.bind_run_lsm(run_id, "s_event_first").await.unwrap();
+    store
+        .bind_run_runtime(run_id, "s_event_first")
+        .await
+        .unwrap();
 
     assert!(
         store
@@ -963,7 +968,7 @@ async fn lost_lsm_job_wakes_same_run_in_reconciliation_mode() {
     store.claim_launch_job().await.unwrap().unwrap();
     let execution = store.begin_launch_attempt(first.id).await.unwrap();
     let run_id = execution.run.id;
-    store.bind_run_lsm(run_id, "s_lost_wait").await.unwrap();
+    store.bind_run_runtime(run_id, "s_lost_wait").await.unwrap();
 
     let wait = store
         .register_run_job_wait(

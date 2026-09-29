@@ -1379,7 +1379,8 @@ echo '{{"type":"thread.started","thread_id":"fake-session-thread-123"}}'
                     "agent_instance_id": agent.id,
                     "program": program,
                     "default_cwd": temp,
-                    "enabled": true
+                    "enabled": true,
+                    "metadata": {"execution_backend": "local"}
                 }))
                 .unwrap(),
             )

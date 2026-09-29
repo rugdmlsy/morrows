@@ -25,6 +25,15 @@ impl Store {
             )));
         }
         if is_local_adapter(&input.adapter) {
+            if input.metadata.get("execution_backend").is_none() {
+                let metadata = input.metadata.as_object_mut().ok_or_else(|| {
+                    DomainError::InvalidInput("launch profile metadata must be an object".into())
+                })?;
+                metadata.insert(
+                    "execution_backend".into(),
+                    Value::String("morrow_runtime".into()),
+                );
+            }
             validate_absolute("program", &input.program)?;
             if let Some(value) = &input.default_cwd {
                 validate_absolute("default_cwd", value)?;
@@ -477,17 +486,17 @@ impl Store {
     }
 
     pub async fn begin_launch_attempt(&self, id: Id) -> Result<LaunchExecution, DomainError> {
-        self.begin_launch_attempt_with_lsm(id, None).await
+        self.begin_launch_attempt_with_local_compat(id, None).await
     }
 
-    /// Backward-compatible entry point for the standalone LSM integration. Intake
-    /// turns intentionally do not provision LSM execution state through this API.
-    pub async fn begin_launch_attempt_with_lsm(
+    /// Explicit compatibility path for local provider processes. New profiles default
+    /// to morrow-runtime; local execution must be selected explicitly.
+    pub async fn begin_launch_attempt_with_local_compat(
         &self,
         id: Id,
-        lsm_subject: Option<&str>,
+        runtime_subject: Option<&str>,
     ) -> Result<LaunchExecution, DomainError> {
-        self.begin_launch_attempt_with_runtime_mode(id, lsm_subject, false)
+        self.begin_launch_attempt_with_runtime_mode(id, runtime_subject, false)
             .await
     }
 
@@ -506,7 +515,7 @@ impl Store {
     async fn begin_launch_attempt_with_runtime_mode(
         &self,
         id: Id,
-        lsm_subject: Option<&str>,
+        runtime_subject: Option<&str>,
         provision_intake_transport: bool,
     ) -> Result<LaunchExecution, DomainError> {
         let now = Utc::now();
@@ -581,13 +590,13 @@ impl Store {
 
         let run_id = if let Some(run_id) = attempt.restart_run_id {
             let deadline: Option<String> = sqlx::query_scalar(
-                "SELECT restart_deadline_at FROM run_lsm_bindings WHERE run_id=?",
+                "SELECT restart_deadline_at FROM run_runtime_bindings WHERE run_id=?",
             )
             .bind(run_id.to_string())
             .fetch_optional(&mut *tx)
             .await
             .map_err(storage)?
-            .ok_or_else(|| DomainError::Conflict("restart requires an LSM-bound Run".into()))?;
+            .ok_or_else(|| DomainError::Conflict("restart requires a runtime-bound Run".into()))?;
             let resumed = sqlx::query(
                 "UPDATE runs SET status='running',stop_reason=NULL WHERE id=? AND assignment_id=? AND status='interrupted'",
             )
@@ -606,7 +615,7 @@ impl Store {
                 ));
             }
             sqlx::query(
-                "UPDATE run_lsm_bindings SET restart_deadline_at=NULL,updated_at=? WHERE run_id=?",
+                "UPDATE run_runtime_bindings SET restart_deadline_at=NULL,updated_at=? WHERE run_id=?",
             )
             .bind(now.to_rfc3339())
             .bind(run_id.to_string())
@@ -614,7 +623,7 @@ impl Store {
             .await
             .map_err(storage)?;
             sqlx::query(
-                "UPDATE run_lsm_provisioning SET restart_deadline_at=NULL,updated_at=? WHERE run_id=?",
+                "UPDATE run_runtime_provisioning SET restart_deadline_at=NULL,updated_at=? WHERE run_id=?",
             )
             .bind(now.to_rfc3339())
             .bind(run_id.to_string())
@@ -655,12 +664,12 @@ impl Store {
                 .await
                 .map_err(storage)?;
             }
-            if let Some(subject) = lsm_subject
+            if let Some(subject) = runtime_subject
                 && (provision_intake_transport
                     || assignment.phase == morrows_core::INTAKE_PHASE_IMPLEMENTING)
             {
                 sqlx::query(
-                    "INSERT INTO run_lsm_provisioning(run_id,subject,created_at,updated_at)
+                    "INSERT INTO run_runtime_provisioning(run_id,subject,created_at,updated_at)
                      VALUES(?,?,?,?)",
                 )
                 .bind(run_id.to_string())
@@ -935,16 +944,16 @@ impl Store {
                     )
                     .await?;
                 } else {
-                    let lsm_bound_or_pending: bool = sqlx::query_scalar(
-                        "SELECT EXISTS(SELECT 1 FROM run_lsm_bindings WHERE run_id=?)
-                         OR EXISTS(SELECT 1 FROM run_lsm_provisioning WHERE run_id=?)",
+                    let runtime_bound_or_pending: bool = sqlx::query_scalar(
+                        "SELECT EXISTS(SELECT 1 FROM run_runtime_bindings WHERE run_id=?)
+                         OR EXISTS(SELECT 1 FROM run_runtime_provisioning WHERE run_id=?)",
                     )
                     .bind(run_id.to_string())
                     .bind(run_id.to_string())
                     .fetch_one(&mut *tx)
                     .await
                     .map_err(storage)?;
-                    if lsm_bound_or_pending {
+                    if runtime_bound_or_pending {
                         let active_wait: Option<String> = sqlx::query_scalar(
                             "SELECT id FROM run_job_waits WHERE run_id=? AND status IN ('pending','ready')",
                         )
@@ -953,9 +962,9 @@ impl Store {
                         .await
                         .map_err(storage)?;
                         if let Some(wait_id) = active_wait {
-                            sqlx::query("UPDATE runs SET status='interrupted',stop_reason='waiting_for_lsm_job',ended_at=NULL WHERE id=?")
+                            sqlx::query("UPDATE runs SET status='interrupted',stop_reason='waiting_for_runtime_job',ended_at=NULL WHERE id=?")
                                 .bind(run_id.to_string()).execute(&mut *tx).await.map_err(storage)?;
-                            sqlx::query("UPDATE run_lsm_bindings SET restart_deadline_at=NULL,updated_at=? WHERE run_id=?")
+                            sqlx::query("UPDATE run_runtime_bindings SET restart_deadline_at=NULL,updated_at=? WHERE run_id=?")
                                 .bind(now.to_rfc3339()).bind(run_id.to_string())
                                 .execute(&mut *tx).await.map_err(storage)?;
                             append_event_tx(
@@ -964,7 +973,7 @@ impl Store {
                                 "launcher",
                                 "run",
                                 run_id,
-                                "run.waiting_for_lsm_job",
+                                "run.waiting_for_runtime_job",
                                 json!({"launch_attempt_id":id,"wait_id":wait_id}),
                                 None,
                             )
@@ -976,10 +985,10 @@ impl Store {
                             });
                             sqlx::query("UPDATE runs SET status='interrupted',stop_reason=?,ended_at=NULL WHERE id=?")
                             .bind(&reason).bind(run_id.to_string()).execute(&mut *tx).await.map_err(storage)?;
-                            sqlx::query("UPDATE run_lsm_bindings SET restart_deadline_at=?,updated_at=? WHERE run_id=?")
+                            sqlx::query("UPDATE run_runtime_bindings SET restart_deadline_at=?,updated_at=? WHERE run_id=?")
                             .bind(deadline.to_rfc3339()).bind(now.to_rfc3339()).bind(run_id.to_string())
                             .execute(&mut *tx).await.map_err(storage)?;
-                            sqlx::query("UPDATE run_lsm_provisioning SET restart_deadline_at=?,updated_at=? WHERE run_id=?")
+                            sqlx::query("UPDATE run_runtime_provisioning SET restart_deadline_at=?,updated_at=? WHERE run_id=?")
                             .bind(deadline.to_rfc3339()).bind(now.to_rfc3339()).bind(run_id.to_string())
                             .execute(&mut *tx).await.map_err(storage)?;
                             sqlx::query("UPDATE assignments SET expires_at=MAX(expires_at,?),renewed_at=? WHERE id=? AND status='active'")
@@ -1389,15 +1398,16 @@ impl Store {
                 .ok_or_else(|| DomainError::NotFound("launch attempt".into()))?,
         )?;
         if let Some(run_id) = attempt.run_id {
-            let lsm_bound: bool =
-                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM run_lsm_bindings WHERE run_id=?)")
-                    .bind(run_id.to_string())
-                    .fetch_one(&mut *tx)
-                    .await
-                    .map_err(storage)?;
-            if lsm_bound {
+            let runtime_bound: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM run_runtime_bindings WHERE run_id=?)",
+            )
+            .bind(run_id.to_string())
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(storage)?;
+            if runtime_bound {
                 return Err(DomainError::Conflict(
-                    "LSM-bound Run must use Run cancellation".into(),
+                    "runtime-bound Run must use Run cancellation".into(),
                 ));
             }
         }
@@ -1539,7 +1549,7 @@ impl Store {
                 .metadata
                 .get("execution_backend")
                 .and_then(Value::as_str)
-                .unwrap_or("local");
+                .unwrap_or("morrow_runtime");
             if backend == "morrow_runtime" {
                 continue;
             }

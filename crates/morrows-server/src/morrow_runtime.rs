@@ -13,7 +13,7 @@ pub struct MorrowRuntimeControl {
 }
 
 pub struct RuntimeAgentBinding {
-    pub logical_session_id: String,
+    pub runtime_scope_id: String,
     pub capability: String,
     pub mcp_url: String,
 }
@@ -119,11 +119,11 @@ impl MorrowRuntimeControl {
         run_id: Id,
         task_title: &str,
     ) -> anyhow::Result<String> {
-        let session_id = if let Some(existing) = store.run_lsm_binding(run_id).await? {
-            existing.logical_session_id
+        let session_id = if let Some(existing) = store.run_runtime_binding(run_id).await? {
+            existing.runtime_scope_id
         } else {
             let subject = store
-                .run_lsm_provisioning_subject(run_id)
+                .run_runtime_provisioning_subject(run_id)
                 .await?
                 .unwrap_or_else(|| self.subject.clone());
             let response = self
@@ -140,9 +140,9 @@ impl MorrowRuntimeControl {
                 .await?;
             let session_id = response["session"]["session_id"]
                 .as_str()
-                .ok_or_else(|| anyhow!("morrow-runtime did not return a Session ID"))?
+                .ok_or_else(|| anyhow!("morrow-runtime did not return a runtime scope ID"))?
                 .to_owned();
-            store.bind_run_lsm(run_id, &session_id).await?;
+            store.bind_run_runtime(run_id, &session_id).await?;
             session_id
         };
         Ok(session_id)
@@ -156,7 +156,7 @@ impl MorrowRuntimeControl {
     ) -> anyhow::Result<RuntimeAgentBinding> {
         let session_id = self.provision_run(store, run_id, task_title).await?;
         let subject = store
-            .run_lsm_provisioning_subject(run_id)
+            .run_runtime_provisioning_subject(run_id)
             .await?
             .unwrap_or_else(|| self.subject.clone());
         let issued = self
@@ -190,7 +190,7 @@ impl MorrowRuntimeControl {
             return Err(err.into());
         }
         Ok(RuntimeAgentBinding {
-            logical_session_id: session_id,
+            runtime_scope_id: session_id,
             capability,
             mcp_url: self.mcp_url.clone(),
         })
@@ -235,7 +235,7 @@ impl MorrowRuntimeControl {
             .ok_or_else(|| anyhow!("morrow-runtime did not return a capability"))?
             .to_owned();
         Ok(RuntimeAgentBinding {
-            logical_session_id: session_id.to_owned(),
+            runtime_scope_id: session_id.to_owned(),
             capability,
             mcp_url: self.mcp_url.clone(),
         })
@@ -332,7 +332,7 @@ impl MorrowRuntimeControl {
     }
 
     pub async fn revoke_for_run(&self, store: &Store, run_id: Id) -> anyhow::Result<()> {
-        if let Some(binding) = store.run_lsm_binding(run_id).await?
+        if let Some(binding) = store.run_runtime_binding(run_id).await?
             && let Some(capability_id) = binding.capability_id
         {
             self.request(
@@ -356,7 +356,7 @@ impl MorrowRuntimeControl {
         finish: bool,
     ) -> anyhow::Result<bool> {
         let subject = store
-            .run_lsm_provisioning_subject(run_id)
+            .run_runtime_provisioning_subject(run_id)
             .await?
             .unwrap_or_else(|| self.subject.clone());
         let response = self
@@ -495,13 +495,13 @@ mod tests {
             .unwrap();
         store.claim_launch_job().await.unwrap().unwrap();
         let run_id = store
-            .begin_launch_attempt_with_lsm(attempt.id, Some("shared-runtime"))
+            .begin_launch_attempt_with_local_compat(attempt.id, Some("shared-runtime"))
             .await
             .unwrap()
             .run
             .id;
         store
-            .bind_run_lsm(run_id, "s_issue_cancel_race")
+            .bind_run_runtime(run_id, "s_issue_cancel_race")
             .await
             .unwrap();
 
@@ -557,7 +557,7 @@ mod tests {
         assert_eq!(state.revocations, 1);
         assert!(
             store
-                .run_lsm_binding(run_id)
+                .run_runtime_binding(run_id)
                 .await
                 .unwrap()
                 .unwrap()

@@ -1,22 +1,24 @@
 use super::*;
-use morrows_core::{AttachExecutionEvidence, LaunchAttempt, RunExecutionEvidence, RunLsmBinding};
+use morrows_core::{
+    AttachExecutionEvidence, LaunchAttempt, RunExecutionEvidence, RunRuntimeBinding,
+};
 
 impl Store {
-    pub async fn run_lsm_provisioning_subject(
+    pub async fn run_runtime_provisioning_subject(
         &self,
         run_id: Id,
     ) -> Result<Option<String>, DomainError> {
-        sqlx::query_scalar("SELECT subject FROM run_lsm_provisioning WHERE run_id=?")
+        sqlx::query_scalar("SELECT subject FROM run_runtime_provisioning WHERE run_id=?")
             .bind(run_id.to_string())
             .fetch_optional(&self.pool)
             .await
             .map_err(storage)
     }
 
-    pub async fn has_lsm_runtime(&self, run_id: Id) -> Result<bool, DomainError> {
+    pub async fn has_managed_runtime(&self, run_id: Id) -> Result<bool, DomainError> {
         sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM run_lsm_bindings WHERE run_id=?)
-                  OR EXISTS(SELECT 1 FROM run_lsm_provisioning WHERE run_id=?)",
+            "SELECT EXISTS(SELECT 1 FROM run_runtime_bindings WHERE run_id=?)
+                  OR EXISTS(SELECT 1 FROM run_runtime_provisioning WHERE run_id=?)",
         )
         .bind(run_id.to_string())
         .bind(run_id.to_string())
@@ -25,13 +27,13 @@ impl Store {
         .map_err(storage)
     }
 
-    /// Runs without a binding still own a durable LSM key. Replaying that key
-    /// recovers a Session created before an HTTP response or DB write was lost.
-    pub async fn unbound_lsm_runs(&self) -> Result<Vec<Id>, DomainError> {
+    /// Runs without a binding still own a durable runtime provisioning key. Replaying that key
+    /// recovers a runtime scope created before an HTTP response or DB write was lost.
+    pub async fn unbound_runtime_runs(&self) -> Result<Vec<Id>, DomainError> {
         let rows = sqlx::query(
-            "SELECT r.id FROM runs r JOIN run_lsm_provisioning p ON p.run_id=r.id
-             LEFT JOIN run_lsm_bindings b ON b.run_id=r.id
-             WHERE b.run_id IS NULL AND r.status IN ('interrupted','cancelling','cleanup_pending','handed_off','completed')",
+            "SELECT r.id FROM runs r JOIN run_runtime_provisioning p ON p.run_id=r.id
+             LEFT JOIN run_runtime_bindings b ON b.run_id=r.id
+             WHERE b.run_id IS NULL AND r.status IN ('running','interrupted','cancelling','cleanup_pending','handed_off','completed')",
         )
         .fetch_all(&self.pool)
         .await
@@ -120,16 +122,19 @@ impl Store {
             .collect()
     }
 
-    pub async fn run_lsm_binding(&self, run_id: Id) -> Result<Option<RunLsmBinding>, DomainError> {
-        let row = sqlx::query("SELECT * FROM run_lsm_bindings WHERE run_id=?")
+    pub async fn run_runtime_binding(
+        &self,
+        run_id: Id,
+    ) -> Result<Option<RunRuntimeBinding>, DomainError> {
+        let row = sqlx::query("SELECT * FROM run_runtime_bindings WHERE run_id=?")
             .bind(run_id.to_string())
             .fetch_optional(&self.pool)
             .await
             .map_err(storage)?;
         row.map(|row| {
-            Ok(RunLsmBinding {
+            Ok(RunRuntimeBinding {
                 run_id: parse_id(row.try_get("run_id").map_err(storage)?)?,
-                logical_session_id: row.try_get("logical_session_id").map_err(storage)?,
+                runtime_scope_id: row.try_get("runtime_scope_id").map_err(storage)?,
                 capability_id: row.try_get("capability_id").map_err(storage)?,
                 restart_deadline_at: parse_opt_dt(
                     row.try_get("restart_deadline_at").map_err(storage)?,
@@ -139,11 +144,11 @@ impl Store {
         .transpose()
     }
 
-    pub async fn bind_run_lsm(
+    pub async fn bind_run_runtime(
         &self,
         run_id: Id,
-        logical_session_id: &str,
-    ) -> Result<RunLsmBinding, DomainError> {
+        runtime_scope_id: &str,
+    ) -> Result<RunRuntimeBinding, DomainError> {
         let run = self.get_run(run_id).await?;
         if !matches!(
             run.status.as_str(),
@@ -163,37 +168,37 @@ impl Store {
             .await
             .map_err(storage)?;
         let existing: Option<String> =
-            sqlx::query_scalar("SELECT logical_session_id FROM run_lsm_bindings WHERE run_id=?")
+            sqlx::query_scalar("SELECT runtime_scope_id FROM run_runtime_bindings WHERE run_id=?")
                 .bind(run_id.to_string())
                 .fetch_optional(&mut *tx)
                 .await
                 .map_err(storage)?;
         if let Some(existing) = existing {
-            if existing != logical_session_id {
+            if existing != runtime_scope_id {
                 return Err(DomainError::Conflict(
-                    "Run already owns a different Logical Session".into(),
+                    "Run already owns a different runtime scope".into(),
                 ));
             }
         } else {
             let deadline: Option<String> = sqlx::query_scalar(
-                "SELECT restart_deadline_at FROM run_lsm_provisioning WHERE run_id=?",
+                "SELECT restart_deadline_at FROM run_runtime_provisioning WHERE run_id=?",
             )
             .bind(run_id.to_string())
             .fetch_optional(&mut *tx)
             .await
             .map_err(storage)?
             .flatten();
-            sqlx::query("INSERT INTO run_lsm_bindings(run_id,logical_session_id,restart_deadline_at,created_at,updated_at) VALUES(?,?,?,?,?)")
-                .bind(run_id.to_string()).bind(logical_session_id).bind(deadline).bind(&now).bind(&now)
+            sqlx::query("INSERT INTO run_runtime_bindings(run_id,runtime_scope_id,restart_deadline_at,created_at,updated_at) VALUES(?,?,?,?,?)")
+                .bind(run_id.to_string()).bind(runtime_scope_id).bind(deadline).bind(&now).bind(&now)
                 .execute(&mut *tx).await.map_err(storage)?;
         }
         tx.commit().await.map_err(storage)?;
-        self.run_lsm_binding(run_id)
+        self.run_runtime_binding(run_id)
             .await?
-            .ok_or_else(|| DomainError::Storage("LSM binding disappeared".into()))
+            .ok_or_else(|| DomainError::Storage("runtime binding disappeared".into()))
     }
 
-    /// The conditional write is the durable fence between an external LSM issue
+    /// The conditional write is the durable fence between an external runtime capability issue
     /// and a concurrent Run cancellation. SQLite serializes it with cancel's
     /// transaction, so a token issued for a cancelled Run is never adopted.
     pub async fn try_adopt_run_capability(
@@ -202,8 +207,8 @@ impl Store {
         capability_id: &str,
     ) -> Result<(), DomainError> {
         let result = sqlx::query(
-            "UPDATE run_lsm_bindings SET capability_id=?,updated_at=? WHERE run_id=?
-             AND EXISTS (SELECT 1 FROM runs r WHERE r.id=run_lsm_bindings.run_id
+            "UPDATE run_runtime_bindings SET capability_id=?,updated_at=? WHERE run_id=?
+             AND EXISTS (SELECT 1 FROM runs r WHERE r.id=run_runtime_bindings.run_id
                          AND r.status='running')",
         )
         .bind(capability_id)
@@ -214,7 +219,7 @@ impl Store {
         .map_err(storage)?;
         if result.rows_affected() != 1 {
             return Err(DomainError::Conflict(
-                "Run stopped before its LSM capability could be adopted".into(),
+                "Run stopped before its runtime capability could be adopted".into(),
             ));
         }
         Ok(())
@@ -227,7 +232,7 @@ impl Store {
         capability_id: &str,
     ) -> Result<(), DomainError> {
         sqlx::query(
-            "UPDATE run_lsm_bindings SET capability_id=NULL,updated_at=?
+            "UPDATE run_runtime_bindings SET capability_id=NULL,updated_at=?
              WHERE run_id=? AND capability_id=?",
         )
         .bind(Utc::now().to_rfc3339())
@@ -240,7 +245,7 @@ impl Store {
     }
 
     /// Explicit restart creates a new process attempt while preserving the Run and
-    /// its LSM Session. The transaction prevents two restarts claiming one window.
+    /// its runtime scope. The transaction prevents two restarts claiming one window.
     pub async fn enqueue_run_restart(&self, run_id: Id) -> Result<LaunchAttempt, DomainError> {
         self.enqueue_run_restart_with_actor(run_id, "human", "local", "run.restart_requested", None)
             .await
@@ -278,7 +283,7 @@ impl Store {
         self.enqueue_run_restart_with_actor(
             run_id,
             "system",
-            "lsm-job-event",
+            "runtime-job-event",
             "run.job_wait_resume_requested",
             Some(outbox_id),
         )
@@ -314,7 +319,7 @@ impl Store {
             let deadline =
                 now + chrono::Duration::seconds(crate::launch::agent_restart_grace_seconds());
             sqlx::query(
-                "UPDATE run_lsm_bindings SET restart_deadline_at=?,updated_at=? WHERE run_id=?",
+                "UPDATE run_runtime_bindings SET restart_deadline_at=?,updated_at=? WHERE run_id=?",
             )
             .bind(deadline.to_rfc3339())
             .bind(now.to_rfc3339())
@@ -332,7 +337,7 @@ impl Store {
             deadline
         } else {
             let deadline: String = sqlx::query_scalar(
-                "SELECT restart_deadline_at FROM run_lsm_bindings WHERE run_id=?",
+                "SELECT restart_deadline_at FROM run_runtime_bindings WHERE run_id=?",
             )
             .bind(run_id.to_string())
             .fetch_optional(&mut *tx)
@@ -471,8 +476,8 @@ impl Store {
             return Err(DomainError::Conflict(format!("run is {}", run.status)));
         }
         let lsm_runtime: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM run_lsm_bindings WHERE run_id=?)
-                  OR EXISTS(SELECT 1 FROM run_lsm_provisioning WHERE run_id=?)",
+            "SELECT EXISTS(SELECT 1 FROM run_runtime_bindings WHERE run_id=?)
+                  OR EXISTS(SELECT 1 FROM run_runtime_provisioning WHERE run_id=?)",
         )
         .bind(run_id.to_string())
         .bind(run_id.to_string())
@@ -481,7 +486,7 @@ impl Store {
         .map_err(storage)?;
         if !lsm_runtime {
             return Err(DomainError::Conflict(
-                "Run has no LSM provisioning intent".into(),
+                "Run has no managed runtime provisioning intent".into(),
             ));
         }
         if run.status == "cancelling" {
@@ -511,8 +516,8 @@ impl Store {
     pub async fn due_interrupted_runs(&self) -> Result<Vec<Id>, DomainError> {
         let rows = sqlx::query(
             "SELECT r.id FROM runs r
-             LEFT JOIN run_lsm_bindings b ON b.run_id=r.id
-             LEFT JOIN run_lsm_provisioning p ON p.run_id=r.id
+             LEFT JOIN run_runtime_bindings b ON b.run_id=r.id
+             LEFT JOIN run_runtime_provisioning p ON p.run_id=r.id
              WHERE r.status='interrupted'
                AND COALESCE(b.restart_deadline_at,p.restart_deadline_at)<=?",
         )
@@ -525,9 +530,9 @@ impl Store {
             .collect()
     }
 
-    pub async fn interrupted_lsm_runs(&self) -> Result<Vec<Id>, DomainError> {
+    pub async fn interrupted_runtime_runs(&self) -> Result<Vec<Id>, DomainError> {
         let rows = sqlx::query(
-            "SELECT r.id FROM runs r JOIN run_lsm_bindings b ON b.run_id=r.id
+            "SELECT r.id FROM runs r JOIN run_runtime_bindings b ON b.run_id=r.id
                                 WHERE r.status='interrupted' AND b.capability_id IS NOT NULL",
         )
         .fetch_all(&self.pool)
@@ -538,10 +543,10 @@ impl Store {
             .collect()
     }
 
-    pub async fn completed_lsm_runs(&self) -> Result<Vec<Id>, DomainError> {
+    pub async fn completed_runtime_runs(&self) -> Result<Vec<Id>, DomainError> {
         let rows = sqlx::query(
-            "SELECT r.id FROM runs r JOIN run_lsm_bindings b ON b.run_id=r.id
-                                WHERE r.status IN ('completed','handed_off') AND b.session_terminalized_at IS NULL",
+            "SELECT r.id FROM runs r JOIN run_runtime_bindings b ON b.run_id=r.id
+                                WHERE r.status IN ('completed','handed_off') AND b.scope_terminalized_at IS NULL",
         )
         .fetch_all(&self.pool)
         .await
@@ -551,9 +556,9 @@ impl Store {
             .collect()
     }
 
-    pub async fn mark_lsm_terminalized(&self, run_id: Id) -> Result<(), DomainError> {
+    pub async fn mark_runtime_scope_terminalized(&self, run_id: Id) -> Result<(), DomainError> {
         sqlx::query(
-            "UPDATE run_lsm_bindings SET session_terminalized_at=?,updated_at=? WHERE run_id=?",
+            "UPDATE run_runtime_bindings SET scope_terminalized_at=?,updated_at=? WHERE run_id=?",
         )
         .bind(Utc::now().to_rfc3339())
         .bind(Utc::now().to_rfc3339())
@@ -588,8 +593,8 @@ impl Store {
         }
         let deadline: Option<String> = sqlx::query_scalar(
             "SELECT COALESCE(b.restart_deadline_at,p.restart_deadline_at)
-                 FROM runs r LEFT JOIN run_lsm_bindings b ON b.run_id=r.id
-                 LEFT JOIN run_lsm_provisioning p ON p.run_id=r.id WHERE r.id=?",
+                 FROM runs r LEFT JOIN run_runtime_bindings b ON b.run_id=r.id
+                 LEFT JOIN run_runtime_provisioning p ON p.run_id=r.id WHERE r.id=?",
         )
         .bind(run_id.to_string())
         .fetch_optional(&mut *tx)
@@ -625,11 +630,11 @@ impl Store {
         Ok(())
     }
 
-    pub async fn pending_lsm_cleanup_runs(&self) -> Result<Vec<Id>, DomainError> {
+    pub async fn pending_runtime_cleanup_runs(&self) -> Result<Vec<Id>, DomainError> {
         let rows = sqlx::query(
             "SELECT r.id FROM runs r
-             LEFT JOIN run_lsm_bindings b ON b.run_id=r.id
-             LEFT JOIN run_lsm_provisioning p ON p.run_id=r.id
+             LEFT JOIN run_runtime_bindings b ON b.run_id=r.id
+             LEFT JOIN run_runtime_provisioning p ON p.run_id=r.id
              WHERE r.status IN ('cleanup_pending','cancelling')
                AND (b.run_id IS NOT NULL OR p.run_id IS NOT NULL)",
         )
@@ -641,7 +646,7 @@ impl Store {
             .collect()
     }
 
-    pub async fn complete_lsm_cleanup(&self, run_id: Id) -> Result<Run, DomainError> {
+    pub async fn complete_runtime_cleanup(&self, run_id: Id) -> Result<Run, DomainError> {
         let now = Utc::now();
         let mut tx = self
             .pool
@@ -668,7 +673,7 @@ impl Store {
             .await
             .map_err(storage)?;
         sqlx::query(
-            "UPDATE run_lsm_bindings SET session_terminalized_at=?,updated_at=? WHERE run_id=?",
+            "UPDATE run_runtime_bindings SET scope_terminalized_at=?,updated_at=? WHERE run_id=?",
         )
         .bind(now.to_rfc3339())
         .bind(now.to_rfc3339())
@@ -717,7 +722,7 @@ impl Store {
         let now = Utc::now().to_rfc3339();
         sqlx::query(
             "UPDATE assignments SET expires_at=MAX(expires_at,b.restart_deadline_at),renewed_at=?
-                     FROM run_lsm_bindings b JOIN runs r ON r.id=b.run_id
+                     FROM run_runtime_bindings b JOIN runs r ON r.id=b.run_id
                      WHERE assignments.id=r.assignment_id AND r.status='interrupted'
                        AND b.restart_deadline_at> ? AND assignments.status='active'",
         )
@@ -728,8 +733,8 @@ impl Store {
         .map_err(storage)?;
         sqlx::query(
             "UPDATE assignments SET expires_at=MAX(expires_at,p.restart_deadline_at),renewed_at=?
-             FROM run_lsm_provisioning p JOIN runs r ON r.id=p.run_id
-             LEFT JOIN run_lsm_bindings b ON b.run_id=r.id
+             FROM run_runtime_provisioning p JOIN runs r ON r.id=p.run_id
+             LEFT JOIN run_runtime_bindings b ON b.run_id=r.id
              WHERE assignments.id=r.assignment_id AND r.status='interrupted'
                AND b.run_id IS NULL AND p.restart_deadline_at>?
                AND assignments.status='active'",

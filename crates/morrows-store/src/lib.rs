@@ -1831,15 +1831,15 @@ async fn cancel_task_tx(
     .await
     .map_err(storage)?;
 
-    // LSM-backed Runs must remain non-terminal until runtime cleanup confirms the
-    // Session has been revoked and cleaned. Non-LSM Runs can become terminal now.
+    // Managed-runtime Runs must remain non-terminal until runtime cleanup confirms the
+    // execution scope has been revoked and cleaned. Non-runtime Runs can become terminal now.
     sqlx::query(
         "UPDATE runs SET status='cancelling',stop_reason=?,ended_at=NULL
          WHERE task_id=?
            AND status IN ('running','paused','interrupted','cancelling','cleanup_pending')
            AND (
-             EXISTS(SELECT 1 FROM run_lsm_bindings b WHERE b.run_id=runs.id)
-             OR EXISTS(SELECT 1 FROM run_lsm_provisioning p WHERE p.run_id=runs.id)
+             EXISTS(SELECT 1 FROM run_runtime_bindings b WHERE b.run_id=runs.id)
+             OR EXISTS(SELECT 1 FROM run_runtime_provisioning p WHERE p.run_id=runs.id)
            )",
     )
     .bind(reason)
@@ -1852,8 +1852,8 @@ async fn cancel_task_tx(
          WHERE task_id=?
            AND status IN ('running','paused','interrupted','cancelling','cleanup_pending')
            AND NOT (
-             EXISTS(SELECT 1 FROM run_lsm_bindings b WHERE b.run_id=runs.id)
-             OR EXISTS(SELECT 1 FROM run_lsm_provisioning p WHERE p.run_id=runs.id)
+             EXISTS(SELECT 1 FROM run_runtime_bindings b WHERE b.run_id=runs.id)
+             OR EXISTS(SELECT 1 FROM run_runtime_provisioning p WHERE p.run_id=runs.id)
            )",
     )
     .bind(reason)

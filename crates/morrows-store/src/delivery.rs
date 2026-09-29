@@ -481,7 +481,7 @@ impl Store {
             "SELECT r.id
              FROM runs r
              JOIN assignments ass ON ass.id=r.assignment_id
-             JOIN run_lsm_bindings rb ON rb.run_id=r.id
+             JOIN run_runtime_bindings rb ON rb.run_id=r.id
              WHERE r.status='interrupted'
                AND ass.status='active' AND ass.expires_at>?
                AND rb.restart_deadline_at IS NOT NULL AND rb.restart_deadline_at>?

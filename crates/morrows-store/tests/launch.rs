@@ -49,7 +49,7 @@ fn profile_input(agent: Id) -> RegisterLaunchProfile {
         "program":"/bin/echo",
         "default_cwd":tmp_dir(),
         "enabled":true,
-        "metadata":{"test":true}
+        "metadata":{"test":true,"execution_backend":"local"}
     }))
 }
 

@@ -23,7 +23,7 @@ impl Store {
                 .metadata
                 .get("execution_backend")
                 .and_then(Value::as_str)
-                .unwrap_or("local");
+                .unwrap_or("morrow_runtime");
             if backend != "morrow_runtime" {
                 local_attempts.push(id);
                 local_session_ids.push(session_id);
@@ -154,7 +154,7 @@ impl Store {
             .metadata
             .get("execution_backend")
             .and_then(Value::as_str)
-            .unwrap_or("local");
+            .unwrap_or("morrow_runtime");
         if execution_backend == "local" && !Path::new(&profile.program).is_file() {
             return Err(DomainError::InvalidInput(format!(
                 "launch program does not exist or is not a file: {}",

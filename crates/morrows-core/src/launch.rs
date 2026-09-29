@@ -72,13 +72,31 @@ pub struct LaunchAttempt {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunRuntimeBinding {
     pub run_id: Id,
-    pub logical_session_id: String,
+    #[serde(alias = "logical_session_id")]
+    pub runtime_scope_id: String,
     pub capability_id: Option<String>,
     pub restart_deadline_at: Option<DateTime<Utc>>,
 }
 
-/// Backward-compatible Rust name for databases and callers created before the morrow-runtime rename.
+/// Backward-compatible Rust name for callers created before the morrow-runtime rename.
 pub type RunLsmBinding = RunRuntimeBinding;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeJobTerminalEvent {
+    pub event_id: String,
+    pub job_id: String,
+    pub source_machine: String,
+    #[serde(default, alias = "logical_session_id")]
+    pub runtime_scope_id: Option<String>,
+    pub attempt: i64,
+    pub status: String,
+    pub exit_code: Option<i64>,
+    pub completed_at: DateTime<Utc>,
+    pub terminal_reason: String,
+    pub summary_ref: Option<String>,
+    #[serde(default)]
+    pub result: Option<Value>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LsmJobTerminalEvent {
@@ -94,6 +112,24 @@ pub struct LsmJobTerminalEvent {
     pub summary_ref: Option<String>,
     #[serde(default)]
     pub result: Option<Value>,
+}
+
+impl From<LsmJobTerminalEvent> for RuntimeJobTerminalEvent {
+    fn from(event: LsmJobTerminalEvent) -> Self {
+        Self {
+            event_id: event.event_id,
+            job_id: event.job_id,
+            source_machine: event.source_machine,
+            runtime_scope_id: event.logical_session_id,
+            attempt: event.attempt,
+            status: event.status,
+            exit_code: event.exit_code,
+            completed_at: event.completed_at,
+            terminal_reason: event.terminal_reason,
+            summary_ref: event.summary_ref,
+            result: event.result,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -112,7 +148,8 @@ pub struct RunJobWait {
     pub run_id: Id,
     pub source_machine: String,
     pub job_id: String,
-    pub logical_session_id: String,
+    #[serde(alias = "logical_session_id")]
+    pub runtime_scope_id: String,
     pub status: String,
     pub resume_mode: Option<String>,
     pub resume_plan: String,

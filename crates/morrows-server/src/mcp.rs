@@ -1538,7 +1538,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Put the authenticated caller's current LSM-backed Run into a durable wait for one tracked LSM job. This records the machine, job ID, Run Logical Session, reason, and exact resume plan. After it succeeds, persist any final checkpoint/milestone needed and end this Agent turn without calling run_complete; Morrows will resume the same Run and provider session when the terminal event arrives. lost resumes in reconciliation mode and is never treated as success."
+        description = "Put the authenticated caller's current managed-runtime Run into a durable wait for one tracked runtime job. This records the machine, job ID, internal RuntimeBinding scope, reason, and exact resume plan. The RuntimeBinding is an implementation detail; Task/Assignment/Run remain the work lifecycle. After registration, persist any final checkpoint/milestone needed and end this Agent turn without calling run_complete; Morrows will resume the same Run and provider thread when the terminal event arrives. lost resumes in reconciliation mode and is never treated as success."
     )]
     async fn task_wait_for_job(
         &self,
@@ -1552,7 +1552,7 @@ impl MorrowsMcp {
             .map_err(|e| e.to_string())?;
         Ok(json!({
             "wait": wait,
-            "next_action": "End the current Agent turn/process without calling run_complete. Morrows will queue a continuation of this same Run after the tracked LSM job reaches a terminal outcome.",
+            "next_action": "End the current Agent turn/process without calling run_complete. Morrows will queue a continuation of this same Run after the tracked runtime job reaches a terminal outcome.",
         })
         .to_string())
     }
@@ -1645,7 +1645,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Atomically claim an open task for the authenticated AgentInstance and start an intake Run. Executor claims begin in phase=context_review: the Run may read Morrows context and conduct a multi-turn Human Interview, but it does NOT authorize implementation or LSM execution. Next call task_intake until Project Memory is fully read, then task_interview_start and use session_reply in the returned Task Session until the conversation converges. Only tasks with assignment_mode=open can be self-claimed; approval tasks use task_request_assignment and dispatch tasks are control-plane managed."
+        description = "Atomically claim an open task for the authenticated AgentInstance and start an intake Run. Executor claims begin in phase=context_review: the Run may read Morrows context and conduct a multi-turn Human Interview, but it does NOT authorize implementation or managed-runtime execution. Next call task_intake until Project Memory is fully read, then task_interview_start and use session_reply in the returned Task Session until the conversation converges. Only tasks with assignment_mode=open can be self-claimed; approval tasks use task_request_assignment and dispatch tasks are control-plane managed."
     )]
     async fn task_claim(
         &self,

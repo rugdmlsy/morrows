@@ -445,12 +445,12 @@ async fn human_messages_resume_read_only_intake_then_convergence_queues_implemen
         .await
         .unwrap();
     let first_execution = store
-        .begin_launch_attempt_with_lsm(first.id, Some("test-lsm-subject"))
+        .begin_launch_attempt_with_local_compat(first.id, Some("test-lsm-subject"))
         .await
         .unwrap();
     assert_eq!(
         store
-            .run_lsm_provisioning_subject(first_execution.run.id)
+            .run_runtime_provisioning_subject(first_execution.run.id)
             .await
             .unwrap(),
         None,
@@ -495,12 +495,12 @@ async fn human_messages_resume_read_only_intake_then_convergence_queues_implemen
         .unwrap();
     assert_eq!(second.resume_from_attempt_id, Some(first.id));
     let second_execution = store
-        .begin_launch_attempt_with_lsm(second.id, Some("test-lsm-subject"))
+        .begin_launch_attempt_with_local_compat(second.id, Some("test-lsm-subject"))
         .await
         .unwrap();
     assert_eq!(
         store
-            .run_lsm_provisioning_subject(second_execution.run.id)
+            .run_runtime_provisioning_subject(second_execution.run.id)
             .await
             .unwrap(),
         None
@@ -532,12 +532,12 @@ async fn human_messages_resume_read_only_intake_then_convergence_queues_implemen
         .unwrap();
     assert_eq!(third.resume_from_attempt_id, Some(second.id));
     let third_execution = store
-        .begin_launch_attempt_with_lsm(third.id, Some("test-lsm-subject"))
+        .begin_launch_attempt_with_local_compat(third.id, Some("test-lsm-subject"))
         .await
         .unwrap();
     assert_eq!(
         store
-            .run_lsm_provisioning_subject(third_execution.run.id)
+            .run_runtime_provisioning_subject(third_execution.run.id)
             .await
             .unwrap(),
         None
@@ -576,7 +576,7 @@ async fn human_messages_resume_read_only_intake_then_convergence_queues_implemen
         .await
         .unwrap();
     let implementation_execution = store
-        .begin_launch_attempt_with_lsm(implementation.id, Some("test-lsm-subject"))
+        .begin_launch_attempt_with_local_compat(implementation.id, Some("test-lsm-subject"))
         .await
         .unwrap();
     assert_eq!(
@@ -585,7 +585,7 @@ async fn human_messages_resume_read_only_intake_then_convergence_queues_implemen
     );
     assert_eq!(
         store
-            .run_lsm_provisioning_subject(implementation_execution.run.id)
+            .run_runtime_provisioning_subject(implementation_execution.run.id)
             .await
             .unwrap()
             .as_deref(),

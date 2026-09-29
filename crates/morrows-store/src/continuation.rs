@@ -120,14 +120,14 @@ pub(crate) async fn load_policy(
 }
 
 /// Releasing a lease is not proof that the old process stopped. Keep the task
-/// fenced until managed children exit and LSM terminalization is acknowledged.
+/// fenced until managed children exit and managed-runtime scope terminalization is acknowledged.
 pub(crate) async fn predecessor_runtime_active(
     conn: &mut sqlx::SqliteConnection,
     task: Id,
 ) -> Result<bool, DomainError> {
     sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM launch_attempts l JOIN launch_profiles p ON p.id=l.launch_profile_id
         WHERE l.task_id=? AND p.adapter IN ('codex_cli','codebuddy_cli') AND l.status IN ('starting','running'))
-        OR EXISTS(SELECT 1 FROM runs r LEFT JOIN run_lsm_bindings b ON b.run_id=r.id LEFT JOIN run_lsm_provisioning p ON p.run_id=r.id
-            WHERE r.task_id=? AND r.status IN ('handed_off','completed') AND (b.run_id IS NOT NULL OR p.run_id IS NOT NULL) AND b.session_terminalized_at IS NULL)")
+        OR EXISTS(SELECT 1 FROM runs r LEFT JOIN run_runtime_bindings b ON b.run_id=r.id LEFT JOIN run_runtime_provisioning p ON p.run_id=r.id
+            WHERE r.task_id=? AND r.status IN ('handed_off','completed') AND (b.run_id IS NOT NULL OR p.run_id IS NOT NULL) AND b.scope_terminalized_at IS NULL)")
         .bind(task.to_string()).bind(task.to_string()).fetch_one(&mut *conn).await.map_err(storage)
 }
