@@ -131,8 +131,10 @@ binding does not broaden that compatibility rule.
 
 ## Default execution policy
 
-For `codex_cli` and `codebuddy_cli` LaunchProfiles, omitted `metadata.execution_backend` now means `morrow_runtime`. Migration 0036 freezes pre-cutover profiles that relied on the old implicit behavior by writing `execution_backend=local`. `local` remains an explicit compatibility/test backend; standalone LSM is not a normal execution backend.
+For `codex_cli` and `codebuddy_cli` LaunchProfiles, omitted `metadata.execution_backend` now means `morrow_runtime`. Migration 0036 initially made the old implicit backend explicit for compatibility; migration 0037 then moves Morrows-managed legacy CLI profiles to `morrow_runtime`. `local` remains an explicit compatibility/test backend; standalone LSM is not a normal execution backend.
 
 The control-plane identity chain is `Task -> Assignment -> Run -> RunRuntimeBinding -> RuntimeScope -> worker/process/jobs`. Only Task/Assignment/Run own context, milestones, handoffs and completion. RuntimeScope is low-level execution state. A runtime restart or lost scope-binding response replays onto the same Run rather than creating a second work execution.
 
 Migration 0036 copies legacy `run_lsm_bindings` / `run_lsm_provisioning` into canonical runtime tables and converts job-wait correlation from `logical_session_id` to `runtime_scope_id`. `RuntimeJobTerminalEvent` and `/internal/runtime/job-events` are canonical; `/internal/lsm/job-events` remains a standalone-LSM compatibility adapter.
+
+Migration 0037 remediates already-deployed Morrows-managed CLI profiles that migration 0036 temporarily froze as local; these profiles now follow the same morrow_runtime default as newly registered profiles.
