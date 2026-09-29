@@ -641,7 +641,23 @@ impl Store {
                     a.id AS executor_assignment_id,
                     a.status AS executor_assignment_status,
                     a.agent_instance_id AS executor_agent_instance_id,
-                    COALESCE(ai.display_name, ai.name) AS executor_agent_display_name,
+                    CASE
+                      WHEN ai.display_name LIKE 'morrows-oauth-client-%'
+                        OR ai.display_name LIKE 'lsm-oauth-client-%'
+                      THEN COALESCE(
+                        (
+                          SELECT air.agent_name
+                          FROM agent_identity_reports air
+                          WHERE air.agent_instance_id=ai.id
+                            AND trim(COALESCE(air.agent_name,''))<>''
+                          ORDER BY air.reported_at DESC,air.id DESC
+                          LIMIT 1
+                        ),
+                        ai.display_name,
+                        ai.name
+                      )
+                      ELSE COALESCE(ai.display_name, ai.name)
+                    END AS executor_agent_display_name,
                     a.acquired_at AS executor_acquired_at,
                     r.id AS latest_run_id,
                     r.status AS latest_run_status,

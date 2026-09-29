@@ -193,6 +193,95 @@ async fn morrows_oauth_reuses_the_pre_cutover_lsm_oauth_agent_instance() {
 }
 
 #[tokio::test]
+async fn oauth_agent_merge_moves_work_to_canonical_agent_and_binds_future_auth() {
+    let store = Store::connect("sqlite::memory:").await.unwrap();
+    let source = store
+        .resolve_morrows_oauth_agent("codex-oauth-client")
+        .await
+        .unwrap();
+    store
+        .report_agent_identity(
+            source.id,
+            input(json!({
+                "agent_name":"temporary-codex-session",
+                "platform":"codex",
+                "device":"mac"
+            })),
+        )
+        .await
+        .unwrap();
+
+    let profile = store
+        .register_profile(input(json!({
+            "name":"Codex CLI",
+            "provider":"openai",
+            "kind":"coding_agent"
+        })))
+        .await
+        .unwrap();
+    let target = store
+        .register_agent_instance(input(json!({
+            "name":"codex-managed-test",
+            "display_name":"codex-1",
+            "profile_id":profile.id
+        })))
+        .await
+        .unwrap();
+
+    let task = store
+        .create_task(input(json!({
+            "title":"canonical ownership",
+            "owner_actor_id":format!("agent:{}", source.id)
+        })))
+        .await
+        .unwrap();
+    let assignment = store
+        .claim_task(task.id, source.id, "executor", 600)
+        .await
+        .unwrap();
+
+    let merged = store
+        .merge_oauth_agent_into(source.id, target.id, "test-admin")
+        .await
+        .unwrap();
+    assert_eq!(merged.id, target.id);
+    assert_eq!(
+        store
+            .get_assignment(assignment.id)
+            .await
+            .unwrap()
+            .agent_instance_id,
+        target.id
+    );
+    assert_eq!(
+        store.get_task(task.id).await.unwrap().owner_actor_id,
+        format!("agent:{}", target.id)
+    );
+    assert_eq!(
+        store
+            .latest_agent_identity_report(target.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .agent_name
+            .as_deref(),
+        Some("temporary-codex-session")
+    );
+    let archived_source = store.get_agent(source.id).await.unwrap();
+    assert_eq!(archived_source.status, "archived");
+    assert!(archived_source.archived_at.is_some());
+
+    let resolved = store
+        .resolve_morrows_oauth_agent("codex-oauth-client")
+        .await
+        .unwrap();
+    assert_eq!(resolved.id, target.id);
+    let fleet = store.agent_fleet().await.unwrap();
+    assert!(fleet.iter().any(|entry| entry.instance.id == target.id));
+    assert!(!fleet.iter().any(|entry| entry.instance.id == source.id));
+}
+
+#[tokio::test]
 async fn account_credential_reference_is_external_and_rebindable() {
     let store = Store::connect("sqlite::memory:").await.unwrap();
     let account = store

@@ -172,6 +172,7 @@ fn is_admin_route(method: &Method, path: &str) -> bool {
         || path.starts_with("/api/agent-credentials/")
         || path.ends_with("/credentials")
         || (path.starts_with("/api/machines/") && path.ends_with("/runtime-invite"))
+        || (path.starts_with("/api/agent-instances/") && path.ends_with("/merge"))
     {
         return true;
     }

@@ -29,6 +29,7 @@ pub fn routes() -> Router<AppState> {
         .route("/agent-instances/{id}", get(instance_get))
         .route("/agent-instances/{id}/rename", post(instance_rename))
         .route("/agent-instances/{id}/archive", post(instance_archive))
+        .route("/agent-instances/{id}/merge", post(instance_merge))
         .route("/agent-instances/{id}/heartbeat", post(heartbeat))
         .route(
             "/agent-instances/{id}/capacity",
@@ -56,6 +57,13 @@ struct CreateManagedCodexAgent {
     #[serde(default)]
     model: Option<String>,
 }
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MergeAgentInstance {
+    target_agent_instance_id: Id,
+}
+
 async fn profile_register(
     State(s): State<AppState>,
     Json(input): Json<RegisterProfile>,
@@ -204,6 +212,24 @@ async fn instance_archive(
     Path(id): Path<Id>,
 ) -> Result<Json<Value>, ApiError> {
     Ok(Json(json!(s.store.archive_agent(id).await?)))
+}
+async fn instance_merge(
+    State(s): State<AppState>,
+    Path(id): Path<Id>,
+    axum::Extension(identity): axum::Extension<crate::operator_auth::OperatorIdentity>,
+    Json(input): Json<MergeAgentInstance>,
+) -> Result<Json<Value>, ApiError> {
+    let bound_by = identity
+        .0
+        .get("label")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("operator");
+    Ok(Json(json!(
+        s.store
+            .merge_oauth_agent_into(id, input.target_agent_instance_id, bound_by)
+            .await?
+    )))
 }
 async fn heartbeat(
     State(s): State<AppState>,

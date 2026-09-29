@@ -571,7 +571,8 @@ function cleanAgentDisplayName(entry: FleetEntry, locale: Locale) {
   const { instance, profile, machine, reported_identity } = entry;
   const displayName = instance.display_name?.trim();
   const reportedName = reported_identity?.agent_name?.trim();
-  const generatedOauthName = profile.provider === "morrows" && /^morrows-oauth-client-\d+$/i.test(displayName || "");
+  const generatedOauthName = ["morrows", "lsm"].includes(profile.provider)
+    && /^(?:morrows|lsm)-oauth-client-\d+$/i.test(displayName || "");
   if (displayName && !generatedOauthName) return displayName;
   if (reportedName) return reportedName;
   if (displayName) return displayName;
@@ -598,16 +599,20 @@ function cleanAgentDisplayName(entry: FleetEntry, locale: Locale) {
 
 function accountDisplayName(entry: FleetEntry, locale: Locale) {
   return entry.reported_identity?.account_email?.trim()
+    || entry.account?.email?.trim()
+    || entry.account?.label?.trim()
     || (locale === "zh-CN" ? "未上报" : "Not reported");
 }
 
 function platformDisplayName(entry: FleetEntry, locale: Locale) {
   return entry.reported_identity?.platform?.trim()
+    || entry.profile.provider?.trim()
     || (locale === "zh-CN" ? "未上报" : "Not reported");
 }
 
 function machineDisplayName(entry: FleetEntry, locale: Locale) {
   return entry.reported_identity?.device?.trim()
+    || entry.machine?.name?.trim()
     || (locale === "zh-CN" ? "未上报" : "Not reported");
 }
 
@@ -746,6 +751,14 @@ export default function App() {
       entry.instance.status === "online" && (entry.latest_capacity?.available_slots ?? 0) > 0
     ).length,
   }), [agents]);
+  const taskManagementAssigneeName = useCallback((row: TaskManagementSummary) => {
+    const entry = row.executor_agent_instance_id
+      ? agents.find((item) => item.instance.id === row.executor_agent_instance_id)
+      : null;
+    return entry
+      ? cleanAgentDisplayName(entry, locale)
+      : row.executor_agent_display_name?.trim() || null;
+  }, [agents, locale]);
 
   const selectedTask = useMemo(() => tasks.find((task) => task.id === selectedId) ?? null, [tasks, selectedId]);
   const selectedProject = useMemo(
@@ -840,7 +853,7 @@ export default function App() {
           row.project_name || "",
           actorDisplayName(row.task.owner_actor_id),
           row.task.owner_actor_id,
-          row.executor_agent_display_name || "",
+          taskManagementAssigneeName(row) || "",
           row.executor_agent_instance_id || "",
         ].some((value) => value.toLocaleLowerCase(locale).includes(query));
       });
@@ -851,7 +864,7 @@ export default function App() {
         case "task": return row.task.title;
         case "project": return row.project_name?.trim() || null;
         case "publisher": return actorDisplayName(row.task.owner_actor_id);
-        case "assignee": return row.executor_agent_display_name?.trim() || null;
+        case "assignee": return taskManagementAssigneeName(row);
         case "created": return new Date(row.task.created_at).getTime();
         case "updated": return new Date(row.task.updated_at).getTime();
         case "priority": return row.task.priority;
@@ -870,7 +883,7 @@ export default function App() {
       return a.sourceIndex - b.sourceIndex;
     });
     return rows.map(({ row }) => row);
-  }, [taskManagement, taskManagementFilter, taskManagementQuery, taskManagementSort, locale]);
+  }, [taskManagement, taskManagementFilter, taskManagementQuery, taskManagementSort, locale, taskManagementAssigneeName]);
 
   const t = (key: TranslationKey) => translate(locale, key);
 
@@ -2102,9 +2115,9 @@ export default function App() {
                           <small>{row.task.owner_actor_id}</small>
                         </td>
                         <td>
-                          {row.executor_agent_display_name ? (
+                          {taskManagementAssigneeName(row) ? (
                             <>
-                              <strong>{row.executor_agent_display_name}</strong>
+                              <strong>{taskManagementAssigneeName(row)}</strong>
                               <small>
                                 {row.executor_assignment_status ? formatState(locale, row.executor_assignment_status) : ""}
                                 {row.executor_acquired_at ? ` · ${formatDateTime(locale, row.executor_acquired_at)}` : ""}
@@ -2325,7 +2338,17 @@ export default function App() {
             style={{ gridTemplateColumns: `${projectsPaneWidth}px 8px minmax(0, 1fr)` }}
           >
             <section className="queue-panel workspace-pane">
-              <AssignmentRequests locale={locale} tasks={tasks} agents={agents.map(entry => entry.instance)} onSelectTask={selectTask} onResolved={async () => { await refreshQueueBase(); await refreshDetail(); }} />
+              <AssignmentRequests
+                locale={locale}
+                tasks={tasks}
+                agents={agents.map((entry) => ({
+                  id: entry.instance.id,
+                  name: entry.instance.name,
+                  display_name: cleanAgentDisplayName(entry, locale),
+                }))}
+                onSelectTask={selectTask}
+                onResolved={async () => { await refreshQueueBase(); await refreshDetail(); }}
+              />
               <div className="task-browser-head">
                 <div>
                   <strong>{t("projects")}</strong>

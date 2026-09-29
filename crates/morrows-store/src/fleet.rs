@@ -309,6 +309,32 @@ impl Store {
         if client_id.chars().count() > 256 || client_id.chars().any(char::is_control) {
             return Err(DomainError::InvalidInput("invalid OAuth client id".into()));
         }
+        if let Some(agent_id) = sqlx::query_scalar::<_, String>(
+            "SELECT agent_instance_id FROM oauth_agent_bindings WHERE client_id=?",
+        )
+        .bind(client_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage)?
+        {
+            let agent_id = parse_id(agent_id)?;
+            let agent = self.get_agent(agent_id).await?;
+            if agent.archived_at.is_some() {
+                return Err(DomainError::InvalidState(format!(
+                    "OAuth client {client_id} is bound to archived agent {agent_id}"
+                )));
+            }
+            let now = Utc::now().to_rfc3339();
+            sqlx::query(
+                "UPDATE agent_instances SET status='online',last_heartbeat_at=? WHERE id=?",
+            )
+            .bind(&now)
+            .bind(agent_id.to_string())
+            .execute(&self.pool)
+            .await
+            .map_err(storage)?;
+            return self.get_agent(agent_id).await;
+        }
         // Preserve the technical AgentInstance across the LSM -> Morrows OAuth
         // ownership cutover. The authenticated client_id stayed the same, so a
         // new profile/name prefix must not split historical Task/Run ownership.
@@ -755,6 +781,236 @@ impl Store {
             .map_err(storage)?;
         tx.commit().await.map_err(storage)?;
         self.get_agent(id).await
+    }
+
+    /// Merge an OAuth-backed technical AgentInstance into one canonical AgentInstance.
+    ///
+    /// The OAuth client ID remains trusted authentication provenance through
+    /// oauth_agent_bindings, while every durable work/reference row is moved to
+    /// the canonical AgentInstance. This is deliberately an explicit control-plane
+    /// operation: self-reported identity never grants another Agent's permissions.
+    pub async fn merge_oauth_agent_into(
+        &self,
+        source_id: Id,
+        target_id: Id,
+        bound_by: &str,
+    ) -> Result<AgentInstance, DomainError> {
+        if source_id == target_id {
+            return Err(DomainError::InvalidInput(
+                "source and target AgentInstance must differ".into(),
+            ));
+        }
+        nonempty(bound_by, "bound_by")?;
+
+        let source = self.get_agent(source_id).await?;
+        let target = self.get_agent(target_id).await?;
+        if target.archived_at.is_some() {
+            return Err(DomainError::InvalidState(
+                "cannot merge into an archived AgentInstance".into(),
+            ));
+        }
+        let source_profile = self.get_profile(source.profile_id).await?;
+        if !matches!(source_profile.provider.as_str(), "lsm" | "morrows") {
+            return Err(DomainError::InvalidInput(
+                "only LSM/Morrows OAuth AgentInstances can be merged".into(),
+            ));
+        }
+        let client_id = source
+            .external_instance_ref
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                DomainError::InvalidState(
+                    "OAuth AgentInstance has no external client identity".into(),
+                )
+            })?
+            .trim()
+            .to_owned();
+
+        let now = Utc::now().to_rfc3339();
+        let source_text = source_id.to_string();
+        let target_text = target_id.to_string();
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(storage)?;
+
+        let active_overlap: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)
+             FROM assignments source_assignment
+             JOIN assignments target_assignment
+               ON target_assignment.task_id=source_assignment.task_id
+             WHERE source_assignment.agent_instance_id=?
+               AND target_assignment.agent_instance_id=?
+               AND source_assignment.status='active'
+               AND target_assignment.status='active'",
+        )
+        .bind(&source_text)
+        .bind(&target_text)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(storage)?;
+        if active_overlap > 0 {
+            return Err(DomainError::Conflict(
+                "source and target both own active assignments for the same task".into(),
+            ));
+        }
+
+        for (table, column) in [
+            ("agent_credentials", "agent_instance_id"),
+            ("agent_deliveries", "agent_instance_id"),
+            ("agent_identity_reports", "agent_instance_id"),
+            ("artifacts", "created_by"),
+            ("assignment_intakes", "agent_instance_id"),
+            ("assignment_requests", "agent_instance_id"),
+            ("assignments", "agent_instance_id"),
+            ("capacity_snapshots", "agent_instance_id"),
+            ("context_packages", "source_agent_id"),
+            ("decisions", "created_by"),
+            ("dispatch_decisions", "selected_agent_instance_id"),
+            ("handoffs", "created_by"),
+            ("launch_attempts", "agent_instance_id"),
+            ("launch_profiles", "agent_instance_id"),
+            ("memory_entries", "agent_instance_id"),
+            ("memory_publications", "agent_instance_id"),
+            ("message_threads", "created_by"),
+            ("messages", "created_by"),
+            ("messages", "recipient_agent_instance_id"),
+            ("run_milestones", "created_by"),
+            ("runs", "agent_instance_id"),
+            ("session_messages", "author_agent_instance_id"),
+            ("session_runtime_attempts", "agent_instance_id"),
+            ("sessions", "agent_instance_id"),
+            ("task_dependencies", "created_by"),
+        ] {
+            sqlx::query(&format!("UPDATE {table} SET {column}=? WHERE {column}=?"))
+                .bind(&target_text)
+                .bind(&source_text)
+                .execute(&mut *tx)
+                .await
+                .map_err(storage)?;
+        }
+
+        let source_actor = format!("agent:{source_id}");
+        let target_actor = format!("agent:{target_id}");
+        for (table, column) in [
+            ("tasks", "owner_actor_id"),
+            ("context_revisions", "created_by_actor_id"),
+            ("assignment_intakes", "approved_by_actor_id"),
+            ("task_dependencies", "created_by_actor_id"),
+            ("task_relationships", "created_by_actor_id"),
+        ] {
+            sqlx::query(&format!("UPDATE {table} SET {column}=? WHERE {column}=?"))
+                .bind(&target_actor)
+                .bind(&source_actor)
+                .execute(&mut *tx)
+                .await
+                .map_err(storage)?;
+        }
+        for table in ["events", "launch_instructions"] {
+            sqlx::query(&format!(
+                "UPDATE {table} SET actor_id=? WHERE actor_type='agent' AND actor_id=?"
+            ))
+            .bind(&target_text)
+            .bind(&source_text)
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?;
+            sqlx::query(&format!(
+                "UPDATE {table} SET actor_id=? WHERE actor_type='agent' AND actor_id=?"
+            ))
+            .bind(&target_actor)
+            .bind(&source_actor)
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?;
+        }
+        sqlx::query("UPDATE memory_git_operations SET actor_id=? WHERE actor_id=?")
+            .bind(&target_text)
+            .bind(&source_text)
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?;
+        sqlx::query(
+            "UPDATE task_continuation_policies
+             SET agent_ids_json=replace(agent_ids_json, ?, ?)
+             WHERE instr(agent_ids_json, ?) > 0",
+        )
+        .bind(format!("\"{source_text}\""))
+        .bind(format!("\"{target_text}\""))
+        .bind(&source_text)
+        .execute(&mut *tx)
+        .await
+        .map_err(storage)?;
+
+        sqlx::query(
+            "INSERT INTO oauth_agent_bindings(
+                client_id,agent_instance_id,source_agent_instance_id,bound_by,created_at,updated_at
+             ) VALUES(?,?,?,?,?,?)
+             ON CONFLICT(client_id) DO UPDATE SET
+                agent_instance_id=excluded.agent_instance_id,
+                source_agent_instance_id=excluded.source_agent_instance_id,
+                bound_by=excluded.bound_by,
+                updated_at=excluded.updated_at",
+        )
+        .bind(&client_id)
+        .bind(&target_text)
+        .bind(&source_text)
+        .bind(bound_by.trim())
+        .bind(&now)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await
+        .map_err(storage)?;
+
+        let target_last_seen = std::cmp::max(target.last_heartbeat_at, source.last_heartbeat_at);
+        let target_status = if source.status == "online" {
+            "online"
+        } else {
+            target.status.as_str()
+        };
+        sqlx::query(
+            "UPDATE agent_instances
+             SET status=?,last_heartbeat_at=?
+             WHERE id=?",
+        )
+        .bind(target_status)
+        .bind(target_last_seen.to_rfc3339())
+        .bind(&target_text)
+        .execute(&mut *tx)
+        .await
+        .map_err(storage)?;
+        sqlx::query(
+            "UPDATE agent_instances
+             SET status='archived',archived_at=?
+             WHERE id=?",
+        )
+        .bind(&now)
+        .bind(&source_text)
+        .execute(&mut *tx)
+        .await
+        .map_err(storage)?;
+
+        append_event_tx(
+            &mut tx,
+            "operator",
+            bound_by.trim(),
+            "agent_instance",
+            target_id,
+            "agent.oauth_identity_merged",
+            json!({
+                "source_agent_instance_id": source_id,
+                "source_display_name": source.display_name,
+                "oauth_client_id": client_id,
+                "target_agent_instance_id": target_id,
+            }),
+            None,
+        )
+        .await?;
+
+        tx.commit().await.map_err(storage)?;
+        self.get_agent(target_id).await
     }
 
     /// Identity ownership is checked before mutation. The heartbeat, host clock,

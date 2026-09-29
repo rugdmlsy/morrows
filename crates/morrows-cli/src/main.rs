@@ -24,6 +24,36 @@ enum Command {
         #[arg(long, default_value_t = 86400)]
         ttl_seconds: i64,
     },
+    /// Merge an OAuth-backed technical AgentInstance into a canonical AgentInstance.
+    AgentMerge {
+        #[arg(long)]
+        source_agent_id: uuid::Uuid,
+        #[arg(long)]
+        target_agent_id: uuid::Uuid,
+        /// Existing service database. This command never creates a new database.
+        #[arg(long)]
+        database: std::path::PathBuf,
+        #[arg(long, default_value = "morrows-cli")]
+        bound_by: String,
+    },
+    /// Rename one non-archived AgentInstance.
+    AgentRename {
+        #[arg(long)]
+        agent_id: uuid::Uuid,
+        #[arg(long)]
+        display_name: String,
+        /// Existing service database. This command never creates a new database.
+        #[arg(long)]
+        database: std::path::PathBuf,
+    },
+    /// Archive one AgentInstance without deleting historical references.
+    AgentArchive {
+        #[arg(long)]
+        agent_id: uuid::Uuid,
+        /// Existing service database. This command never creates a new database.
+        #[arg(long)]
+        database: std::path::PathBuf,
+    },
     /// Bind a legacy unbound task to an existing Project without allowing reassignment.
     TaskBindProject {
         #[arg(long)]
@@ -55,6 +85,56 @@ enum Command {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
+        Command::AgentMerge {
+            source_agent_id,
+            target_agent_id,
+            database,
+            bound_by,
+        } => {
+            let path = database.canonicalize()?;
+            anyhow::ensure!(
+                path.is_file(),
+                "database must be an existing service database"
+            );
+            let store =
+                morrows_store::Store::connect(&format!("sqlite://{}?mode=rw", path.display()))
+                    .await?;
+            let agent = store
+                .merge_oauth_agent_into(source_agent_id, target_agent_id, &bound_by)
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&agent)?);
+            Ok(())
+        }
+        Command::AgentRename {
+            agent_id,
+            display_name,
+            database,
+        } => {
+            let path = database.canonicalize()?;
+            anyhow::ensure!(
+                path.is_file(),
+                "database must be an existing service database"
+            );
+            let store =
+                morrows_store::Store::connect(&format!("sqlite://{}?mode=rw", path.display()))
+                    .await?;
+            let agent = store.rename_agent(agent_id, &display_name).await?;
+            println!("{}", serde_json::to_string_pretty(&agent)?);
+            Ok(())
+        }
+        Command::AgentArchive { agent_id, database } => {
+            let path = database.canonicalize()?;
+            anyhow::ensure!(
+                path.is_file(),
+                "database must be an existing service database"
+            );
+            let store =
+                morrows_store::Store::connect(&format!("sqlite://{}?mode=rw", path.display()))
+                    .await?;
+            let agent = store.archive_agent(agent_id).await?;
+            println!("{}", serde_json::to_string_pretty(&agent)?);
+            Ok(())
+        }
         Command::TaskBindProject {
             task_id,
             project_id,
@@ -133,6 +213,27 @@ mod tests {
                 .any(|argument| argument.get_id().as_str() == "project_id"),
             "work-request CLI must advertise --project-id"
         );
+        for (name, ids) in [
+            (
+                "agent-merge",
+                vec!["source_agent_id", "target_agent_id", "database", "bound_by"],
+            ),
+            ("agent-rename", vec!["agent_id", "display_name", "database"]),
+            ("agent-archive", vec!["agent_id", "database"]),
+        ] {
+            let subcommand = command
+                .get_subcommands()
+                .find(|subcommand| subcommand.get_name() == name)
+                .unwrap_or_else(|| panic!("{name} subcommand"));
+            for id in ids {
+                assert!(
+                    subcommand
+                        .get_arguments()
+                        .any(|argument| argument.get_id().as_str() == id),
+                    "{name} must advertise {id}"
+                );
+            }
+        }
         let repair = command
             .get_subcommands()
             .find(|subcommand| subcommand.get_name() == "task-bind-project")
