@@ -32,7 +32,7 @@ Morrows separates the system into three decoupled planes with explicit boundarie
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
-Standalone LSM is not the managed execution plane. Ordinary Morrows Tasks default to `morrow-runtime`; standalone LSM is retained only for compatibility/OAuth, diagnostics, emergency rescue and ARP, and must not create a parallel Task execution lifecycle. See [morrow-runtime.md](morrow-runtime.md).
+Standalone LSM is not the managed execution plane. Ordinary Morrows Tasks default to `morrow-runtime`; standalone LSM remains independent for its own clients and only as a compatibility/diagnostic/emergency-repair/ARP fallback for Morrows, without a parallel Task execution lifecycle. Public Morrows OAuth (discovery, registration, PKCE, access and rotating refresh tokens) belongs to `morrows-server` and persists in the Morrows database. All public clients use `/morrows`; see [morrows-oauth.md](morrows-oauth.md). The managed execution path is described in [morrow-runtime.md](morrow-runtime.md).
 
 ## Terminology Normalization & Naming Model (去歧义术语规范)
 

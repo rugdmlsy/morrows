@@ -246,9 +246,9 @@ def test_worker_event_route_uses_worker_token_behind_oauth(tmp_path, monkeypatch
     _configure(
         tmp_path,
         monkeypatch,
-        LOCAL_SHELL_MCP_AUTH_MODE="oauth",
+        LOCAL_SHELL_MCP_AUTH_MODE="internal",
         LOCAL_SHELL_MCP_AUTH_BYPASS_LOCALHOST="false",
-        LOCAL_SHELL_MCP_OAUTH_JWT_SECRET="x" * 40,
+        LOCAL_SHELL_MCP_RUNTIME_TOKEN_JWT_SECRET="x" * 40,
         LOCAL_SHELL_MCP_OAUTH_ADMIN_PIN="123456",
     )
     manager = remote.RemoteManager()

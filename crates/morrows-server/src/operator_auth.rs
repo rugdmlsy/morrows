@@ -5,7 +5,8 @@ use axum::{
     middleware::Next,
 };
 
-const LSM_OAUTH_CONTROL_HEADER: &str = "x-morrows-lsm-oauth-control";
+#[cfg(test)]
+const MORROWS_OAUTH_CONTROL_HEADER: &str = "x-morrows-oauth-control";
 
 #[derive(Clone)]
 pub struct OperatorAuthState {
@@ -61,47 +62,24 @@ pub async fn authenticate_operator_requests(
         return next.run(request).await;
     }
 
-    let required = required_control_role(&method, &path);
-    let lsm_oauth_verified = request
+    if let Some(token) = request
         .headers()
-        .get(crate::auth::LSM_OAUTH_VERIFIED_HEADER)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value == "1");
-    let lsm_oauth_control = request
-        .headers()
-        .get(LSM_OAUTH_CONTROL_HEADER)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value == "1");
-    let lsm_client_id = request
-        .headers()
-        .get(crate::auth::LSM_OAUTH_CLIENT_ID_HEADER)
-        .and_then(|value| value.to_str().ok())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned);
-    let lsm_client_name = request
-        .headers()
-        .get(crate::auth::LSM_OAUTH_CLIENT_NAME_HEADER)
-        .and_then(|value| value.to_str().ok())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned);
-    request.headers_mut().remove(LSM_OAUTH_CONTROL_HEADER);
-
-    if lsm_oauth_verified && lsm_oauth_control {
-        let Some(client_id) = lsm_client_id else {
-            return unauthorized("LSM OAuth control bridge is missing validated client identity");
-        };
-        request.extensions_mut().insert(OperatorIdentity(json!({
-            "authenticated": true,
-            "role": "admin",
-            "label": lsm_client_name.as_deref().unwrap_or("LSM OAuth"),
-            "expires_at": null,
-            "auth_source": "lsm_oauth",
-            "oauth_client_id": client_id,
-        })));
-        return next.run(request).await;
+        .get(AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+    {
+        if let Some(identity) = crate::oauth::verify(&state.store, token).await {
+            if !identity.control {
+                return unauthorized("Morrows control scope required");
+            }
+            request.extensions_mut().insert(OperatorIdentity(json!({
+                "authenticated": true, "role": "admin", "label": identity.client_name,
+                "auth_source": "morrows_oauth", "oauth_client_id": identity.client_id,
+            })));
+            return next.run(request).await;
+        }
     }
+    let required = required_control_role(&method, &path);
     let authorization = request
         .headers()
         .get(AUTHORIZATION)
@@ -322,7 +300,7 @@ mod tests {
         builder.body(Body::empty()).unwrap()
     }
 
-    fn lsm_control_request(
+    fn forged_control_request(
         method: Method,
         path: &str,
         verified: bool,
@@ -331,24 +309,30 @@ mod tests {
         let mut builder = Request::builder().method(method).uri(path);
         if verified {
             builder = builder
-                .header(crate::auth::LSM_OAUTH_VERIFIED_HEADER, "1")
-                .header(crate::auth::LSM_OAUTH_CLIENT_ID_HEADER, "browser-client")
-                .header(crate::auth::LSM_OAUTH_CLIENT_NAME_HEADER, "Morrows WebUI");
+                .header(crate::auth::MORROWS_OAUTH_VERIFIED_HEADER, "1")
+                .header(
+                    crate::auth::MORROWS_OAUTH_CLIENT_ID_HEADER,
+                    "browser-client",
+                )
+                .header(
+                    crate::auth::MORROWS_OAUTH_CLIENT_NAME_HEADER,
+                    "Morrows WebUI",
+                );
         }
         if control {
-            builder = builder.header(LSM_OAUTH_CONTROL_HEADER, "1");
+            builder = builder.header(MORROWS_OAUTH_CONTROL_HEADER, "1");
         }
         builder.body(Body::empty()).unwrap()
     }
 
     #[tokio::test]
-    async fn validated_lsm_oauth_control_assertion_is_admin_without_operator_bearer() {
+    async fn forwarded_oauth_headers_cannot_grant_operator_access() {
         let store = Store::connect("sqlite::memory:").await.unwrap();
         let app = app(store, true, None).await;
 
         assert_eq!(
             app.clone()
-                .oneshot(lsm_control_request(
+                .oneshot(forged_control_request(
                     Method::POST,
                     "/api/agent-profiles",
                     true,
@@ -357,21 +341,31 @@ mod tests {
                 .await
                 .unwrap()
                 .status(),
-            StatusCode::OK
+            StatusCode::UNAUTHORIZED
         );
         assert_eq!(
             app.clone()
-                .oneshot(lsm_control_request(Method::GET, "/api/tasks", true, false,))
+                .oneshot(forged_control_request(
+                    Method::GET,
+                    "/api/tasks",
+                    true,
+                    false,
+                ))
                 .await
                 .unwrap()
                 .status(),
             StatusCode::UNAUTHORIZED
         );
         assert_eq!(
-            app.oneshot(lsm_control_request(Method::GET, "/api/tasks", false, true,))
-                .await
-                .unwrap()
-                .status(),
+            app.oneshot(forged_control_request(
+                Method::GET,
+                "/api/tasks",
+                false,
+                true,
+            ))
+            .await
+            .unwrap()
+            .status(),
             StatusCode::UNAUTHORIZED
         );
     }

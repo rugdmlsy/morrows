@@ -29,7 +29,7 @@ from morrow_runtime.live_channel import (
     LiveChannelManager,
 )
 from morrow_runtime.main import _build_mcp_http_app
-from morrow_runtime.oauth import ALL_OAUTH_SCOPES
+from morrow_runtime.internal_tokens import RUNTIME_SCOPES
 from morrow_runtime.session_runtime import SessionRuntimeManager
 from morrow_runtime.settings import get_settings
 from morrow_runtime.tools import (
@@ -47,7 +47,7 @@ def _reserve_claim(sessions: SessionRuntimeManager, session_id: str) -> dict:
     return claim
 
 
-def _configure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, auth: str = "oauth") -> None:
+def _configure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, auth: str = "internal") -> None:
     monkeypatch.setenv("LOCAL_SHELL_MCP_WORKSPACE_ROOT", str(tmp_path))
     monkeypatch.setenv("LOCAL_SHELL_MCP_STATE_DIR", str(tmp_path / ".state"))
     monkeypatch.setenv("LOCAL_SHELL_MCP_AUDIT_LOG_PATH", str(tmp_path / "audit.jsonl"))
@@ -108,13 +108,13 @@ def test_live_workspace_tokens_rotate_and_events_are_bounded():
     logical_session_id = "s_token_rotation"
     channel, first_token = manager.open(
         subject="user",
-        scopes=tuple(ALL_OAUTH_SCOPES),
+        scopes=tuple(RUNTIME_SCOPES),
         parent_expires_at=parent_deadline,
         logical_session_id=logical_session_id,
     )
     same_channel, second_token = manager.open(
         subject="user",
-        scopes=tuple(ALL_OAUTH_SCOPES),
+        scopes=tuple(RUNTIME_SCOPES),
         parent_expires_at=parent_deadline,
         logical_session_id=logical_session_id,
     )
@@ -153,7 +153,7 @@ def test_live_channel_public_state_resolves_and_tolerates_missing_logical_sessio
     )
     channel, _ = live_channel_module.get_live_channel_manager().open(
         subject="user",
-        scopes=tuple(ALL_OAUTH_SCOPES),
+        scopes=tuple(RUNTIME_SCOPES),
         logical_session_id=started["session_id"],
     )
 
@@ -174,7 +174,7 @@ def test_app_reattach_does_not_shorten_shared_channel_expiry():
     now = time.time()
     channel, token = manager.open(
         subject="user",
-        scopes=tuple(ALL_OAUTH_SCOPES),
+        scopes=tuple(RUNTIME_SCOPES),
         parent_expires_at=now + 600,
         logical_session_id="s_task",
     )
@@ -194,7 +194,7 @@ def test_app_reattach_does_not_shorten_shared_channel_expiry():
     assert channel.expires_at == original_expiry
     assert manager.authenticate(token) is channel
     assert manager.authenticate(app_token) is channel
-    assert manager.authenticate_context(token)[2] == tuple(ALL_OAUTH_SCOPES)
+    assert manager.authenticate_context(token)[2] == tuple(RUNTIME_SCOPES)
     assert manager.authenticate_context(app_token)[2] == ("shell:read",)
     app_digest = manager._digest(app_token)
     manager._credentials[app_digest]["expires_at"] = now - 1
@@ -206,7 +206,7 @@ def test_empty_app_reattach_recovers_unique_recent_explicit_workspace():
     manager = LiveChannelManager()
     channel, model_token = manager.open(
         subject="user",
-        scopes=tuple(ALL_OAUTH_SCOPES),
+        scopes=tuple(RUNTIME_SCOPES),
         logical_session_id="s_task",
         machine="local",
         cwd="/workspace/project",
@@ -232,12 +232,12 @@ def test_empty_app_reattach_refuses_ambiguous_recent_workspaces():
     manager = LiveChannelManager()
     first, _ = manager.open(
         subject="user",
-        scopes=tuple(ALL_OAUTH_SCOPES),
+        scopes=tuple(RUNTIME_SCOPES),
         logical_session_id="s_first",
     )
     second, _ = manager.open(
         subject="user",
-        scopes=tuple(ALL_OAUTH_SCOPES),
+        scopes=tuple(RUNTIME_SCOPES),
         logical_session_id="s_second",
     )
     assert first is not second
@@ -254,7 +254,7 @@ def test_empty_app_reattach_refuses_to_replace_existing_workspace_after_claim_ex
     manager = LiveChannelManager()
     channel, _ = manager.open(
         subject="user",
-        scopes=tuple(ALL_OAUTH_SCOPES),
+        scopes=tuple(RUNTIME_SCOPES),
         logical_session_id="s_task",
     )
     manager._app_reattach_claims.clear()
@@ -274,12 +274,12 @@ def test_live_workspace_can_reattach_a_second_mcp_session_by_live_id():
     manager = LiveChannelManager()
     channel, first_token = manager.open(
         subject="user",
-        scopes=tuple(ALL_OAUTH_SCOPES),
+        scopes=tuple(RUNTIME_SCOPES),
     )
 
     attached, app_token = manager.open(
         subject="user",
-        scopes=tuple(ALL_OAUTH_SCOPES),
+        scopes=tuple(RUNTIME_SCOPES),
         live_id=channel.live_id,
     )
 
@@ -299,7 +299,7 @@ def test_live_workspace_can_reattach_a_second_mcp_session_by_live_id():
     with pytest.raises(PermissionError, match="different principal"):
         manager.open(
             subject="other",
-            scopes=tuple(ALL_OAUTH_SCOPES),
+            scopes=tuple(RUNTIME_SCOPES),
             live_id=channel.live_id,
         )
 
@@ -309,7 +309,7 @@ async def test_live_workspace_expiry_publish_and_wait_paths():
     manager = LiveChannelManager()
     channel, token = manager.open(
         subject="user",
-        scopes=tuple(ALL_OAUTH_SCOPES),
+        scopes=tuple(RUNTIME_SCOPES),
     )
 
     assert manager.authenticate(None) is None
@@ -1102,7 +1102,7 @@ async def test_live_workspace_keeps_model_and_human_mutations_collaborative(tmp_
 
 
 def test_live_continuation_failed_before_validation_releases_claim(tmp_path, monkeypatch):
-    _configure(tmp_path, monkeypatch, auth="oauth")
+    _configure(tmp_path, monkeypatch, auth="internal")
     live_manager = live_channel_module.get_live_channel_manager()
     session_manager = session_runtime_module.get_session_runtime_manager()
     logical = session_manager.manage("user", action="start", objective="Continue safely")
@@ -1118,7 +1118,7 @@ def test_live_continuation_failed_before_validation_releases_claim(tmp_path, mon
     logical_state.plan.last_agent_activity -= session_runtime_module.PLAN_EXECUTION_LEASE_S + 1
     _channel, token = live_manager.open(
         subject="user",
-        scopes=tuple(ALL_OAUTH_SCOPES),
+        scopes=tuple(RUNTIME_SCOPES),
         logical_session_id=logical["session_id"],
     )
     headers = {"Authorization": f"Bearer {token}"}
@@ -1159,7 +1159,7 @@ def test_live_continuation_failed_before_validation_releases_claim(tmp_path, mon
 
 
 def test_live_http_token_cors_and_collaborative_human_mutation(tmp_path, monkeypatch):
-    _configure(tmp_path, monkeypatch, auth="oauth")
+    _configure(tmp_path, monkeypatch, auth="internal")
     manager = live_channel_module.get_live_channel_manager()
     session_manager = session_runtime_module.get_session_runtime_manager()
     logical = session_manager.manage(
@@ -1168,7 +1168,7 @@ def test_live_http_token_cors_and_collaborative_human_mutation(tmp_path, monkeyp
     session_id = logical["session_id"]
     channel, token = manager.open(
         subject="user",
-        scopes=tuple(ALL_OAUTH_SCOPES),
+        scopes=tuple(RUNTIME_SCOPES),
         logical_session_id=logical["session_id"],
     )
     headers = {"Authorization": f"Bearer {token}", "Origin": "https://chatgpt.com"}
@@ -1342,7 +1342,7 @@ def test_live_http_token_authenticates_when_global_auth_is_disabled(tmp_path, mo
     manager = live_channel_module.get_live_channel_manager()
     channel, token = manager.open(
         subject="user",
-        scopes=tuple(ALL_OAUTH_SCOPES),
+        scopes=tuple(RUNTIME_SCOPES),
     )
     app = _build_mcp_http_app(build_mcp())
     with TestClient(app, base_url="http://testserver") as client:
@@ -1370,7 +1370,7 @@ def test_live_http_token_authenticates_when_global_auth_is_disabled(tmp_path, mo
         )
         _, replacement = manager.open(
             subject="user",
-            scopes=tuple(ALL_OAUTH_SCOPES),
+            scopes=tuple(RUNTIME_SCOPES),
         )
         original_ui = client.get(
             "/api/ui/files?machine=local&path=.",
@@ -1404,7 +1404,7 @@ def test_live_events_empty_batch_does_not_advance_cursor(tmp_path, monkeypatch):
     manager = live_channel_module.get_live_channel_manager()
     _, token = manager.open(
         subject="user",
-        scopes=tuple(ALL_OAUTH_SCOPES),
+        scopes=tuple(RUNTIME_SCOPES),
     )
 
     async def empty_wait(channel, after, timeout_s):  # noqa: ARG001
@@ -1499,11 +1499,11 @@ def test_live_workspace_is_hidden_in_stdio_mode(tmp_path, monkeypatch):
 
 
 def test_live_git_routes_remote_inspection_to_selected_machine(tmp_path, monkeypatch):
-    _configure(tmp_path, monkeypatch, auth="oauth")
+    _configure(tmp_path, monkeypatch, auth="internal")
     manager = live_channel_module.get_live_channel_manager()
     _, token = manager.open(
         subject="user",
-        scopes=tuple(ALL_OAUTH_SCOPES),
+        scopes=tuple(RUNTIME_SCOPES),
     )
 
     class FakeRemote:
@@ -1640,7 +1640,7 @@ async def test_live_events_detaches_channel_when_durable_session_disappears(monk
     manager = LiveChannelManager()
     channel, token = manager.open(
         subject="user",
-        scopes=tuple(ALL_OAUTH_SCOPES),
+        scopes=tuple(RUNTIME_SCOPES),
         logical_session_id="s_deleted_elsewhere",
     )
 
@@ -1662,7 +1662,7 @@ async def test_live_events_detaches_channel_when_durable_session_disappears(monk
     request.state.principal = Principal(
         email=None,
         subject="user",
-        claims={"scope": " ".join(ALL_OAUTH_SCOPES), "live_id": channel.live_id},
+        claims={"scope": " ".join(RUNTIME_SCOPES), "live_id": channel.live_id},
     )
 
     response = await live_routes.live_events(request)
@@ -1676,13 +1676,13 @@ def test_live_workspace_stale_live_id_falls_back_to_logical_channel():
     manager = LiveChannelManager()
     channel, _ = manager.open(
         subject="user",
-        scopes=tuple(ALL_OAUTH_SCOPES),
+        scopes=tuple(RUNTIME_SCOPES),
         logical_session_id="s_task",
     )
 
     reattached, _ = manager.open(
         subject="user",
-        scopes=tuple(ALL_OAUTH_SCOPES),
+        scopes=tuple(RUNTIME_SCOPES),
         live_id="expired-live-id",
         logical_session_id="s_task",
     )
@@ -1696,7 +1696,7 @@ def test_live_workspace_detaches_deleted_logical_session():
     manager = LiveChannelManager()
     channel, _ = manager.open(
         subject="user",
-        scopes=tuple(ALL_OAUTH_SCOPES),
+        scopes=tuple(RUNTIME_SCOPES),
         logical_session_id="s_deleted",
     )
 
@@ -1754,7 +1754,7 @@ def test_live_resource_fallbacks_and_explicit_channel_rebinding(tmp_path, monkey
     )
 
     manager = LiveChannelManager()
-    channel, _ = manager.open(subject="user", scopes=tuple(ALL_OAUTH_SCOPES))
+    channel, _ = manager.open(subject="user", scopes=tuple(RUNTIME_SCOPES))
     with manager._lock:
         manager._set_logical_session_locked(channel, "s_one")
         first_generation = channel.binding_generation
@@ -1770,7 +1770,7 @@ def test_live_resource_fallbacks_and_explicit_channel_rebinding(tmp_path, monkey
 
 
 def test_live_routes_reject_binding_churn_and_stale_continuation(tmp_path, monkeypatch):
-    _configure(tmp_path, monkeypatch, auth="oauth")
+    _configure(tmp_path, monkeypatch, auth="internal")
     live_manager = live_channel_module.get_live_channel_manager()
     session_manager = session_runtime_module.get_session_runtime_manager()
     session_id = session_manager.manage(
@@ -1784,7 +1784,7 @@ def test_live_routes_reject_binding_churn_and_stale_continuation(tmp_path, monke
     )
     channel, token = live_manager.open(
         subject="user",
-        scopes=tuple(ALL_OAUTH_SCOPES),
+        scopes=tuple(RUNTIME_SCOPES),
         logical_session_id=session_id,
     )
     headers = {"Authorization": f"Bearer {token}"}
@@ -1805,7 +1805,7 @@ def test_live_routes_reject_binding_churn_and_stale_continuation(tmp_path, monke
         # Restore the real binding check and reactivate the Plan after the human
         # mutation above; then exercise continuation request validation.
         monkeypatch.undo()
-        _configure(tmp_path, monkeypatch, auth="oauth")
+        _configure(tmp_path, monkeypatch, auth="internal")
         live_manager = live_channel_module.get_live_channel_manager()
         session_manager = session_runtime_module.get_session_runtime_manager()
         session_id = session_manager.manage(
@@ -1822,7 +1822,7 @@ def test_live_routes_reject_binding_churn_and_stale_continuation(tmp_path, monke
         state.plan.last_agent_activity -= session_runtime_module.PLAN_EXECUTION_LEASE_S + 1
         channel, token = live_manager.open(
             subject="user",
-            scopes=tuple(ALL_OAUTH_SCOPES),
+            scopes=tuple(RUNTIME_SCOPES),
             logical_session_id=session_id,
         )
         headers = {"Authorization": f"Bearer {token}"}
@@ -1853,9 +1853,9 @@ def test_live_routes_reject_binding_churn_and_stale_continuation(tmp_path, monke
 
 
 def test_live_git_route_reports_local_failure(tmp_path, monkeypatch):
-    _configure(tmp_path, monkeypatch, auth="oauth")
+    _configure(tmp_path, monkeypatch, auth="internal")
     manager = live_channel_module.get_live_channel_manager()
-    _channel, token = manager.open(subject="user", scopes=tuple(ALL_OAUTH_SCOPES))
+    _channel, token = manager.open(subject="user", scopes=tuple(RUNTIME_SCOPES))
     monkeypatch.setenv("LOCAL_SHELL_MCP_DISABLE_LOCAL", "true")
     get_settings.cache_clear()
     app = _build_mcp_http_app(build_mcp())

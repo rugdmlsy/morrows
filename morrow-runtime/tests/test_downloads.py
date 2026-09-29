@@ -14,8 +14,8 @@ def _reset(tmp_path, monkeypatch):
     monkeypatch.setenv("LOCAL_SHELL_MCP_WORKSPACE_ROOT", str(tmp_path))
     monkeypatch.setenv("LOCAL_SHELL_MCP_STATE_DIR", str(tmp_path / ".state"))
     monkeypatch.setenv("LOCAL_SHELL_MCP_PUBLIC_BASE_URL", "https://files.example.test")
-    monkeypatch.setenv("LOCAL_SHELL_MCP_AUTH_MODE", "oauth")
-    monkeypatch.setenv("LOCAL_SHELL_MCP_OAUTH_JWT_SECRET", "x" * 32)
+    monkeypatch.setenv("LOCAL_SHELL_MCP_AUTH_MODE", "internal")
+    monkeypatch.setenv("LOCAL_SHELL_MCP_RUNTIME_TOKEN_JWT_SECRET", "x" * 32)
     get_settings.cache_clear()
 
 

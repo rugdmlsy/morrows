@@ -70,9 +70,9 @@ def test_audit_serialization_trimming_and_all_filters(tmp_path, monkeypatch):
     _configure(
         tmp_path,
         monkeypatch,
-        LOCAL_SHELL_MCP_AUTH_MODE="oauth",
+        LOCAL_SHELL_MCP_AUTH_MODE="internal",
         LOCAL_SHELL_MCP_OAUTH_ADMIN_PIN="configured-secret-pin",
-        LOCAL_SHELL_MCP_OAUTH_JWT_SECRET="configured-secret-key-that-is-long-enough",
+        LOCAL_SHELL_MCP_RUNTIME_TOKEN_JWT_SECRET="configured-secret-key-that-is-long-enough",
         LOCAL_SHELL_MCP_MAX_AUDIT_LOG_BYTES=200,
         LOCAL_SHELL_MCP_MAX_AUDIT_TAIL_BYTES=40,
     )
@@ -193,8 +193,6 @@ def test_auth_scopes_hosts_tokens_and_metadata(tmp_path, monkeypatch):
         "/remote/worker-event",
         "/remote/mobile-dashboard",
         "/remote/transfer/x",
-        "/.well-known/x",
-        "/oauth/x",
         "/download/x",
         "/console",
         "/console/",
@@ -210,23 +208,23 @@ def test_auth_oauth_body_and_mcp_helpers(tmp_path, monkeypatch):
     _configure(
         tmp_path,
         monkeypatch,
-        LOCAL_SHELL_MCP_AUTH_MODE="oauth",
-        LOCAL_SHELL_MCP_OAUTH_JWT_SECRET="x" * 40,
+        LOCAL_SHELL_MCP_AUTH_MODE="internal",
+        LOCAL_SHELL_MCP_RUNTIME_TOKEN_JWT_SECRET="x" * 40,
         LOCAL_SHELL_MCP_PUBLIC_BASE_URL="http://testserver",
     )
     settings = get_settings()
-    with pytest.raises(HTTPException, match="Missing OAuth"):
-        auth._verify_oauth(_request(), settings)
+    with pytest.raises(HTTPException, match="Runtime capability"):
+        auth._verify_runtime_token(_request(), settings)
 
-    import morrow_runtime.oauth as oauth
+    import morrow_runtime.internal_tokens as oauth
 
     monkeypatch.setattr(oauth, "validate_bearer_token", lambda *args: (_ for _ in ()).throw(jwt.InvalidTokenError("bad")))
-    with pytest.raises(HTTPException, match="Invalid OAuth"):
-        auth._verify_oauth(
+    with pytest.raises(HTTPException, match="Invalid runtime"):
+        auth._verify_runtime_token(
             _request(headers={"authorization": "Bearer bad"}), settings
         )
     monkeypatch.setattr(oauth, "validate_bearer_token", lambda *args: {"sub": "user", "scope": "shell:read"})
-    verified = auth._verify_oauth(
+    verified = auth._verify_runtime_token(
         _request(headers={"authorization": "Bearer good"}), settings
     )
     assert verified.subject == "user"

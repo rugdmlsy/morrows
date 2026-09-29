@@ -1027,8 +1027,8 @@ fn clip_session_prompt(value: &str, max_chars: usize) -> String {
 }
 
 fn session_codebuddy_mcp_config(
-    agent_id: Id,
-    token: &str,
+    _agent_id: Id,
+    _token: &str,
     runtime_binding: Option<&crate::morrow_runtime::RuntimeAgentBinding>,
 ) -> Value {
     let mut servers = serde_json::Map::new();
@@ -1037,10 +1037,6 @@ fn session_codebuddy_mcp_config(
         json!({
             "type": "http",
             "url": super::launch::morrows_mcp_url(),
-            "headers": {
-                "Authorization": format!("Bearer {token}"),
-                "X-Agent-Instance-Id": agent_id.to_string()
-            },
             "description": "Morrows employee interface"
         }),
     );

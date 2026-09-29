@@ -9,6 +9,9 @@ morrows-core = { path = "../morrows-core" }
 morrows-store = { path = "../morrows-store" }
 anyhow.workspace = true
 base64 = "0.22"
+hmac = "0.12"
+sha2.workspace = true
+chrono.workspace = true
 axum.workspace = true
 rmcp.workspace = true
 reqwest.workspace = true

@@ -40,7 +40,7 @@ from morrow_runtime.human_ui import (
     api_files,
     ui_asset,
 )
-from morrow_runtime.oauth import issue_access_token, public_base_url
+from morrow_runtime.internal_tokens import issue_access_token, public_base_url
 from morrow_runtime.remote import execute_worker_tool
 from morrow_runtime.session_runtime import get_session_runtime_manager
 from morrow_runtime.settings import get_settings
@@ -79,7 +79,7 @@ def test_trusted_local_ui_maps_logical_session_subject_for_listing_and_creation(
     assert _logical_session_subject(request) is None
     assert _logical_session_subject(request, create=True) == "anonymous"
 
-    _configure(tmp_path, monkeypatch, auth_mode="oauth")
+    _configure(tmp_path, monkeypatch, auth_mode="internal")
     assert _logical_session_subject(request, create=True) == "local-user"
 
     fallback_settings = type("FallbackSettings", (), {"auth_mode": "custom"})()
@@ -835,7 +835,7 @@ def test_audit_node_and_session_filters_are_exact(tmp_path, monkeypatch):
     assert result["entries"][0]["ts"] == 1
 
 def test_webui_shell_is_public_but_api_remains_oauth_protected(tmp_path, monkeypatch):
-    _configure(tmp_path, monkeypatch, auth_mode="oauth")
+    _configure(tmp_path, monkeypatch, auth_mode="internal")
     monkeypatch.setenv("LOCAL_SHELL_MCP_AUTH_BYPASS_LOCALHOST", "false")
     get_settings.cache_clear()
     client = TestClient(build_http_app())
@@ -849,7 +849,7 @@ def test_webui_shell_is_public_but_api_remains_oauth_protected(tmp_path, monkeyp
 
 
 def test_native_tui_token_bypasses_oauth_without_weakening_browser_api(tmp_path, monkeypatch):
-    _configure(tmp_path, monkeypatch, auth_mode="oauth")
+    _configure(tmp_path, monkeypatch, auth_mode="internal")
     monkeypatch.setenv("LOCAL_SHELL_MCP_AUTH_BYPASS_LOCALHOST", "false")
     get_settings.cache_clear()
     token = get_or_create_ui_local_token()
@@ -868,7 +868,7 @@ def test_native_tui_token_bypasses_oauth_without_weakening_browser_api(tmp_path,
 
 
 def test_native_tui_token_is_rejected_from_non_loopback_peer(tmp_path, monkeypatch):
-    _configure(tmp_path, monkeypatch, auth_mode="oauth")
+    _configure(tmp_path, monkeypatch, auth_mode="internal")
     monkeypatch.setenv("LOCAL_SHELL_MCP_AUTH_BYPASS_LOCALHOST", "false")
     get_settings.cache_clear()
     token = get_or_create_ui_local_token()
@@ -883,9 +883,9 @@ def test_native_tui_token_is_rejected_from_non_loopback_peer(tmp_path, monkeypat
 
 
 def test_human_ui_rejects_destructive_action_without_write_scope(tmp_path, monkeypatch):
-    _configure(tmp_path, monkeypatch, auth_mode="oauth")
+    _configure(tmp_path, monkeypatch, auth_mode="internal")
     monkeypatch.setenv("LOCAL_SHELL_MCP_AUTH_BYPASS_LOCALHOST", "false")
-    monkeypatch.setenv("LOCAL_SHELL_MCP_OAUTH_JWT_SECRET", "scope-test-secret-which-is-at-least-32-bytes")
+    monkeypatch.setenv("LOCAL_SHELL_MCP_RUNTIME_TOKEN_JWT_SECRET", "scope-test-secret-which-is-at-least-32-bytes")
     get_settings.cache_clear()
     victim = tmp_path / "victim.txt"
     victim.write_text("keep", encoding="utf-8")
@@ -951,8 +951,8 @@ def _bearer_protocol(token: str) -> str:
 
 
 def test_websocket_requires_full_human_ui_scope_set(tmp_path, monkeypatch):
-    _configure(tmp_path, monkeypatch, auth_mode="oauth")
-    monkeypatch.setenv("LOCAL_SHELL_MCP_OAUTH_JWT_SECRET", "scope-test-secret-which-is-at-least-32-bytes")
+    _configure(tmp_path, monkeypatch, auth_mode="internal")
+    monkeypatch.setenv("LOCAL_SHELL_MCP_RUNTIME_TOKEN_JWT_SECRET", "scope-test-secret-which-is-at-least-32-bytes")
     monkeypatch.setenv("LOCAL_SHELL_MCP_PUBLIC_BASE_URL", "https://control.example.com")
     monkeypatch.setenv("LOCAL_SHELL_MCP_OAUTH_ADMIN_PIN", "long-random-test-pin")
     get_settings.cache_clear()
@@ -989,7 +989,7 @@ def test_websocket_requires_full_human_ui_scope_set(tmp_path, monkeypatch):
     )
 
 def test_oauth_websocket_does_not_trust_loopback_reverse_proxy(tmp_path, monkeypatch):
-    _configure(tmp_path, monkeypatch, auth_mode="oauth")
+    _configure(tmp_path, monkeypatch, auth_mode="internal")
     monkeypatch.setenv("LOCAL_SHELL_MCP_AUTH_BYPASS_LOCALHOST", "true")
     get_settings.cache_clear()
 
@@ -1002,18 +1002,18 @@ def test_none_auth_mode_allows_websocket_without_token(tmp_path, monkeypatch):
     assert _authorize_websocket(_websocket_for_test(client_host="203.0.113.9")) is True
 
 
-def test_websocket_origin_maps_to_http_oauth_resource(tmp_path, monkeypatch):
-    _configure(tmp_path, monkeypatch, auth_mode="oauth")
+def test_websocket_origin_maps_to_http_runtime_token_resource(tmp_path, monkeypatch):
+    _configure(tmp_path, monkeypatch, auth_mode="internal")
     websocket = _websocket_for_test(client_host="203.0.113.9")
 
     assert public_base_url(websocket) == "https://control.example.com"
 
 
 def test_http_localhost_bypass_is_not_inherited_by_reverse_proxy(tmp_path, monkeypatch):
-    _configure(tmp_path, monkeypatch, auth_mode="oauth")
+    _configure(tmp_path, monkeypatch, auth_mode="internal")
     monkeypatch.setenv("LOCAL_SHELL_MCP_MODE", "http")
     monkeypatch.setenv("LOCAL_SHELL_MCP_AUTH_BYPASS_LOCALHOST", "true")
-    monkeypatch.setenv("LOCAL_SHELL_MCP_OAUTH_JWT_SECRET", "x" * 32)
+    monkeypatch.setenv("LOCAL_SHELL_MCP_RUNTIME_TOKEN_JWT_SECRET", "x" * 32)
     get_settings.cache_clear()
     client = TestClient(build_http_app(), client=("127.0.0.1", 4242))
 

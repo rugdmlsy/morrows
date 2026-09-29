@@ -31,13 +31,13 @@ DEFAULT_WORKSPACE_ROOT = Path("/workspace")
 DEFAULT_STATE_DIR = DEFAULT_WORKSPACE_ROOT / ".morrow-runtime"
 DEFAULT_AUDIT_LOG_PATH = DEFAULT_STATE_DIR / "audit.jsonl"
 DEFAULT_AGENT_CONFIG_DIR = DEFAULT_STATE_DIR / "agent_config"
-OAUTH_JWT_SECRET_FILE_NAME = "oauth-jwt-secret"
-_WEAK_OAUTH_SECRET_VALUES = {
+RUNTIME_TOKEN_JWT_SECRET_FILE_NAME = "runtime-token-secret"
+_WEAK_RUNTIME_TOKEN_SECRET_VALUES = {
     "",
     "dev-" + "change-me",
     "change-me-64-hex-random-secret",
 }
-_OAUTH_SECRET_THREAD_LOCK = threading.Lock()
+_RUNTIME_TOKEN_SECRET_THREAD_LOCK = threading.Lock()
 
 _POSITIVE_INTEGER_SETTINGS = (
     "port",
@@ -85,7 +85,6 @@ _POSITIVE_INTEGER_SETTINGS = (
     "container_client_max_concurrent_calls",
     "mcp_session_idle_timeout_s",
     "mcp_max_sessions",
-    "oauth_code_ttl_s",
 )
 
 _NONNEGATIVE_INTEGER_SETTINGS = (
@@ -93,7 +92,7 @@ _NONNEGATIVE_INTEGER_SETTINGS = (
     "max_audit_archive_bytes",
     "file_download_default_max_downloads",
     "file_download_max_file_bytes",
-    "oauth_access_token_ttl_s",
+    "runtime_token_access_token_ttl_s",
     "remote_peer_transfer_port",
 )
 
@@ -147,7 +146,7 @@ def _replace_settings(settings: Settings, **updates: Any) -> Settings:
     return replace(settings, **updates)
 
 
-def _read_oauth_secret(path: Path) -> str | None:
+def _read_runtime_secret(path: Path) -> str | None:
     try:
         with path.open("r", encoding="utf-8") as handle:
             value = handle.read().strip()
@@ -157,8 +156,8 @@ def _read_oauth_secret(path: Path) -> str | None:
 
 
 @contextlib.contextmanager
-def _oauth_secret_file_lock(state_dir: Path):  # noqa: ANN201
-    lock_path = state_dir / f"{OAUTH_JWT_SECRET_FILE_NAME}.lock"
+def _runtime_secret_file_lock(state_dir: Path):  # noqa: ANN201
+    lock_path = state_dir / f"{RUNTIME_TOKEN_JWT_SECRET_FILE_NAME}.lock"
     with lock_path.open("a+b") as handle:
         with contextlib.suppress(OSError):
             lock_path.chmod(0o600)
@@ -189,16 +188,16 @@ def _oauth_secret_file_lock(state_dir: Path):  # noqa: ANN201
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
-def _get_or_create_oauth_secret(state_dir: Path) -> str:
-    path = state_dir / OAUTH_JWT_SECRET_FILE_NAME
+def _get_or_create_runtime_secret(state_dir: Path) -> str:
+    path = state_dir / RUNTIME_TOKEN_JWT_SECRET_FILE_NAME
     path.parent.mkdir(parents=True, exist_ok=True)
-    with _OAUTH_SECRET_THREAD_LOCK, _oauth_secret_file_lock(state_dir):
-        existing = _read_oauth_secret(path)
+    with _RUNTIME_TOKEN_SECRET_THREAD_LOCK, _runtime_secret_file_lock(state_dir):
+        existing = _read_runtime_secret(path)
         if existing:
             return existing
         if path.exists():
             raise RuntimeError(
-                f"OAuth secret file exists but is invalid: {path}. "
+                f"Runtime secret file exists but is invalid: {path}. "
                 "Remove it or replace it with at least 32 bytes of random data."
             )
 
@@ -225,22 +224,22 @@ def _get_or_create_oauth_secret(state_dir: Path) -> str:
         return generated
 
 
-def _ensure_oauth_jwt_secret(settings: Settings) -> Settings:
-    if settings.auth_mode != "oauth":
+def _ensure_runtime_token_jwt_secret(settings: Settings) -> Settings:
+    if settings.auth_mode != "internal":
         return settings
-    current = str(settings.oauth_jwt_secret or "")
+    current = str(settings.runtime_token_jwt_secret or "")
     if settings.stateless_controller and (
-        current in _WEAK_OAUTH_SECRET_VALUES or len(current.encode("utf-8")) < 32
+        current in _WEAK_RUNTIME_TOKEN_SECRET_VALUES or len(current.encode("utf-8")) < 32
     ):
         raise RuntimeError(
-            "LOCAL_SHELL_MCP_OAUTH_JWT_SECRET must be explicitly configured with at least "
+            "LOCAL_SHELL_MCP_RUNTIME_TOKEN_JWT_SECRET must be explicitly configured with at least "
             "32 bytes when stateless_controller=true"
         )
-    if current not in _WEAK_OAUTH_SECRET_VALUES:
+    if current not in _WEAK_RUNTIME_TOKEN_SECRET_VALUES:
         return settings
     return _replace_settings(
         settings,
-        oauth_jwt_secret=_get_or_create_oauth_secret(settings.state_dir),
+        runtime_token_jwt_secret=_get_or_create_runtime_secret(settings.state_dir),
     )
 
 
@@ -282,9 +281,7 @@ SENSITIVE_SETTING_KEYS = {
     "cf_access_allowed_emails",
     "cf_access_allowed_email_domains",
     "control_api_key",
-    "oauth_admin_pin",
-    "oauth_jwt_secret",
-    "oauth_legacy_jwt_secret",
+    "runtime_token_jwt_secret",
     "remote_mobile_apns_team_id",
     "remote_mobile_apns_key_id",
     "remote_mobile_apns_key_path",
@@ -458,8 +455,8 @@ if _PYDANTIC_AVAILABLE:
         git_bin: str = "git"
         python_bin: str = Field(default_factory=default_python_executable)
 
-        # Authentication. OAuth is the default for ChatGPT custom connectors.
-        auth_mode: Literal["none", "oauth"] = "oauth"
+        # Internal transport authentication; public OAuth is owned by Morrows.
+        auth_mode: Literal["none", "internal"] = "internal"
         control_api_key: str | None = None
         require_session_capability: bool = False
         auth_bypass_localhost: bool = True
@@ -467,23 +464,16 @@ if _PYDANTIC_AVAILABLE:
         mcp_session_idle_timeout_s: int = 180
         mcp_max_sessions: int = 1024
 
-        # Built-in OAuth 2.1 authorization server for ChatGPT MCP connectors.
+        # Private runtime credential signing, independent of public Morrows OAuth.
         # Set public_base_url to the externally reachable HTTPS origin, e.g. https://morrow-runtime.example.com
         public_base_url: str | None = None
-        oauth_issuer: str | None = None
-        oauth_resource: str | None = None
-        oauth_admin_pin: str | None = None
-        oauth_jwt_secret: str = Field(
-            default_factory=lambda: os.getenv("LOCAL_SHELL_MCP_OAUTH_JWT_SECRET") or "dev-change-me"
+        runtime_token_issuer: str | None = None
+        runtime_token_resource: str | None = None
+        runtime_token_jwt_secret: str = Field(
+            default_factory=lambda: os.getenv("LOCAL_SHELL_MCP_RUNTIME_TOKEN_JWT_SECRET") or "dev-change-me"
         )
-        # Transitional verification only. New Morrows OAuth tokens are always
-        # issued by this runtime under oauth_issuer/oauth_resource.
-        oauth_legacy_jwt_secret: str | None = None
-        oauth_legacy_issuer: str | None = None
-        oauth_legacy_resource: str | None = None
-        # 0 means access tokens never expire.
-        oauth_access_token_ttl_s: int = 0
-        oauth_code_ttl_s: int = 300
+        # Internal credentials must expire; public refresh grants live in Morrows.
+        runtime_token_access_token_ttl_s: int = 3600
 
         # Command policy. Set denylist empty if this container is intentionally disposable.
         command_denylist: Annotated[list[str], NoDecode] = Field(
@@ -702,7 +692,7 @@ else:
         git_bin: str = "git"
         python_bin: str = field(default_factory=default_python_executable)
 
-        auth_mode: Literal["none", "oauth"] = "oauth"
+        auth_mode: Literal["none", "internal"] = "internal"
         control_api_key: str | None = None
         require_session_capability: bool = False
         auth_bypass_localhost: bool = True
@@ -711,17 +701,12 @@ else:
         mcp_max_sessions: int = 1024
 
         public_base_url: str | None = None
-        oauth_issuer: str | None = None
-        oauth_resource: str | None = None
-        oauth_admin_pin: str | None = None
-        oauth_jwt_secret: str = field(
-            default_factory=lambda: os.getenv("LOCAL_SHELL_MCP_OAUTH_JWT_SECRET") or "dev-change-me"
+        runtime_token_issuer: str | None = None
+        runtime_token_resource: str | None = None
+        runtime_token_jwt_secret: str = field(
+            default_factory=lambda: os.getenv("LOCAL_SHELL_MCP_RUNTIME_TOKEN_JWT_SECRET") or "dev-change-me"
         )
-        oauth_legacy_jwt_secret: str | None = None
-        oauth_legacy_issuer: str | None = None
-        oauth_legacy_resource: str | None = None
-        oauth_access_token_ttl_s: int = 0
-        oauth_code_ttl_s: int = 300
+        runtime_token_access_token_ttl_s: int = 3600
 
         command_denylist: list[str] = field(
             default_factory=lambda: [
@@ -829,7 +814,7 @@ def get_settings() -> Settings:
         settings.workspace_root.mkdir(parents=True, exist_ok=True)
     if settings.state_backend == "file":
         settings.state_dir.mkdir(parents=True, exist_ok=True)
-    settings = _ensure_oauth_jwt_secret(settings)
+    settings = _ensure_runtime_token_jwt_secret(settings)
     if settings.state_backend == "file":
         settings.audit_log_path.parent.mkdir(parents=True, exist_ok=True)
         settings.agent_config_dir.mkdir(parents=True, exist_ok=True)
@@ -850,24 +835,15 @@ def safe_settings_dump(settings: Settings | None = None) -> dict:
     return data
 
 
-def validate_public_oauth_configuration(settings: Settings | None = None) -> None:
+def validate_runtime_token_configuration(settings: Settings | None = None) -> None:
     settings = settings or get_settings()
-    if settings.auth_mode != "oauth":
+    if settings.auth_mode != "internal":
         return
     if (
-        settings.oauth_jwt_secret in _WEAK_OAUTH_SECRET_VALUES
-        or len(settings.oauth_jwt_secret.encode("utf-8")) < 32
+        settings.runtime_token_jwt_secret in _WEAK_RUNTIME_TOKEN_SECRET_VALUES
+        or len(settings.runtime_token_jwt_secret.encode("utf-8")) < 32
     ):
         raise RuntimeError(
-            "LOCAL_SHELL_MCP_OAUTH_JWT_SECRET must be at least 32 bytes of strong random data "
-            "when OAuth authentication is enabled."
-        )
-    if not settings.public_base_url:
-        return
-    pin = (settings.oauth_admin_pin or "").strip()
-    weak_pin_values = {"", "change-me", "change-me-long-random-pin"}
-    if pin in weak_pin_values or len(pin) < 8:
-        raise RuntimeError(
-            "LOCAL_SHELL_MCP_OAUTH_ADMIN_PIN must be set to a non-placeholder value of at least 8 characters "
-            "when LOCAL_SHELL_MCP_PUBLIC_BASE_URL is configured."
+            "LOCAL_SHELL_MCP_RUNTIME_TOKEN_JWT_SECRET must be at least 32 bytes of strong random data "
+            "when internal runtime authentication is enabled."
         )

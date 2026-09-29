@@ -1,6 +1,5 @@
-# Managed by Morrows. Standalone Local Shell MCP must not overwrite this file.
-# One Cloudflare hostname is shared, but /morrows is owned by Morrows and its
-# embedded morrow-runtime. Standalone LSM keeps the remaining root surface.
+# Managed by Morrows. Public Morrows authentication and MCP go directly to the
+# control plane; neither standalone LSM nor morrow-runtime is on that path.
 :8765 {
 	bind 127.0.0.1
 
@@ -13,21 +12,19 @@
 		redir * /morrows/ui/ 302
 	}
 
-	# RFC 9728 discovery is rooted at the resource origin, before /morrows.
-	@morrows_resource_metadata path /.well-known/oauth-protected-resource/morrows
-	handle @morrows_resource_metadata {
-		reverse_proxy 127.0.0.1:8790
+	@morrows_metadata path /.well-known/oauth-protected-resource/morrows /.well-known/oauth-authorization-server/morrows/auth
+	handle @morrows_metadata {
+		reverse_proxy 127.0.0.1:8787
 	}
 
 	@morrows_auth path /morrows/auth /morrows/auth/*
 	handle @morrows_auth {
-		uri strip_prefix /morrows/auth
-		reverse_proxy 127.0.0.1:8790
+		reverse_proxy 127.0.0.1:8787
 	}
 
 	@morrows_mcp path /morrows /morrows/
 	handle @morrows_mcp {
-		reverse_proxy 127.0.0.1:8790
+		reverse_proxy 127.0.0.1:8787
 	}
 
 	@morrows_health path /morrows/health
@@ -37,21 +34,28 @@
 	}
 
 	handle /morrows/api/* {
-		reverse_proxy 127.0.0.1:8790
+		uri strip_prefix /morrows
+		reverse_proxy 127.0.0.1:8787
 	}
 
+	# Do not publish alternate MCP surfaces through the static UI mount.
+	@retired_mcp path /morrows/ui/agent-mcp /morrows/ui/agent-mcp/* /morrows/ui/mcp /morrows/ui/mcp/* /morrows/ui/morrows /morrows/ui/morrows/*
+	handle @retired_mcp {
+		respond "Use /morrows with Morrows OAuth" 410
+	}
 	@morrows_ui_root path /morrows/ui
 	handle @morrows_ui_root {
 		redir * /morrows/ui/ 308
 	}
-
 	handle /morrows/ui/* {
 		uri strip_prefix /morrows/ui
 		reverse_proxy 127.0.0.1:8787
 	}
+	handle /morrows/* {
+		respond "Not found" 404
+	}
 
-	# Standalone LSM remains independently reachable at the root /mcp, /oauth,
-	# UI, download and compatibility surfaces. It is no longer on Morrows' path.
+	# Standalone LSM owns only the remaining root surfaces.
 	handle {
 		reverse_proxy 127.0.0.1:8766
 	}

@@ -49,7 +49,7 @@ Human / Web UI / automation
 - Session WebUI cache: history is fetched only after selection, then incrementally refreshed for the open Session
 - Employee Session inbox/read/reply MCP tools backed by a durable Agent delivery outbox
 - Issued/revocable Agent Bearer credentials; runtime credentials are short-lived and Run-bound, bridge credentials are explicitly issued by the local control plane
-- Issued/revocable control-plane Operator credentials with `viewer` / `operator` / `admin` RBAC for loopback/CLI compatibility; the public WebUI uses LSM OAuth
+- Issued/revocable control-plane Operator credentials with `viewer` / `operator` / `admin` RBAC for loopback/CLI compatibility; the public WebUI uses Morrows OAuth
 - External handoff adapters for LSM, Antigravity, and Gemini with owned accept/status
 - Startup recovery for interrupted local launch jobs
 - Optional LSM Run integration: one durable Logical Session per Run, scoped Codex MCP access, separate control API, execution evidence, explicit restart and bounded cleanup
@@ -113,22 +113,17 @@ The same instance exposes the WebUI at:
 https://mcp.xycdev.com/morrows/ui/
 ```
 
-The public WebUI and control-plane API reuse LSM OAuth; the browser no longer stores a second `mrw_operator_*` token.
+Public MCP, OAuth, WebUI and control-plane API authentication are owned by
+`morrows-server`. The shared edge forwards `/morrows`, `/morrows/auth/*`,
+`/morrows/api/*` and Morrows discovery directly to port 8787. OAuth state persists
+in the Morrows database across both server and runtime restarts.
 
-Local Shell MCP on the VPS moves to `127.0.0.1:8766`. A loopback router owns
-`127.0.0.1:8765`: the public `/morrows` MCP first enters Local Shell MCP and reuses
-the same ChatGPT OAuth boundary as the Blender, Keynote, and other MCP integrations.
-After LSM validates OAuth, it strips the public bearer and any caller-supplied
-Morrows identity headers, then forwards only validated OAuth client provenance
-(`client_id` and optional `client_name`) over the trusted loopback hop to
-`127.0.0.1:8787/mcp`. Morrows resolves a stable technical AgentInstance per
-validated `client_id`. Human-readable agent name, account email, platform, and
-device are queried and self-reported by the Agent with `agent_identity_report`;
-they never participate in authorization. Static WebUI assets still go directly
-to Morrows; `/morrows/api/*` first passes through the LSM OAuth bridge, which
-injects a trusted control-plane assertion over loopback. The existing `https://mcp.xycdev.com/mcp` endpoint is
-unchanged. This shared Caddy edge is owned by `deploy/morrow/deploy-vps.sh` in the
-`local-shell-mcp` repository; Morrows does not maintain a second router copy.
+ChatGPT and all Codex profiles use `https://mcp.xycdev.com/morrows` with independent
+OAuth clients, S256 PKCE and rotating refresh tokens. Provider MCP configurations
+never inject `mrw_agent_*`; those credentials remain internal/run-bound. Legacy
+LSM/runtime tokens require one-time reauthorization. See [OAuth migration and
+production checks](docs/morrows-oauth.md). Standalone LSM and runtime restarts do
+not own or affect public OAuth state.
 
 For local development, the previous tmux deployment remains available:
 
@@ -147,17 +142,20 @@ MORROWS_BIND=127.0.0.1:8787
 MORROWS_WEB_DIR=web/dist
 MORROWS_LAUNCH_DIR=data/launches
 MORROWS_MCP_URL=https://mcp.xycdev.com/morrows
+MORROWS_OAUTH_ISSUER=https://mcp.xycdev.com/morrows/auth
+# Set MORROWS_OAUTH_ADMIN_PIN in private service.env (16+ random characters).
 # rmcp Host validation automatically allows the hostname from MORROWS_MCP_URL.
 # Add any extra Hosts as a comma-separated list when needed:
 # MORROWS_MCP_ALLOWED_HOSTS=internal.example:9443
 
-# Optional loopback LSM integration
-MORROWS_LSM_CONTROL_URL=http://127.0.0.1:8766
-MORROWS_LSM_SUBJECT=local-mcp-client
+# Built-in morrow-runtime execution plane
+MORROWS_RUNTIME_CONTROL_URL=http://127.0.0.1:8790
+MORROWS_RUNTIME_PROXY_URL=http://127.0.0.1:8790
+MORROWS_RUNTIME_MCP_URL=https://mcp.xycdev.com/morrows/ui/runtime/mcp
+MORROWS_RUNTIME_SUBJECT=morrows-runtime
 MORROWS_AGENT_RESTART_GRACE_SECONDS=600
-# On the VPS, do not copy MORROWS_LSM_CONTROL_KEY manually.
-# scripts/run-vps.sh reads only LOCAL_SHELL_MCP_CONTROL_API_KEY from the
-# private LSM service.env and maps it at process startup.
+# Standalone LSM is a separate rescue/diagnostic service; normal Morrows task
+# execution and public OAuth do not read its service environment.
 
 # Optional on loopback; required for any remote-facing deployment
 MORROWS_REQUIRE_AGENT_AUTH=1
@@ -193,20 +191,17 @@ Morrows exposes a Streamable HTTP MCP endpoint for **employee operations**, not 
 http://127.0.0.1:8787/mcp
 ```
 
-Internal employee MCP calls continue to use issued Bearer credentials:
+Internal employee CLI/REST calls continue to use issued Bearer credentials:
 
 ```text
 Authorization: Bearer mrw_agent_<secret>
 X-Agent-Instance-Id: <uuid>   # optional with Bearer; if present it must match
 ```
 
-These credentials are for Morrows-managed runtimes such as Codex/CodeBuddy.
-**Public ChatGPT clients never receive or present a `mrw_agent_*` credential.**
-They authenticate only with the existing LSM OAuth flow; after validation LSM
-forwards trusted OAuth client provenance over loopback, and Morrows binds the
-validated `client_id` to a stable technical AgentInstance. No second shared bearer
-secret is required. `agent_name/account_email/platform/device` are separate
-self-reported audit metadata and do not affect authorization.
+These credentials remain internal and run-bound. All public MCP clients, including
+ChatGPT, Codex and CodeBuddy, use Morrows OAuth. Morrows verifies tokens itself and
+binds the client ID to a stable technical identity. Self-reported agent metadata
+does not affect authorization.
 
 The local control plane can issue/list/revoke bridge credentials with
 `/api/agents/{id}/credentials` and `/api/agent-credentials/{id}/revoke`. Provider
@@ -227,7 +222,7 @@ Credential management endpoints are:
 - `GET/POST /api/operator-credentials`
 - `POST /api/operator-credentials/{id}/revoke`
 
-Only hashes are stored in SQLite and list responses never return token/hash material. `mrw_operator_*` remains available for loopback/CLI administration and compatibility, while the public WebUI uses the LSM OAuth PKCE flow and keeps its OAuth token only in the current tab's `sessionStorage`.
+Only hashes are stored in SQLite and list responses never return token/hash material. `mrw_operator_*` remains available for loopback/CLI administration and compatibility, while the public WebUI uses the Morrows OAuth PKCE flow and keeps its OAuth token only in the current tab's `sessionStorage`.
 
 Employee MCP tools currently cover:
 

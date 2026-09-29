@@ -6,8 +6,6 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
-from starlette.applications import Starlette
-from starlette.routing import Route
 
 from morrow_runtime import __version__
 from morrow_runtime.auth import (
@@ -16,17 +14,12 @@ from morrow_runtime.auth import (
     RequestBodyLimitMiddleware,
     _is_mcp_discovery_request,
 )
-from morrow_runtime.main import _build_mcp_http_app
-from morrow_runtime.oauth import (
-    _CLIENTS,
-    _CODES,
-    ALL_OAUTH_SCOPES,
-    _authorize_form,
+from morrow_runtime.internal_tokens import (
+    RUNTIME_SCOPES,
     issue_access_token,
-    oauth_authorize_get,
-    oauth_register,
     validate_bearer_token,
 )
+from morrow_runtime.main import _build_mcp_http_app
 from morrow_runtime.settings import get_settings
 from morrow_runtime.tools import build_mcp
 
@@ -130,12 +123,12 @@ async def test_mcp_metadata_for_chatgpt_developer_mode(tmp_path, monkeypatch):
     assert "workspace_open take the same session_id explicitly" in instructions
 
     tools = {tool.name: tool for tool in await mcp.list_tools()}
-    assert tools["environment_get"].meta["securitySchemes"][0]["type"] == "oauth2"
+    assert tools["environment_get"].meta["securitySchemes"][0]["type"] == "http"
 
     def scopes(tool_name: str, scheme_index: int = 0) -> list[str]:
-        return tools[tool_name].meta["securitySchemes"][scheme_index]["scopes"]
+        return tools[tool_name].meta["morrow/runtimeScopes"]
 
-    full_scopes = list(ALL_OAUTH_SCOPES)
+    full_scopes = list(RUNTIME_SCOPES)
     assert scopes("audit_tail") == full_scopes
     assert scopes("file_patch") == full_scopes
     assert scopes("browser_run_script") == full_scopes
@@ -158,7 +151,7 @@ async def test_mcp_metadata_for_chatgpt_developer_mode(tmp_path, monkeypatch):
 @pytest.mark.asyncio
 async def test_mcp_tool_execution_uses_one_full_scope_bundle(tmp_path, monkeypatch):
     monkeypatch.setenv("LOCAL_SHELL_MCP_WORKSPACE_ROOT", str(tmp_path))
-    monkeypatch.setenv("LOCAL_SHELL_MCP_AUTH_MODE", "oauth")
+    monkeypatch.setenv("LOCAL_SHELL_MCP_AUTH_MODE", "internal")
     get_settings.cache_clear()
     (tmp_path / "readable.txt").write_text("content", encoding="utf-8")
     mcp = build_mcp()
@@ -175,7 +168,7 @@ async def test_mcp_tool_execution_uses_one_full_scope_bundle(tmp_path, monkeypat
         Principal(
             email=None,
             subject="full",
-            claims={"scope": " ".join(ALL_OAUTH_SCOPES)},
+            claims={"scope": " ".join(RUNTIME_SCOPES)},
         )
     )
     try:
@@ -210,7 +203,7 @@ async def test_file_write_accepts_base64_binary_content(tmp_path, monkeypatch):
 @pytest.mark.asyncio
 async def test_machine_argument_requires_remote_scope(tmp_path, monkeypatch):
     monkeypatch.setenv("LOCAL_SHELL_MCP_WORKSPACE_ROOT", str(tmp_path))
-    monkeypatch.setenv("LOCAL_SHELL_MCP_AUTH_MODE", "oauth")
+    monkeypatch.setenv("LOCAL_SHELL_MCP_AUTH_MODE", "internal")
     monkeypatch.setenv("LOCAL_SHELL_MCP_REMOTE_ENABLED", "true")
     get_settings.cache_clear()
     mcp = build_mcp()
@@ -280,9 +273,9 @@ async def test_tool_annotations_are_conservative_and_mode_independent(tmp_path, 
     assert restricted["run_shell"].annotations == command
 
 
-def test_oauth_access_tokens_do_not_expire_by_default(tmp_path, monkeypatch):
+def test_internal_tokens_expire_by_default(tmp_path, monkeypatch):
     monkeypatch.setenv("LOCAL_SHELL_MCP_WORKSPACE_ROOT", str(tmp_path))
-    monkeypatch.setenv("LOCAL_SHELL_MCP_OAUTH_JWT_SECRET", "test-secret-that-is-at-least-32-bytes")
+    monkeypatch.setenv("LOCAL_SHELL_MCP_RUNTIME_TOKEN_JWT_SECRET", "test-secret-that-is-at-least-32-bytes")
     monkeypatch.delenv("LOCAL_SHELL_MCP_PUBLIC_BASE_URL", raising=False)
     monkeypatch.delenv("LOCAL_SHELL_MCP_OAUTH_ISSUER", raising=False)
     monkeypatch.delenv("LOCAL_SHELL_MCP_OAUTH_RESOURCE", raising=False)
@@ -295,110 +288,9 @@ def test_oauth_access_tokens_do_not_expire_by_default(tmp_path, monkeypatch):
     )
     claims = validate_bearer_token(token)
 
-    assert "exp" not in claims
+    assert claims["exp"] > claims["iat"]
     assert claims["client_id"] == "test-client"
     assert claims["scope"] == "shell:execute"
-
-
-def _oauth_test_client() -> TestClient:
-    return TestClient(
-        Starlette(
-            routes=[
-                Route("/oauth/register", oauth_register, methods=["POST"]),
-                Route("/oauth/authorize", oauth_authorize_get, methods=["GET"]),
-            ]
-        )
-    )
-
-
-def test_oauth_registration_validates_redirects_and_authorize_requires_registered_s256_client(
-    tmp_path, monkeypatch
-):
-    monkeypatch.setenv("LOCAL_SHELL_MCP_WORKSPACE_ROOT", str(tmp_path))
-    get_settings.cache_clear()
-    _CLIENTS.clear()
-    _CODES.clear()
-    client = _oauth_test_client()
-
-    invalid = client.post("/oauth/register", json={"redirect_uris": ["relative/callback"]})
-    assert invalid.status_code == 400
-
-    unknown = client.get(
-        "/oauth/authorize",
-        params={
-            "response_type": "code",
-            "client_id": "unknown",
-            "redirect_uri": "https://example.test/callback",
-            "code_challenge": "challenge",
-            "code_challenge_method": "S256",
-        },
-    )
-    assert unknown.status_code == 200
-    assert "Unknown client_id" in unknown.text
-
-    registered = client.post(
-        "/oauth/register",
-        json={"client_name": "test", "redirect_uris": ["https://example.test/callback"]},
-    )
-    assert registered.status_code == 201
-    client_id = registered.json()["client_id"]
-
-    no_pkce = client.get(
-        "/oauth/authorize",
-        params={
-            "response_type": "code",
-            "client_id": client_id,
-            "redirect_uri": "https://example.test/callback",
-        },
-    )
-    assert "Missing code_challenge" in no_pkce.text
-
-    valid = client.get(
-        "/oauth/authorize",
-        params={
-            "response_type": "code",
-            "client_id": client_id,
-            "redirect_uri": "https://example.test/callback",
-            "code_challenge": "challenge",
-            "code_challenge_method": "S256",
-        },
-    )
-    assert valid.status_code == 200
-    assert "Approve" in valid.text
-    assert "Unknown client_id" not in valid.text
-
-    ignored_scope = client.get(
-        "/oauth/authorize",
-        params={
-            "response_type": "code",
-            "client_id": client_id,
-            "redirect_uri": "https://example.test/callback",
-            "code_challenge": "challenge",
-            "code_challenge_method": "S256",
-            "scope": "shell:read git:write unknown:scope",
-        },
-    )
-    assert "Unsupported OAuth scope" not in ignored_scope.text
-
-
-def test_oauth_authorize_form_escapes_reflected_fields(tmp_path, monkeypatch):
-    monkeypatch.setenv("LOCAL_SHELL_MCP_WORKSPACE_ROOT", str(tmp_path))
-    get_settings.cache_clear()
-
-    marker = chr(60) + "unsafe" + chr(62)
-    response = _authorize_form(
-        {
-            "client_id": "client",
-            "redirect_uri": f"https://example.test/cb?x={marker}",
-            "resource": f"https://resource.test/{marker}",
-            "scope": f"shell:read {marker}",
-        },
-        error=f"bad {marker}",
-    )
-    body = response.body.decode("utf-8")
-
-    assert marker not in body
-    assert "&lt;unsafe&gt;" in body
 
 
 @pytest.mark.asyncio
@@ -525,11 +417,11 @@ def test_cached_open_live_workspace_recipient_executes_over_http(tmp_path, monke
 def test_mcp_requires_auth_for_initialize_and_delete_by_default(tmp_path, monkeypatch):
     monkeypatch.setenv("LOCAL_SHELL_MCP_WORKSPACE_ROOT", str(tmp_path))
     monkeypatch.setenv("LOCAL_SHELL_MCP_STATE_DIR", str(tmp_path / ".state"))
-    monkeypatch.setenv("LOCAL_SHELL_MCP_AUTH_MODE", "oauth")
+    monkeypatch.setenv("LOCAL_SHELL_MCP_AUTH_MODE", "internal")
     monkeypatch.setenv("LOCAL_SHELL_MCP_AUTH_BYPASS_LOCALHOST", "false")
     monkeypatch.setenv("LOCAL_SHELL_MCP_PUBLIC_BASE_URL", "http://testserver")
     monkeypatch.setenv(
-        "LOCAL_SHELL_MCP_OAUTH_JWT_SECRET",
+        "LOCAL_SHELL_MCP_RUNTIME_TOKEN_JWT_SECRET",
         "test-secret-that-is-definitely-at-least-32-bytes",
     )
     monkeypatch.setenv("LOCAL_SHELL_MCP_REMOTE_ENABLED", "false")

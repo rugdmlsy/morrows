@@ -22,7 +22,7 @@ from starlette.routing import Route
 from . import __version__
 from .audit import audit, audit_request_context
 from .auth import Principal, current_principal
-from .oauth import ALL_OAUTH_SCOPES, issue_access_token, public_base_url
+from .internal_tokens import RUNTIME_SCOPES, issue_access_token, public_base_url
 from .settings import get_settings
 
 CLIENT_API_VERSION = "v1"
@@ -270,7 +270,7 @@ class ContainerClientManager:
                 )
                 token = issue_access_token(
                     client_id="morrow-runtime-container-client",
-                    scope=" ".join(ALL_OAUTH_SCOPES),
+                    scope=" ".join(RUNTIME_SCOPES),
                     resource=base_url.rstrip("/"),
                     subject=f"container-client:{session.session_id}",
                     issuer=base_url.rstrip("/"),

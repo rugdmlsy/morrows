@@ -19,7 +19,7 @@ from starlette.testclient import TestClient
 import morrow_runtime.human_ui as ui
 from morrow_runtime.auth import AuthMiddleware, Principal
 from morrow_runtime.live_channel import get_live_channel_manager
-from morrow_runtime.oauth import ALL_OAUTH_SCOPES
+from morrow_runtime.internal_tokens import RUNTIME_SCOPES
 from morrow_runtime.settings import get_settings
 
 
@@ -100,7 +100,7 @@ class FakeRemoteManager:
 
 
 def test_root_redirects_to_relative_ui_path_without_auth(tmp_path, monkeypatch):
-    _configure(tmp_path, monkeypatch, auth="oauth")
+    _configure(tmp_path, monkeypatch, auth="internal")
     monkeypatch.setenv("LOCAL_SHELL_MCP_UI_PATH", "/console")
     get_settings.cache_clear()
     app = Starlette(routes=ui.ui_routes())
@@ -2349,7 +2349,7 @@ async def test_native_shell_websocket_rejects_unauthorized_full_and_invalid_requ
     unauthorized = Socket()
     monkeypatch.setattr(ui, "_authorize_websocket", lambda websocket: False)
     await ui.ui_shell_websocket(unauthorized)
-    assert unauthorized.closed == [(4401, "OAuth authentication required")]
+    assert unauthorized.closed == [(4401, "Runtime authentication required")]
 
     monkeypatch.setattr(ui, "_authorize_websocket", lambda websocket: True)
     monkeypatch.setattr(
@@ -2374,12 +2374,12 @@ async def test_native_shell_websocket_rejects_unauthorized_full_and_invalid_requ
 
 @pytest.mark.asyncio
 async def test_native_shell_websocket_rejects_rotated_live_token(tmp_path, monkeypatch):
-    _configure(tmp_path, monkeypatch, auth="oauth")
+    _configure(tmp_path, monkeypatch, auth="internal")
     manager = get_live_channel_manager()
     logical_session_id = "s_websocket_rotation"
     workspace, token = manager.open(
         subject="user",
-        scopes=tuple(ALL_OAUTH_SCOPES),
+        scopes=tuple(RUNTIME_SCOPES),
         logical_session_id=logical_session_id,
     )
     encoded = base64.urlsafe_b64encode(token.encode()).decode().rstrip("=")
@@ -2428,7 +2428,7 @@ async def test_native_shell_websocket_rejects_rotated_live_token(tmp_path, monke
                 self.rotated = True
                 same_workspace, replacement = manager.open(
                     subject="user",
-                    scopes=tuple(ALL_OAUTH_SCOPES),
+                    scopes=tuple(RUNTIME_SCOPES),
                     logical_session_id=logical_session_id,
                 )
                 assert same_workspace is workspace
@@ -2457,12 +2457,12 @@ def test_websocket_auth_none_rejects_rotated_live_bearer(tmp_path, monkeypatch):
     logical_session_id = "s_websocket_auth_none"
     _, token = manager.open(
         subject="user",
-        scopes=tuple(ALL_OAUTH_SCOPES),
+        scopes=tuple(RUNTIME_SCOPES),
         logical_session_id=logical_session_id,
     )
     manager.open(
         subject="user",
-        scopes=tuple(ALL_OAUTH_SCOPES),
+        scopes=tuple(RUNTIME_SCOPES),
         logical_session_id=logical_session_id,
     )
     encoded = base64.urlsafe_b64encode(token.encode()).decode().rstrip("=")
@@ -2486,7 +2486,7 @@ async def test_shell_websocket_retains_live_identity_when_token_rotates_during_a
     logical_session_id = "s_websocket_auth_race"
     _, token = manager.open(
         subject="user",
-        scopes=tuple(ALL_OAUTH_SCOPES),
+        scopes=tuple(RUNTIME_SCOPES),
         logical_session_id=logical_session_id,
     )
     encoded = base64.urlsafe_b64encode(token.encode()).decode().rstrip("=")
@@ -2535,7 +2535,7 @@ async def test_shell_websocket_retains_live_identity_when_token_rotates_during_a
     def rotate_during_authorization(websocket):  # noqa: ARG001
         manager.open(
             subject="user",
-            scopes=tuple(ALL_OAUTH_SCOPES),
+            scopes=tuple(RUNTIME_SCOPES),
             logical_session_id=logical_session_id,
         )
         return True

@@ -12,9 +12,9 @@ fn caller(id: Option<Id>) -> Extension<Parts> {
 fn oauth_caller(id: Id, client_id: &str, client_name: &str) -> Extension<Parts> {
     let request = axum::http::Request::builder()
         .header("x-agent-instance-id", id.to_string())
-        .header(AUTH_SOURCE_HEADER, "lsm_oauth")
-        .header(LSM_OAUTH_CLIENT_ID_HEADER, client_id)
-        .header(LSM_OAUTH_CLIENT_NAME_HEADER, client_name)
+        .header(AUTH_SOURCE_HEADER, "morrows_oauth")
+        .header(MORROWS_OAUTH_CLIENT_ID_HEADER, client_id)
+        .header(MORROWS_OAUTH_CLIENT_NAME_HEADER, client_name)
         .body(())
         .unwrap();
     Extension(request.into_parts().0)
@@ -194,7 +194,7 @@ async fn whoami_includes_trusted_provenance_and_latest_self_report() {
             .await,
     );
     assert_eq!(identity["agent_instance_id"], json!(agent.id));
-    assert_eq!(identity["auth"]["source"], "lsm_oauth");
+    assert_eq!(identity["auth"]["source"], "morrows_oauth");
     assert_eq!(identity["auth"]["oauth_client_id"], "oauth-client-1");
     assert_eq!(identity["auth"]["oauth_client_name"], "Codex");
     assert_eq!(identity["reported_identity"]["agent_name"], "codex-1");

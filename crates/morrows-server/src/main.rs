@@ -10,6 +10,7 @@ mod mcp;
 mod memory;
 mod memory_search;
 mod morrow_runtime;
+mod oauth;
 mod operator_auth;
 mod runtime_executor;
 mod runtime_proxy;
@@ -52,6 +53,7 @@ struct AppState {
 /// child runtimes without changing their PATH or assuming the agent's cwd.
 fn configure_memory_cli(command: &mut tokio::process::Command) {
     command.env_remove("MORROWS_MEMORY_CLI");
+    command.env_remove("MORROWS_MEMORY_MCP_URL");
     if let Ok(executable) = std::env::current_exe()
         && let Some(parent) = executable.parent()
     {
@@ -62,6 +64,10 @@ fn configure_memory_cli(command: &mut tokio::process::Command) {
         });
         if cli.is_file() {
             command.env("MORROWS_MEMORY_CLI", cli);
+            // The employee CLI uses a short-lived Run-bound credential. Keep it
+            // on the server's loopback-only MCP surface rather than the public
+            // OAuth-only /morrows endpoint.
+            command.env("MORROWS_MEMORY_MCP_URL", "http://127.0.0.1:8787/mcp");
         }
     }
 }
@@ -330,26 +336,6 @@ async fn main() -> anyhow::Result<()> {
                 .with_json_response(true)
                 .with_allowed_hosts(mcp_allowed_hosts.clone()),
         );
-    // Provider runtimes cannot use the public /morrows OAuth bridge because that
-    // bridge deliberately replaces Authorization with validated browser/client
-    // provenance. /agent-mcp is the direct Agent-credential surface exposed only
-    // through the existing /morrows/ui/* TLS reverse-proxy path.
-    let direct_mcp_store = store.clone();
-    let direct_mcp_memory_search = managed_memory_search.clone();
-    let direct_mcp_service: StreamableHttpService<MorrowsMcp, LocalSessionManager> =
-        StreamableHttpService::new(
-            move || {
-                Ok(MorrowsMcp::new_with_memory_search(
-                    direct_mcp_store.clone(),
-                    direct_mcp_memory_search.clone(),
-                ))
-            },
-            Default::default(),
-            StreamableHttpServerConfig::default()
-                .with_json_response(true)
-                .with_allowed_hosts(mcp_allowed_hosts),
-        );
-
     let lease_store = store.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
@@ -397,10 +383,12 @@ async fn main() -> anyhow::Result<()> {
         bootstrap_operator_token,
     );
     let runtime_proxy = runtime_proxy::router_from_env()?;
+    let oauth_routes = oauth::routes(oauth::OAuthState::from_env(store.clone())?);
     let mut app = Router::new()
         .nest("/api", api)
+        .nest_service("/morrows", mcp_service.clone())
         .nest_service("/mcp", mcp_service)
-        .nest_service("/agent-mcp", direct_mcp_service)
+        .merge(oauth_routes)
         .fallback_service(ServeDir::new(web_dir).append_index_html_on_directories(true));
     if let Some(runtime_proxy) = runtime_proxy {
         app = app.nest("/runtime", runtime_proxy);

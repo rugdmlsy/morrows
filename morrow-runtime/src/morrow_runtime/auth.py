@@ -51,8 +51,6 @@ def _is_public_path(path: str) -> bool:
         or path.startswith("/api/control/")
         or path in PUBLIC_PATHS
         or path.startswith(_REMOTE_TRANSFER_PREFIX)
-        or path.startswith("/.well-known/")
-        or path.startswith("/oauth/")
         or path.startswith("/download/")
         or path in {ui_path, ui_path + "/", ui_path + "/callback", ui_path + "/wallpaper"}
         or path.startswith(ui_path + "/assets/")
@@ -109,7 +107,7 @@ def require_scopes(
     required_value = " ".join(sorted(required_set))
     raise HTTPException(
         status_code=403,
-        detail=f"OAuth token is missing required scope(s): {', '.join(missing)}",
+        detail=f"Runtime token is missing required scope(s): {', '.join(missing)}",
         headers={
             "WWW-Authenticate": (
                 f'Bearer error="insufficient_scope", scope="{required_value}"'
@@ -231,56 +229,15 @@ def _is_cross_origin_request(request: Request) -> bool:
     return origin.rstrip("/") != expected
 
 
-def _verify_oauth(request: Request, settings: Settings) -> Principal:
-    from .oauth import ALL_OAUTH_SCOPES, protected_resource_metadata_url, validate_bearer_token
-
+def _verify_runtime_token(request: Request, settings: Settings) -> Principal:
+    from .internal_tokens import validate_bearer_token
     token = _extract_token(request)
     if not token:
-        metadata_url = protected_resource_metadata_url(request)
-        raise HTTPException(
-            status_code=401,
-            detail="Missing OAuth bearer token",
-            headers={
-                "WWW-Authenticate": (
-                    f'Bearer resource_metadata="{metadata_url}", '
-                    f'scope="{" ".join(ALL_OAUTH_SCOPES)}"'
-                )
-            },
-        )
+        raise HTTPException(status_code=401, detail="Runtime capability or internal credential required")
     try:
         claims = validate_bearer_token(token, request)
     except jwt.PyJWTError as exc:
-        legacy_secret = (settings.oauth_legacy_jwt_secret or "").strip()
-        legacy_issuer = (settings.oauth_legacy_issuer or "").strip()
-        legacy_resource = (settings.oauth_legacy_resource or "").strip()
-        if (
-            str(request.url.path).startswith("/morrows")
-            and legacy_secret
-            and legacy_issuer
-            and legacy_resource
-        ):
-            try:
-                claims = jwt.decode(
-                    token,
-                    legacy_secret,
-                    algorithms=["HS256"],
-                    audience=legacy_resource,
-                    issuer=legacy_issuer,
-                    options={"require": ["iat", "aud", "iss"]},
-                )
-                claims = dict(claims)
-                claims["auth"] = "legacy_lsm_oauth"
-                audit(
-                    "legacy_lsm_oauth_auth_ok",
-                    client_id=claims.get("client_id"),
-                    path=str(request.url.path),
-                    ip=_client_host(request),
-                )
-                return Principal(email=None, subject=claims.get("sub"), claims=claims)
-            except jwt.PyJWTError:
-                pass
-        audit("oauth_auth_failed", error=str(exc), path=str(request.url.path), ip=_client_host(request))
-        raise HTTPException(status_code=401, detail=f"Invalid OAuth bearer token: {exc}") from exc
+        raise HTTPException(status_code=401, detail="Invalid runtime credential") from exc
     return Principal(email=None, subject=claims.get("sub"), claims=claims)
 
 
@@ -342,8 +299,8 @@ def verify_request(request: Request) -> Principal:
         and _is_direct_localhost_request(request)
     ):
         return Principal(email="localhost", subject="localhost", claims={"auth": "localhost-bypass"})
-    if settings.auth_mode == "oauth":
-        principal = _verify_oauth(request, settings)
+    if settings.auth_mode == "internal":
+        principal = _verify_runtime_token(request, settings)
     else:
         raise HTTPException(status_code=500, detail=f"Unsupported auth_mode: {settings.auth_mode}")
     if not path.startswith(HUMAN_UI_API_PREFIX):
@@ -469,7 +426,7 @@ class McpSessionLimitMiddleware:
 
 
 class AuthMiddleware:
-    """ASGI middleware for OAuth bearer verification."""
+    """ASGI middleware for execution capabilities and internal credentials."""
 
     def __init__(self, app: ASGIApp):
         self.app = app
@@ -507,7 +464,7 @@ class AuthMiddleware:
 
         settings = get_settings()
         if (
-            settings.auth_mode == "oauth"
+            settings.auth_mode == "internal"
             and not settings.require_auth_for_mcp_discovery
             and not settings.require_session_capability
             and _is_mcp_discovery_request(scope, body)
@@ -534,7 +491,7 @@ class AuthMiddleware:
 class EmbeddedUiCorsMiddleware:
     """Allow sandboxed MCP Apps to call authenticated human/live UI APIs.
 
-    The embedded app never uses browser cookies or ambient credentials. In OAuth
+    The embedded app never uses browser cookies or ambient credentials. In internal authentication
     mode a bearer token is still required, so allowing the sandbox origin does not
     bypass endpoint authentication.
     """

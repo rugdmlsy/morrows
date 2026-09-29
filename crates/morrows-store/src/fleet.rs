@@ -297,10 +297,10 @@ async fn next_display_name(
 }
 
 impl Store {
-    /// Resolve one authenticated LSM OAuth client to a stable technical AgentInstance.
+    /// Resolve one authenticated Morrows OAuth client to a stable technical AgentInstance.
     /// This identity is authorization-only; human-readable agent/account/platform/device
     /// metadata is self-reported separately and never inferred here.
-    pub async fn resolve_lsm_oauth_agent(
+    pub async fn resolve_morrows_oauth_agent(
         &self,
         client_id: &str,
     ) -> Result<AgentInstance, DomainError> {
@@ -311,18 +311,18 @@ impl Store {
         }
         let profile = self
             .register_profile(RegisterProfile {
-                name: "LSM OAuth Client".into(),
-                provider: "lsm".into(),
+                name: "Morrows OAuth Client".into(),
+                provider: "morrows".into(),
                 kind: "external".into(),
                 default_capabilities: Vec::new(),
-                metadata: json!({"auth_source":"lsm_oauth","descriptive_identity":"self_reported"}),
+                metadata: json!({"auth_source":"morrows_oauth","descriptive_identity":"self_reported"}),
             })
             .await?;
         self.register_agent_instance(RegisterAgentInstance {
             profile_id: profile.id,
             account_id: None,
             machine_id: None,
-            name: format!("lsm-oauth:{client_id}"),
+            name: format!("morrows-oauth:{client_id}"),
             display_name: None,
             capabilities: None,
             external_instance_ref: Some(client_id.to_owned()),

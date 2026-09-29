@@ -5,7 +5,7 @@
 - **Morrows Control Plane** owns Project, Task, Assignment, Run, Session, AgentInstance, Account, Machine, dispatch, permissions, Human Interview, Memory/Milestone/Handoff and provider lifecycle semantics.
 - **morrow-runtime** owns worker registration/heartbeat, machine-local process execution, internal RuntimeScope, Job/Shell/files, provider process supervision and low-level audit/evidence. Its historical `Logical Session` object is an implementation detail, not a second Morrows work/session lifecycle.
 - **Provider Plane** owns provider-private model threads and resume references.
-- **Standalone LSM remains independent and rescue-only for ordinary Morrows work.** It may provide OAuth compatibility, diagnostics, emergency repair and ARP, but Task execution does not depend on a standalone-LSM Logical Session.
+- **Standalone LSM remains independent and rescue-only for ordinary Morrows work.** It may continue to authenticate its own clients and serve diagnostics, emergency repair and ARP workflows, but Morrows authentication never passes through it and Morrows does not use its control key as the provider execution runtime.
 
 ## Machine authority
 
@@ -68,15 +68,19 @@ Provider session references remain adapter state; they are not Morrows Session i
 
 Production keeps the sidecar on loopback, default `127.0.0.1:8790`.
 
-The existing TLS route `/morrows/ui/*` already proxies directly to Morrows and is reused without changing standalone LSM/Caddy:
+All public Morrows MCP clients use `https://mcp.xycdev.com/morrows` with
+Morrows-owned OAuth. Caddy sends MCP, OAuth and metadata directly to
+`morrows-server` on port 8787. There is no Agent-token MCP endpoint.
 
-- `https://mcp.xycdev.com/morrows/ui/agent-mcp` — direct Morrows Agent MCP. It preserves and validates `mrw_agent_*` Bearer credentials.
-- `https://mcp.xycdev.com/morrows/ui/runtime/mcp` — scoped morrow-runtime MCP.
-- `https://mcp.xycdev.com/morrows/ui/runtime/remote/*` and join/bundle routes — runtime worker transport.
+- `/morrows/ui/runtime/mcp` carries only scoped runtime execution capabilities.
+- `/morrows/ui/runtime/remote/*` and join/bundle routes carry runtime worker transport.
+- Runtime control stays loopback-only and requires `MORROWS_RUNTIME_CONTROL_KEY`.
 
-Morrows' runtime proxy allowlist deliberately excludes `/api/control`, OAuth, UI and arbitrary sidecar paths. Runtime control stays loopback and requires `MORROWS_RUNTIME_CONTROL_KEY`.
-
-The normal `https://mcp.xycdev.com/morrows` endpoint remains the standalone-LSM OAuth bridge for ChatGPT/browser clients. Provider Agents must use `MORROWS_AGENT_MCP_URL`, not that OAuth bridge, because the bridge replaces public Authorization with validated client provenance.
+The runtime proxy excludes OAuth, `/api/control`, UI and arbitrary sidecar paths.
+Runtime has no OAuth server or public Morrows bridge. Private invite-bound runtime
+credentials use `LOCAL_SHELL_MCP_AUTH_MODE=internal` and a runtime-only signing
+secret. They are not accepted by Morrows MCP. `mrw_agent_*` remains available to
+internal Run/CLI operations but is not injected into provider MCP configuration.
 
 ## Production deployment
 
@@ -109,32 +113,12 @@ The rollout is intentionally non-disruptive:
 
 There is no requirement to migrate standalone LSM workers or disable standalone LSM.
 
-## Public OAuth resource binding
-
-Morrows MCP is the protected resource `https://mcp.xycdev.com/morrows`.
-Its OAuth issuer and registration/authorization/token endpoints are hosted under
-`https://mcp.xycdev.com/morrows/auth`. These URIs serve different purposes: token
-`aud` and protected-resource metadata name `/morrows`, while `iss` names
-`/morrows/auth`. The 401 challenge links to the RFC 9728 resource metadata URL
-`https://mcp.xycdev.com/.well-known/oauth-protected-resource/morrows`.
-Caddy sends this exact path to the embedded runtime, preserving standalone
-LSM discovery at the origin's bare well-known endpoint. The old metadata URL
-under `/morrows/auth` remains a compatible alias. Advertising `/morrows/auth` as
-the resource causes strict MCP clients to reject metadata before sending even
-previously stored credentials.
-
-The deployment probe checks both fields through the public edge. Existing
-standalone-LSM token migration stays restricted to the existing Morrows path
-and configured legacy issuer, audience and signing secret; the new resource
-binding does not broaden that compatibility rule.
-
-
 ## Default execution policy
 
-For `codex_cli` and `codebuddy_cli` LaunchProfiles, omitted `metadata.execution_backend` now means `morrow_runtime`. Migration 0036 initially made the old implicit backend explicit for compatibility; migration 0037 then moves Morrows-managed legacy CLI profiles to `morrow_runtime`. `local` remains an explicit compatibility/test backend; standalone LSM is not a normal execution backend.
+For `codex_cli` and `codebuddy_cli` LaunchProfiles, omitted `metadata.execution_backend` means `morrow_runtime`. Migration 0036 copies legacy `run_lsm_bindings` / `run_lsm_provisioning` into canonical runtime tables and converts job-wait correlation from `logical_session_id` to `runtime_scope_id`; migration 0037 moves Morrows-managed legacy CLI profiles to `morrow_runtime`. `local` remains an explicit compatibility/test backend; standalone LSM is not a normal execution backend.
 
-The control-plane identity chain is `Task -> Assignment -> Run -> RunRuntimeBinding -> RuntimeScope -> worker/process/jobs`. Only Task/Assignment/Run own context, milestones, handoffs and completion. RuntimeScope is low-level execution state. A runtime restart or lost scope-binding response replays onto the same Run rather than creating a second work execution.
+The control-plane identity chain is `Task -> Assignment -> Run -> RunRuntimeBinding -> RuntimeScope -> worker/process/jobs`. Only Task/Assignment/Run own context, milestones, handoffs and completion. RuntimeScope is low-level execution state. A runtime restart or lost scope-binding response replays onto the same Run rather than creating a second work execution. `RuntimeJobTerminalEvent` and `/internal/runtime/job-events` are canonical; `/internal/lsm/job-events` remains a standalone-LSM compatibility adapter.
 
-Migration 0036 copies legacy `run_lsm_bindings` / `run_lsm_provisioning` into canonical runtime tables and converts job-wait correlation from `logical_session_id` to `runtime_scope_id`. `RuntimeJobTerminalEvent` and `/internal/runtime/job-events` are canonical; `/internal/lsm/job-events` remains a standalone-LSM compatibility adapter.
+## Public OAuth ownership
 
-Migration 0037 remediates already-deployed Morrows-managed CLI profiles that migration 0036 temporarily froze as local; these profiles now follow the same morrow_runtime default as newly registered profiles.
+The protected resource is `https://mcp.xycdev.com/morrows`; its issuer is `https://mcp.xycdev.com/morrows/auth`. Both are owned by `morrows-server`, not `morrow-runtime` or standalone LSM. OAuth clients, authorization codes, hashed access tokens and refresh-token grant state persist in the Morrows database (migration 0038), independently of runtime restart or removal. RFC 9728 resource metadata is published at `https://mcp.xycdev.com/.well-known/oauth-protected-resource/morrows`. See [morrows-oauth.md](morrows-oauth.md) for refresh rotation and the bounded legacy-token cutover.

@@ -1,7 +1,7 @@
-import { setMorrowsOAuthToken } from "./api";
+import { setMorrowsOAuthSession } from "./api";
 
-const PENDING_KEY = "morrows.runtime.oauth_pending";
-const SCOPES = "shell:read shell:write shell:execute browser:use file:share remote:use";
+const PENDING_KEY = "morrows.oauth_pending";
+const SCOPES = "morrows:control";
 
 type PendingOAuth = {
   client_id: string;
@@ -84,11 +84,11 @@ export async function completeMorrowsOAuthCallback() {
     body,
   });
   const result = await response.json();
-  if (!response.ok || !result.access_token) {
+  if (!response.ok || !result.access_token || !result.refresh_token) {
     throw new Error(result.error_description || result.error || "Morrows OAuth token exchange failed.");
   }
 
-  setMorrowsOAuthToken(result.access_token);
+  setMorrowsOAuthSession(result.access_token, result.refresh_token, pending.client_id);
   window.sessionStorage.removeItem(PENDING_KEY);
   current.searchParams.delete("code");
   current.searchParams.delete("state");

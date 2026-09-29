@@ -114,6 +114,83 @@ if [[ ! -s "$runtime_env" ]] || ! grep -q '^MORROWS_RUNTIME_CONTROL_KEY=.' "$run
 fi
 chmod 0600 "$runtime_env"
 
+# Own public-edge and OAuth secrets under Morrows. On the first cutover only,
+# copy the existing tunnel/JWT material from the old locations so current
+# clients keep working during a bounded migration window. No later service
+# startup reads standalone LSM configuration.
+service_env="$guard_dir/service.env"
+legacy_lsm_env=/home/morrow/.config/local-shell-mcp/service.env
+legacy_runtime_oauth_secret=/home/morrow/.local/state/morrow-runtime/oauth-jwt-secret
+python3 - "$service_env" "$legacy_lsm_env" "$legacy_runtime_oauth_secret" <<'PY'
+from pathlib import Path
+import secrets
+import sys
+import time
+
+service_path = Path(sys.argv[1])
+lsm_path = Path(sys.argv[2])
+runtime_secret_path = Path(sys.argv[3])
+
+def parse(path: Path) -> dict[str, str]:
+    result: dict[str, str] = {}
+    if not path.is_file():
+        return result
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        result[key.strip()] = value.strip().strip('"').strip("'")
+    return result
+
+def upsert(lines: list[str], key: str, value: str) -> None:
+    prefix = key + "="
+    for index, line in enumerate(lines):
+        if line.startswith(prefix):
+            lines[index] = prefix + value
+            return
+    lines.append(prefix + value)
+
+service_path.parent.mkdir(parents=True, exist_ok=True)
+lines = service_path.read_text(encoding="utf-8").splitlines() if service_path.exists() else []
+current = parse(service_path)
+legacy = parse(lsm_path)
+
+pin = current.get("MORROWS_OAUTH_ADMIN_PIN", "")
+if len(pin) < 16:
+    upsert(lines, "MORROWS_OAUTH_ADMIN_PIN", "mrw_oauth_pin_" + secrets.token_urlsafe(32))
+
+if not current.get("CLOUDFLARE_TUNNEL_TOKEN") and legacy.get("CLOUDFLARE_TUNNEL_TOKEN"):
+    upsert(lines, "CLOUDFLARE_TUNNEL_TOKEN", legacy["CLOUDFLARE_TUNNEL_TOKEN"])
+
+legacy_material = False
+if not current.get("MORROWS_OAUTH_LEGACY_RUNTIME_JWT_SECRET") and runtime_secret_path.is_file():
+    value = runtime_secret_path.read_text(encoding="utf-8").strip()
+    if len(value.encode()) >= 32:
+        upsert(lines, "MORROWS_OAUTH_LEGACY_RUNTIME_JWT_SECRET", value)
+        legacy_material = True
+elif current.get("MORROWS_OAUTH_LEGACY_RUNTIME_JWT_SECRET"):
+    legacy_material = True
+
+if not current.get("MORROWS_OAUTH_LEGACY_LSM_JWT_SECRET"):
+    value = legacy.get("LOCAL_SHELL_MCP_OAUTH_JWT_SECRET", "")
+    if len(value.encode()) >= 32:
+        upsert(lines, "MORROWS_OAUTH_LEGACY_LSM_JWT_SECRET", value)
+        legacy_material = True
+elif current.get("MORROWS_OAUTH_LEGACY_LSM_JWT_SECRET"):
+    legacy_material = True
+
+if legacy_material and not current.get("MORROWS_OAUTH_LEGACY_UNTIL"):
+    # Fixed on first migration; later deploys do not extend the compatibility window.
+    upsert(lines, "MORROWS_OAUTH_LEGACY_UNTIL", str(int(time.time()) + 30 * 86400))
+
+upsert(lines, "MORROWS_MCP_URL", "https://mcp.xycdev.com/morrows")
+upsert(lines, "MORROWS_OAUTH_ISSUER", "https://mcp.xycdev.com/morrows/auth")
+service_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+service_path.chmod(0o600)
+PY
+chmod 0600 "$service_env"
+
 # Preserve the currently active release as the one-step rollback/forensics copy.
 # Older snapshots are pruned only after the replacement is healthy.
 previous_release=""
@@ -170,17 +247,88 @@ while (( SECONDS < deadline )); do
     grep -q '^MORROWS_RUNTIME_PROXY_URL=http://127.0.0.1:8790$' <<<"$env_names"
     grep -q '^MORROWS_RUNTIME_CONTROL_KEY=.' <<<"$env_names"
     grep -q '^MORROWS_RUNTIME_MCP_URL=https://mcp.xycdev.com/morrows/ui/runtime/mcp$' <<<"$env_names"
-    grep -q '^MORROWS_AGENT_MCP_URL=https://mcp.xycdev.com/morrows/ui/agent-mcp$' <<<"$env_names"
+    grep -q '^MORROWS_MCP_URL=https://mcp.xycdev.com/morrows$' <<<"$env_names"
+    grep -q '^MORROWS_OAUTH_ISSUER=https://mcp.xycdev.com/morrows/auth$' <<<"$env_names"
+    grep -q '^MORROWS_OAUTH_ADMIN_PIN=.' <<<"$env_names"
     test "$(systemctl is-active morrow-runtime.service)" = active
     curl -fsS http://127.0.0.1:8790/healthz >/dev/null
     runtime_pid="$(systemctl show morrow-runtime.service -p MainPID --value)"
     runtime_env_names="$(tr '\0' '\n' < "/proc/$runtime_pid/environ")"
-    grep -q '^LOCAL_SHELL_MCP_AUTH_MODE=oauth$' <<<"$runtime_env_names"
-    grep -q '^LOCAL_SHELL_MCP_OAUTH_ISSUER=https://mcp.xycdev.com/morrows/auth$' <<<"$runtime_env_names"
-    grep -q '^LOCAL_SHELL_MCP_OAUTH_RESOURCE=https://mcp.xycdev.com/morrows$' <<<"$runtime_env_names"
+    grep -q '^LOCAL_SHELL_MCP_AUTH_MODE=internal$' <<<"$runtime_env_names"
     python3 -c 'import json,sys; data=json.loads(sys.stdin.read()); assert data["memory_search"]["enabled"] is True and data["memory_search"]["engine"] == "ripgrep"' <<<"$body"
     ! grep -q '^CLOUDFLARE_TUNNEL_TOKEN=' <<<"$env_names"
     ! grep -q '^LOCAL_SHELL_MCP_OAUTH_ADMIN_PIN=' <<<"$env_names"
+
+    # Preserve already-registered legacy OAuth client IDs so a client can
+    # reauthorize without depending on morrow-runtime state after this cutover.
+    python3 - "$service_env" "$root" <<'PY'
+from pathlib import Path
+import json
+import sqlite3
+import sys
+
+service_env = Path(sys.argv[1])
+root = Path(sys.argv[2])
+
+def parse(path: Path) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        result[key.strip()] = value.strip().strip('"').strip("'")
+    return result
+
+database_url = parse(service_env).get("MORROWS_DATABASE_URL", "")
+if database_url.startswith("sqlite://"):
+    database_path = database_url[len("sqlite://"):]
+    path = Path(database_path)
+    if not path.is_absolute():
+        path = root / path
+    legacy_files = [
+        Path("/home/morrow/.local/state/morrow-runtime/oauth-clients.json"),
+        Path("/home/morrow/.local/state/local-shell-mcp/oauth-clients.json"),
+    ]
+    imported: dict[str, dict] = {}
+    for legacy_file in legacy_files:
+        if not legacy_file.is_file():
+            continue
+        try:
+            payload = json.loads(legacy_file.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        clients = payload.get("clients", {}) if isinstance(payload, dict) else {}
+        if not isinstance(clients, dict):
+            continue
+        for client_id, row in clients.items():
+            if not isinstance(client_id, str) or not isinstance(row, dict):
+                continue
+            redirects = row.get("redirect_uris")
+            if not isinstance(redirects, list) or not all(isinstance(v, str) for v in redirects):
+                continue
+            imported[client_id] = {
+                "name": str(row.get("client_name") or "Migrated OAuth client")[:256],
+                "redirects": redirects[:10],
+            }
+    if imported:
+        connection = sqlite3.connect(path)
+        try:
+            raw = connection.execute(
+                "SELECT state FROM morrows_oauth_state WHERE id=1"
+            ).fetchone()[0]
+            state = json.loads(raw)
+            clients = state.setdefault("clients", {})
+            for client_id, row in imported.items():
+                clients.setdefault(client_id, row)
+            connection.execute(
+                "UPDATE morrows_oauth_state SET state=? WHERE id=1",
+                (json.dumps(state, separators=(",", ":")),),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+PY
 
     # Morrows now owns /morrows and the Cloudflare connector lifecycle. The
     # root fallback remains standalone LSM, but an LSM restart cannot remove

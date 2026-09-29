@@ -67,7 +67,7 @@ def _run_uvicorn(app, settings) -> None:  # noqa: ANN001
         raise SystemExit(STARTUP_FAILURE)
 
 
-def _with_oauth_routes(inner_app, mcp=None):  # noqa: ANN001
+def _with_runtime_routes(inner_app, mcp=None):  # noqa: ANN001
     import asyncio
     from contextlib import asynccontextmanager, suppress
 
@@ -79,15 +79,6 @@ def _with_oauth_routes(inner_app, mcp=None):  # noqa: ANN001
     from .downloads import download_routes
     from .human_ui import ui_routes
     from .live_channel_routes import live_channel_routes
-    from .morrows_bridge import morrows_bridge_routes
-    from .oauth import (
-        oauth_authorize_get,
-        oauth_authorize_post,
-        oauth_protected_resource,
-        oauth_register,
-        oauth_server_metadata,
-        oauth_token,
-    )
     from .remote_worker_routes import remote_routes
     from .settings import get_settings
 
@@ -112,22 +103,9 @@ def _with_oauth_routes(inner_app, mcp=None):  # noqa: ANN001
     routes = [
         Route("/healthz", lambda request: JSONResponse({"ok": True}), methods=["GET"]),
         Route("/readyz", lambda request: JSONResponse({"ok": True}), methods=["GET"]),
-        Route("/.well-known/oauth-protected-resource", oauth_protected_resource, methods=["GET"]),
-        Route(
-            "/.well-known/oauth-protected-resource/{resource_path:path}",
-            oauth_protected_resource,
-            methods=["GET"],
-        ),
-        Route("/.well-known/oauth-authorization-server", oauth_server_metadata, methods=["GET"]),
-        Route("/.well-known/openid-configuration", oauth_server_metadata, methods=["GET"]),
-        Route("/oauth/register", oauth_register, methods=["POST"]),
-        Route("/oauth/authorize", oauth_authorize_get, methods=["GET"]),
-        Route("/oauth/authorize", oauth_authorize_post, methods=["POST"]),
-        Route("/oauth/token", oauth_token, methods=["POST"]),
         Mount("/", app=inner_app),
     ]
     settings = get_settings()
-    routes[2:2] = morrows_bridge_routes()
     routes[2:2] = download_routes()
     routes[2:2] = control_routes()
     if settings.ui_enabled and settings.live_workspace_enabled:
@@ -161,7 +139,7 @@ def _build_mcp_http_app(mcp):  # noqa: ANN001
     if session_manager is not None and hasattr(session_manager, "session_idle_timeout"):
         session_manager.session_idle_timeout = max(1, settings.mcp_session_idle_timeout_s)
 
-    app = _with_oauth_routes(inner, mcp)
+    app = _with_runtime_routes(inner, mcp)
     if session_manager is not None:
         app.add_middleware(
             McpSessionLimitMiddleware,
@@ -171,7 +149,7 @@ def _build_mcp_http_app(mcp):  # noqa: ANN001
         app.add_middleware(AuthMiddleware)
     app.add_middleware(RequestBodyLimitMiddleware)
     # Must be outermost so browser preflights from the MCP App sandbox do not
-    # reach OAuth middleware. Actual API requests still require bearer auth.
+    # reach runtime authentication middleware. Actual API requests still require bearer auth.
     app.add_middleware(EmbeddedUiCorsMiddleware)
     return app
 
@@ -181,11 +159,11 @@ def run_mcp() -> None:
 
     install_deprecated_tool_tombstones()
 
-    from .settings import get_settings, validate_public_oauth_configuration
+    from .settings import get_settings, validate_runtime_token_configuration
     from .tools import build_mcp
 
     settings = get_settings()
-    validate_public_oauth_configuration(settings)
+    validate_runtime_token_configuration(settings)
     mcp = build_mcp()
 
     if settings.mode == "stdio":
@@ -198,7 +176,7 @@ def run_mcp() -> None:
     if hasattr(mcp, "sse_app"):
         from .auth import AuthMiddleware, RequestBodyLimitMiddleware
 
-        app = _with_oauth_routes(mcp.sse_app(), mcp)
+        app = _with_runtime_routes(mcp.sse_app(), mcp)
         if settings.auth_mode != "none":
             app.add_middleware(AuthMiddleware)
         app.add_middleware(RequestBodyLimitMiddleware)
@@ -213,10 +191,10 @@ def run_mcp() -> None:
 
 def run_http() -> None:
     from .http_app import build_http_app
-    from .settings import get_settings, validate_public_oauth_configuration
+    from .settings import get_settings, validate_runtime_token_configuration
 
     settings = get_settings()
-    validate_public_oauth_configuration(settings)
+    validate_runtime_token_configuration(settings)
     app = build_http_app()
     _run_uvicorn(app, settings)
 

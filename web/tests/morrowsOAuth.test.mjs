@@ -8,8 +8,8 @@ import ts from 'typescript';
 test('WebUI requests the protected resource, distinct from the issuer', async () => {
   const source = await readFile(new URL('../src/morrowsOAuth.ts', import.meta.url), 'utf8');
   const compiled = ts.transpileModule(source.replace(
-    'import { setMorrowsOAuthToken } from "./api";',
-    'const setMorrowsOAuthToken = () => {};'
+    'import { setMorrowsOAuthSession } from "./api";',
+    'const setMorrowsOAuthSession = () => {};'
   ), { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2023 } }).outputText;
   let destination;
   const storage = new Map();
@@ -27,6 +27,7 @@ test('WebUI requests the protected resource, distinct from the issuer', async ()
     const module = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`);
     await module.startMorrowsOAuth();
     assert.equal(destination.pathname, '/morrows/auth/oauth/authorize');
+    assert.equal(destination.searchParams.get('scope'), 'morrows:control');
     assert.equal(destination.searchParams.get('resource'), 'https://console.example/morrows');
     assert.equal(destination.searchParams.get('redirect_uri'), 'https://console.example/morrows/ui/');
     assert.equal(destination.searchParams.get('state'), JSON.parse([...storage.values()][0]).state);

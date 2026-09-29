@@ -6,10 +6,12 @@ Morrows。版本管理直接使用 Git；没有自制的 status、diff、提交�
 ## 准备与多项目读取
 
 从仓库构建 `cargo build -p morrows-cli`，可执行文件为 `target/debug/morrows`。
-独立客户端使用已签发的 `MORROWS_AGENT_TOKEN` 和 `MORROWS_MCP_URL`；受管 runtime
-可直接复用 `MORROWS_AGENT_AUTHORIZATION`（优先级高于 TOKEN），并通过 `MORROWS_MEMORY_CLI`
-找到可执行文件的绝对路径，可用 `"${MORROWS_MEMORY_CLI:-morrows}"` 调用。凭据不写入记忆目录，
-不扫描认证文件，不跟随 HTTP 重定向。需要本机 Git。发布前会核对服务端工具 schema 支持
+公网 MCP 客户端统一使用 `MORROWS_MCP_URL` 的 OAuth。`MORROWS_AGENT_TOKEN` / `mrw_agent_*`
+不再是公网 `/morrows` 的认证方式。受管 runtime 仍可通过内部、Run-bound 的
+`MORROWS_AGENT_AUTHORIZATION` 调用 loopback-only `/mcp`，并通过 `MORROWS_MEMORY_CLI` 找到可执行文件的
+绝对路径，可用 `"${MORROWS_MEMORY_CLI:-morrows}"` 调用；`MORROWS_MEMORY_MCP_URL` 由受管 runtime
+指向 Morrows server 的 loopback MCP。内部凭据不写入记忆目录，不扫描认证
+文件，不跟随 HTTP 重定向。需要本机 Git。发布前会核对服务端工具 schema 支持
 稳定文档 UUID 与目标项目校验；旧服务端应先更新，不会静默忽略这些必要参数。
 
 ```sh

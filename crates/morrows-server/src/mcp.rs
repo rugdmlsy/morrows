@@ -1,5 +1,5 @@
 use crate::{
-    auth::{AUTH_SOURCE_HEADER, LSM_OAUTH_CLIENT_ID_HEADER, LSM_OAUTH_CLIENT_NAME_HEADER},
+    auth::{AUTH_SOURCE_HEADER, MORROWS_OAUTH_CLIENT_ID_HEADER, MORROWS_OAUTH_CLIENT_NAME_HEADER},
     memory_search::MemorySearch,
 };
 use axum::http::request::Parts;
@@ -2034,8 +2034,8 @@ fn auth_provenance(parts: &Parts) -> Value {
     };
     json!({
         "source": text(AUTH_SOURCE_HEADER).unwrap_or_else(|| "unknown".into()),
-        "oauth_client_id": text(LSM_OAUTH_CLIENT_ID_HEADER),
-        "oauth_client_name": text(LSM_OAUTH_CLIENT_NAME_HEADER),
+        "oauth_client_id": text(MORROWS_OAUTH_CLIENT_ID_HEADER),
+        "oauth_client_name": text(MORROWS_OAUTH_CLIENT_NAME_HEADER),
     })
 }
 

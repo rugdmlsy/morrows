@@ -1102,9 +1102,9 @@ impl Drop for SecretFileGuard {
 }
 
 fn codebuddy_mcp_config(
-    execution: &LaunchExecution,
+    _execution: &LaunchExecution,
     agent_binding: Option<&RuntimeAgentBinding>,
-    morrows_token: &str,
+    _morrows_token: &str,
 ) -> anyhow::Result<Value> {
     let morrows_url = morrows_mcp_url();
     let mut servers = serde_json::Map::new();
@@ -1113,10 +1113,6 @@ fn codebuddy_mcp_config(
         json!({
             "type": "http",
             "url": morrows_url,
-            "headers": {
-                "Authorization": format!("Bearer {morrows_token}"),
-                "X-Agent-Instance-Id": execution.attempt.agent_instance_id.to_string(),
-            },
             "description": "Morrows employee interface",
         }),
     );
@@ -1725,20 +1721,17 @@ async fn execute_codex_with_root(
 }
 
 pub(crate) fn morrows_mcp_url() -> String {
-    std::env::var("MORROWS_AGENT_MCP_URL")
-        .or_else(|_| std::env::var("MORROWS_MCP_URL"))
+    std::env::var("MORROWS_MCP_URL")
         .or_else(|_| std::env::var("AC_MCP_URL"))
-        .unwrap_or_else(|_| "http://127.0.0.1:8787/mcp".into())
+        .unwrap_or_else(|_| "https://mcp.xycdev.com/morrows".into())
 }
 
 pub(crate) fn inject_morrows_config(args: &mut Vec<String>) {
     let morrows_url = morrows_mcp_url();
     let overrides = [
         format!("mcp_servers.morrows.url=\"{morrows_url}\""),
-        "mcp_servers.morrows.env_http_headers.Authorization=\"MORROWS_AGENT_AUTHORIZATION\""
-            .to_owned(),
-        "mcp_servers.morrows.env_http_headers.X-Agent-Instance-Id=\"MORROWS_AGENT_INSTANCE_ID\""
-            .to_owned(),
+        "mcp_servers.morrows.env_http_headers={}".to_owned(),
+        "mcp_servers.morrows.http_headers={}".to_owned(),
     ];
     for value in overrides.into_iter().rev() {
         args.insert(1, value);
@@ -2348,7 +2341,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_morrows_auth_config_uses_env_names_not_credentials() {
+    fn codex_morrows_config_uses_profile_oauth() {
         let profile = LaunchProfile {
             id: uuid::Uuid::new_v4(),
             name: "codex".into(),
@@ -2365,8 +2358,8 @@ mod tests {
         let mut args = codex_args(&profile, "/tmp/work", "/tmp/last", None, false);
         inject_morrows_config(&mut args);
         let joined = args.join(" ");
-        assert!(joined.contains("MORROWS_AGENT_AUTHORIZATION"));
-        assert!(joined.contains("MORROWS_AGENT_INSTANCE_ID"));
+        assert!(!joined.contains("MORROWS_AGENT_AUTHORIZATION"));
+        assert!(!joined.contains("MORROWS_AGENT_INSTANCE_ID"));
         assert!(!joined.contains("Bearer "));
         assert!(!joined.contains("mrw_agent_"));
     }

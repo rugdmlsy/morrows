@@ -24,8 +24,7 @@ impl MorrowRuntimeControl {
     }
 
     pub fn from_env() -> anyhow::Result<Option<Self>> {
-        let configured = std::env::var("MORROWS_RUNTIME_CONTROL_URL")
-            .or_else(|_| std::env::var("MORROWS_LSM_CONTROL_URL"));
+        let configured = std::env::var("MORROWS_RUNTIME_CONTROL_URL");
         let Ok(configured) = configured else {
             return Ok(None);
         };
@@ -42,15 +41,14 @@ impl MorrowRuntimeControl {
         if !address.ip().is_loopback() {
             anyhow::bail!("MORROWS_RUNTIME_CONTROL_URL must target loopback");
         }
-        let key = std::env::var("MORROWS_RUNTIME_CONTROL_KEY")
-            .or_else(|_| std::env::var("MORROWS_LSM_CONTROL_KEY"))
-            .context("MORROWS_RUNTIME_CONTROL_KEY is required when morrow-runtime integration is enabled")?;
+        let key = std::env::var("MORROWS_RUNTIME_CONTROL_KEY").context(
+            "MORROWS_RUNTIME_CONTROL_KEY is required when morrow-runtime integration is enabled",
+        )?;
         if key.is_empty() || key.contains('\r') || key.contains('\n') {
             anyhow::bail!("MORROWS_RUNTIME_CONTROL_KEY is empty or invalid");
         }
-        let mcp_url = std::env::var("MORROWS_RUNTIME_MCP_URL")
-            .or_else(|_| std::env::var("MORROWS_LSM_MCP_URL"))
-            .unwrap_or_else(|_| format!("{origin}/mcp"));
+        let mcp_url =
+            std::env::var("MORROWS_RUNTIME_MCP_URL").unwrap_or_else(|_| format!("{origin}/mcp"));
         if !(mcp_url.starts_with("http://") || mcp_url.starts_with("https://")) {
             anyhow::bail!("MORROWS_RUNTIME_MCP_URL must use HTTP(S)");
         }
@@ -59,7 +57,6 @@ impl MorrowRuntimeControl {
             address,
             key,
             subject: std::env::var("MORROWS_RUNTIME_SUBJECT")
-                .or_else(|_| std::env::var("MORROWS_LSM_SUBJECT"))
                 .unwrap_or_else(|_| "morrows-runtime".into()),
         }))
     }

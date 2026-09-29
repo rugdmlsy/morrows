@@ -9,7 +9,7 @@ User=morrow
 Group=morrow
 WorkingDirectory=/srv/morrow/workspaces/morrows
 Environment=HOME=/home/morrow
-EnvironmentFile=-/home/morrow/.config/local-shell-mcp/service.env
+EnvironmentFile=/home/morrow/.config/morrows/service.env
 ExecStart=/srv/morrow/workspaces/morrows/scripts/run-morrows-cloudflared-vps.sh
 Restart=always
 RestartSec=5

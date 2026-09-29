@@ -42,7 +42,7 @@ from .fs_ops import (
 from .image_ops import ImageFile, assert_view_image_size, detect_image_type, make_image_preview
 from .jobs import list_jobs
 from .live_channel import get_live_channel_manager, live_id_from_claims
-from .oauth import ALL_OAUTH_SCOPES, public_base_url
+from .internal_tokens import RUNTIME_SCOPES, public_base_url
 from .remote import remote_manager
 from .session_runtime import get_session_runtime_manager
 from .settings import get_settings
@@ -63,7 +63,7 @@ from .version import version_info
 
 UI_API_PREFIX = "/api/ui"
 UI_SUBPROTOCOL = "lsm-ui"
-UI_FULL_SCOPES = ALL_OAUTH_SCOPES
+UI_FULL_SCOPES = RUNTIME_SCOPES
 UI_MIN_COLUMNS = 20
 UI_MAX_COLUMNS = 1_600
 UI_MIN_ROWS = 8
@@ -336,7 +336,7 @@ def _logical_session_subject(request: Request, *, create: bool = False) -> str |
     settings = get_settings()
     if settings.auth_mode == "none":
         return "anonymous"
-    if settings.auth_mode == "oauth":
+    if settings.auth_mode == "internal":
         return "local-user"
     return "local-mcp-client"
 
@@ -1410,7 +1410,7 @@ async def api_remotes(request: Request) -> Response:
             return _json_ok(remote_manager().list_machines())
         live_id = _require_live_human_mutation(request)
         body = await request.json()
-        from .oauth import public_base_url
+        from .internal_tokens import public_base_url
 
         result = await remote_manager().create_invite(
             body.get("name"),
@@ -1516,7 +1516,7 @@ def _websocket_principal(websocket: WebSocket) -> Principal | None:
     else:
         return None
     try:
-        from .oauth import validate_bearer_token
+        from .internal_tokens import validate_bearer_token
 
         claims = validate_bearer_token(token, websocket)  # type: ignore[arg-type]
         principal = Principal(email=None, subject=claims.get("sub"), claims=claims)
@@ -2291,7 +2291,7 @@ def _idle_timeout_remaining(
 async def ui_terminal_websocket(websocket: WebSocket) -> None:
     initial_live_credentials = _live_websocket_credentials(websocket)
     if not _authorize_websocket(websocket):
-        await websocket.close(code=4401, reason="OAuth authentication required")
+        await websocket.close(code=4401, reason="Runtime authentication required")
         return
     if initial_live_credentials is not None:
         await websocket.close(
@@ -2453,7 +2453,7 @@ async def ui_terminal_websocket(websocket: WebSocket) -> None:
 async def ui_shell_websocket(websocket: WebSocket) -> None:
     initial_live_credentials = _live_websocket_credentials(websocket)
     if not _authorize_websocket(websocket):
-        await websocket.close(code=4401, reason="OAuth authentication required")
+        await websocket.close(code=4401, reason="Runtime authentication required")
         return
 
     settings = get_settings()

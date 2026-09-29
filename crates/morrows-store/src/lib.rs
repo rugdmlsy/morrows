@@ -18,6 +18,7 @@ mod git_memory;
 mod identity;
 mod job_wait;
 mod milestone;
+mod oauth;
 mod runtime;
 mod task_graph;
 mod task_rework;

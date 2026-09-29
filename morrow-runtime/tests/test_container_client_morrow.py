@@ -20,7 +20,7 @@ from morrow_runtime.container_client import (
     container_client_routes,
     reset_container_client_manager,
 )
-from morrow_runtime.oauth import ALL_OAUTH_SCOPES, issue_access_token
+from morrow_runtime.internal_tokens import RUNTIME_SCOPES, issue_access_token
 from morrow_runtime.settings import get_settings
 from morrow_runtime.tools import build_mcp
 
@@ -29,11 +29,11 @@ def _configure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LOCAL_SHELL_MCP_WORKSPACE_ROOT", str(tmp_path / "workspace"))
     monkeypatch.setenv("LOCAL_SHELL_MCP_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("LOCAL_SHELL_MCP_AUDIT_LOG_PATH", str(tmp_path / "audit.jsonl"))
-    monkeypatch.setenv("LOCAL_SHELL_MCP_AUTH_MODE", "oauth")
+    monkeypatch.setenv("LOCAL_SHELL_MCP_AUTH_MODE", "internal")
     monkeypatch.setenv("LOCAL_SHELL_MCP_AUTH_BYPASS_LOCALHOST", "false")
     monkeypatch.setenv("LOCAL_SHELL_MCP_PUBLIC_BASE_URL", "http://testserver")
     monkeypatch.setenv(
-        "LOCAL_SHELL_MCP_OAUTH_JWT_SECRET",
+        "LOCAL_SHELL_MCP_RUNTIME_TOKEN_JWT_SECRET",
         "container-client-test-secret-that-is-at-least-32-bytes",
     )
     monkeypatch.setenv("LOCAL_SHELL_MCP_REMOTE_ENABLED", "false")
@@ -63,7 +63,7 @@ async def test_invite_is_single_use_and_registry_never_stores_bearer(
     session, token = successful[0]
     claims = jwt.decode(token, options={"verify_signature": False})
     assert claims["sub"] == f"container-client:{session.session_id}"
-    assert claims["scope"] == " ".join(ALL_OAUTH_SCOPES)
+    assert claims["scope"] == " ".join(RUNTIME_SCOPES)
     assert claims["token_kind"] == "container-client"
     assert 86_395 <= claims["exp"] - claims["iat"] <= 86_405
 
@@ -120,7 +120,7 @@ def test_standard_oauth_clients_share_the_single_user_subject(
     tokens = [
         issue_access_token(
             client_id=client_id,
-            scope=" ".join(ALL_OAUTH_SCOPES),
+            scope=" ".join(RUNTIME_SCOPES),
             resource="http://testserver",
             issuer="http://testserver",
         )
@@ -398,7 +398,7 @@ async def test_manager_rejects_invalid_principals_and_concurrent_calls(
         invitation["invite"], base_url="http://testserver", client_version="1"
     )
     claims = jwt.decode(token, options={"verify_signature": False})
-    wrong_kind = Principal(email=None, subject="x", claims={"token_kind": "oauth"})
+    wrong_kind = Principal(email=None, subject="x", claims={"token_kind": "internal"})
     with pytest.raises(HTTPException, match="required"):
         manager.begin_call(wrong_kind)
     bad_claims = dict(claims, jti="wrong")

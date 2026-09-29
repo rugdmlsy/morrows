@@ -571,7 +571,7 @@ function cleanAgentDisplayName(entry: FleetEntry, locale: Locale) {
   const { instance, profile, machine, reported_identity } = entry;
   const displayName = instance.display_name?.trim();
   const reportedName = reported_identity?.agent_name?.trim();
-  const generatedOauthName = profile.provider === "lsm" && /^lsm-oauth-client-\d+$/i.test(displayName || "");
+  const generatedOauthName = profile.provider === "morrows" && /^morrows-oauth-client-\d+$/i.test(displayName || "");
   if (displayName && !generatedOauthName) return displayName;
   if (reportedName) return reportedName;
   if (displayName) return displayName;

@@ -17,9 +17,15 @@ pub struct Client {
 
 impl Client {
     pub async fn connect() -> Result<Self> {
-        let endpoint = std::env::var("MORROWS_MCP_URL")
-            .or_else(|_| std::env::var("AC_MCP_URL"))
-            .unwrap_or_else(|_| "http://127.0.0.1:8787/mcp".into());
+        let managed_authorization = std::env::var("MORROWS_AGENT_AUTHORIZATION").ok();
+        let endpoint = if managed_authorization.is_some() {
+            std::env::var("MORROWS_MEMORY_MCP_URL")
+                .unwrap_or_else(|_| "http://127.0.0.1:8787/mcp".into())
+        } else {
+            std::env::var("MORROWS_MCP_URL")
+                .or_else(|_| std::env::var("AC_MCP_URL"))
+                .unwrap_or_else(|_| "http://127.0.0.1:8787/mcp".into())
+        };
         let url = reqwest::Url::parse(&endpoint).context("invalid MORROWS_MCP_URL")?;
         if !matches!(url.scheme(), "http" | "https")
             || !url.username().is_empty()
@@ -33,12 +39,12 @@ impl Client {
         }
         // Managed runtimes already carry their scoped Authorization value. Use
         // it before any inherited convenience token, never scan credential files.
-        let token = match std::env::var("MORROWS_AGENT_AUTHORIZATION") {
-            Ok(value) => value
+        let token = match managed_authorization {
+            Some(value) => value
                 .strip_prefix("Bearer ")
                 .context("MORROWS_AGENT_AUTHORIZATION must use Bearer authentication")?
                 .to_owned(),
-            Err(_) => std::env::var("MORROWS_AGENT_TOKEN")
+            None => std::env::var("MORROWS_AGENT_TOKEN")
                 .context("set MORROWS_AGENT_TOKEN to an issued Agent Bearer credential")?,
         };
         if !token.starts_with("mrw_agent_") {

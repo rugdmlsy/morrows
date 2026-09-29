@@ -49,10 +49,10 @@ Morrows 是一个本地优先、Agent 原生的工作协作系统，用于协调
 - Session WebUI 缓存：只有选中 Session 后才拉取历史，并仅对当前 Session 增量刷新
 - 基于持久化 Agent delivery outbox 的员工 Session inbox/read/reply MCP 工具
 - 可签发/撤销的 Agent Bearer credential；runtime credential 短期且绑定 Run，bridge credential 由本地控制面显式签发
-- 可签发/撤销的控制平面 Operator credential，支持 `viewer` / `operator` / `admin` RBAC，供 loopback/CLI 管理兼容使用；公网 WebUI 使用 LSM OAuth
+- 可签发/撤销的控制平面 Operator credential，支持 `viewer` / `operator` / `admin` RBAC，供 loopback/CLI 管理兼容使用；公网 WebUI 使用 Morrows OAuth
 - LSM、Antigravity、Gemini 等 external handoff adapter，以及受所有权约束的 accept/status
 - 本地 launch job 中断后的启动恢复；`morrow_runtime` 远端 launch 在 Morrows 重启后恢复对同一 durable runtime 的监控
-- 内置 `morrow-runtime` 执行平面：Machine 绑定的远端 worker、持久 Logical Session、作用域化 runtime capability、Task/direct Session provider 进程监督与有界 cleanup；独立 LSM 保留为 OAuth/管理/修复/ARP 服务
+- 内置 `morrow-runtime` 执行平面：Machine 绑定的远端 worker、持久 Logical Session、作用域化 runtime capability、Task/direct Session provider 进程监督与有界 cleanup；独立 LSM 仅服务自己的客户端和管理/修复/ARP
 - 中英文 Web UI，首次访问默认中文
 - SQLite 持久化 launcher job 与支持 provider resume 的事务型 Agent delivery outbox
 - Agent Fleet 可手动添加 Codex Agent：填写账号邮箱与目标机器上的凭据引用（如 `~/.codex`、`~/.codex-personal`）；Morrows 不上传、不复制、不保存 Codex `auth.json` 或 Provider 登录 token
@@ -109,25 +109,24 @@ WebUI 同一实例暴露在：
 https://mcp.xycdev.com/morrows/ui/
 ```
 
-公网 WebUI / 控制平面 API 使用 Morrows 内置的 `morrow-runtime` OAuth，
-不再依赖独立 Local Shell MCP 的 OAuth 服务，也不要求浏览器保存
-`mrw_operator_*` token。
+公网 MCP、WebUI 和控制平面 API 统一使用 `morrows-server` 自己的 OAuth。
+`/morrows`、`/morrows/auth/*`、`/morrows/api/*` 和 OAuth discovery 均由共享
+Caddy edge 直接转发到 `127.0.0.1:8787`。OAuth client、授权码、access token
+和 refresh token 的状态保存在 Morrows SQLite 中，不依赖 runtime 或独立 LSM。
 
-VPS 上的 Local Shell MCP 仍独立监听 `127.0.0.1:8766`，原有
-`https://mcp.xycdev.com/mcp` 保持不变。共享 loopback edge 监听
-`127.0.0.1:8765`，但 `/morrows`、`/morrows/api/*` 和
-`/morrows/auth/*` 均进入 Morrows 自己的 `morrow-runtime`；WebUI 静态资源
-直接进入 Morrows server。runtime 验证 OAuth 后移除公网 token 和调用方伪造的
-Morrows 身份头，只通过 loopback 注入已验证的 OAuth `client_id`（以及可选
-`client_name`）作为可信 provenance。Morrows 按该 `client_id` 解析/创建稳定
-技术 AgentInstance；名称、账号邮箱、平台和设备继续由 Agent
-`agent_identity_report` 自行上报，绝不用于授权。
+ChatGPT、`~/.codex`、`~/.codex-personal`、`~/.codex-mentor2` 分别注册独立
+client，统一连接 `https://mcp.xycdev.com/morrows`。授权要求 S256 PKCE 和
+`MORROWS_OAUTH_ADMIN_PIN`（至少 16 位随机字符）。access token 有效期一小时；
+refresh token 每次使用后轮换，重放会撤销整个授权族；授权族最长 90 天。
+WebUI 使用显式 `morrows:control` scope，MCP 默认使用 `morrows` scope。
 
-共享 Caddy 路由和 Cloudflare connector 生命周期现在由 Morrows
-`scripts/deploy-vps.sh` 管理。connector 不依赖 `local-shell-mcp.service`，
-所以独立 LSM 重启/停止不会让 Morrows WebUI/API/MCP 从公网消失。迁移期 runtime
-仍可验证已经签发的旧 LSM OAuth token，以避免现有 ChatGPT connector 立即失效；
-新认证统一走 `/morrows/auth`，后续完成客户端重认证后可移除这层兼容。
+旧 LSM/runtime token 不再接受；上线后每个客户端需要一次重新授权。
+`mrw_agent_*` 仅保留在内部 Run/CLI 路径，provider MCP 配置不再注入它。
+旧 split-auth 环境变量和 `/morrows/ui/agent-mcp` 已停用。
+迁移、回滚与生产验证步骤见 [Morrows OAuth](docs/morrows-oauth.md)。
+
+独立 LSM 仍可服务自己的 `/mcp`；其生命周期不影响 Morrows。
+`morrow-runtime` 仅负责执行、worker transport 和内部 capability，不能签发公网 OAuth。
 
 本地开发仍可使用旧的 tmux 部署：
 
@@ -150,8 +149,9 @@ MORROWS_MCP_URL=https://mcp.xycdev.com/morrows
 # 如需额外 Host，可用逗号分隔：
 # MORROWS_MCP_ALLOWED_HOSTS=internal.example:9443
 
-# Provider Agent 使用直连 Morrows MCP；不要经过 ChatGPT/WebUI 的 LSM OAuth bridge
-MORROWS_AGENT_MCP_URL=https://mcp.xycdev.com/morrows/ui/agent-mcp
+# 所有公网客户端使用上述 MORROWS_MCP_URL 和独立 OAuth client
+MORROWS_OAUTH_ISSUER=https://mcp.xycdev.com/morrows/auth
+# MORROWS_OAUTH_ADMIN_PIN 仅配置在 service.env，至少 16 位随机字符
 
 # 内置 morrow-runtime sidecar（生产默认 loopback :8790）
 MORROWS_RUNTIME_CONTROL_URL=http://127.0.0.1:8790
@@ -196,18 +196,16 @@ Morrows 暴露一个 Streamable HTTP MCP endpoint，用于**员工操作**，而
 http://127.0.0.1:8787/mcp
 ```
 
-Morrows 内部员工 MCP 调用继续使用签发的 Bearer credential：
+Morrows 内部员工 CLI/REST 调用继续使用签发的 Bearer credential：
 
 ```text
 Authorization: Bearer mrw_agent_<secret>
 X-Agent-Instance-Id: <uuid>   # 使用 Bearer 时可选；若提供则必须匹配
 ```
 
-这套 credential 只用于 Codex / CodeBuddy 等 Morrows 管理的 Agent runtime；
-**ChatGPT 公网客户端不直接持有 `mrw_agent_*`**。ChatGPT 只完成现有 LSM OAuth，
-LSM 在验证后通过 loopback 传递可信 OAuth client provenance；Morrows 按已验证
-`client_id` 绑定稳定的技术 AgentInstance，不需要第二套共享密钥。Agent 的
-`agent_name/account_email/platform/device` 是独立的自报审计信息，不参与授权。
+这套 credential 只用于内部 Run/CLI 操作。ChatGPT、Codex、CodeBuddy 等所有公网
+MCP 客户端统一使用 Morrows OAuth，server 按已验证 `client_id` 绑定稳定技术
+AgentInstance；Agent 自报名称、账号、平台和设备不参与授权。
 
 本地控制面可通过 `/api/agents/{id}/credentials` 和
 `/api/agent-credentials/{id}/revoke` 签发、列出和撤销 bridge credential。
@@ -229,7 +227,7 @@ Credential 管理 endpoint：
 - `POST /api/operator-credentials/{id}/revoke`
 
 SQLite 中只保存 hash，列表响应不会返回 token/hash 原文。`mrw_operator_*` 仍用于
-loopback/CLI 管理与兼容场景；公网 WebUI 不再保存或发送它，而是使用 LSM OAuth
+loopback/CLI 管理与兼容场景；公网 WebUI 不再保存或发送它，而是使用 Morrows OAuth
 PKCE，并把 OAuth token 仅保存在当前标签页的 `sessionStorage` 中。
 
 当前员工 MCP 工具包括：
@@ -273,7 +271,7 @@ WebUI 可以为某个 Session 显式启动/恢复本地 Agent CLI。专用 Sessi
 Morrows 明确拆分为三个平面：
 
 1. **Morrows Control Plane**：工作语义、工作分配、上下文快照、长期记忆、决策和成果物的事实来源。
-2. **morrow-runtime Execution Plane**：Morrows 专用的主机执行资源、隔离运行空间、Job、Shell 和执行审计事实来源；standalone LSM 仍独立用于 OAuth/管理/修复/ARP。
+2. **morrow-runtime Execution Plane**：Morrows 专用的主机执行资源、隔离运行空间、Job、Shell 和执行审计事实来源；standalone LSM 仍独立服务自己的客户端和管理/修复/ARP。
 3. **Provider Plane**：模型私有 rollout Session、工具表示和 reasoning trace 的事实来源。Provider Session 属于私有状态，不直接在 Agent 之间共享。
 
 > **终极恢复原则（Ultimate Recovery Invariant）**
@@ -319,9 +317,9 @@ Agent A 创建 typed artifact、decision、directed message 和 pending handoff�
 
 ### WebUI 登录
 
-公网 `https://mcp.xycdev.com/morrows/ui/` 只使用 LSM OAuth。若当前标签页已经通过 LSM
-WebUI OAuth，Morrows 会直接复用 `lsm.ui.access_token`；否则顶栏会发起同一套 LSM OAuth
-PKCE 授权流程。Morrows 不再要求浏览器粘贴、保存或申请 `mrw_operator_*`。
+公网 `https://mcp.xycdev.com/morrows/ui/` 使用 `morrows-server` OAuth 和显式
+`morrows:control` scope。顶栏发起 PKCE 授权流程，token 仅保存在当前标签页，
+不复用 LSM/runtime token，也不要求浏览器保存 `mrw_operator_*`。
 
 原有 `morrows operator-approve` 和 `mrw_operator_*` 仍保留给 loopback/CLI 管理与兼容
 场景，不作为公网 WebUI 的认证路径。

@@ -136,7 +136,7 @@ def test_audit_preserves_lower_level_commands_and_embedded_tokens(tmp_path, monk
     secret = "configured-secret-value-which-is-long"
     monkeypatch.setenv("LOCAL_SHELL_MCP_WORKSPACE_ROOT", str(tmp_path))
     monkeypatch.setenv("LOCAL_SHELL_MCP_AUDIT_LOG_PATH", str(audit_path))
-    monkeypatch.setenv("LOCAL_SHELL_MCP_OAUTH_JWT_SECRET", secret)
+    monkeypatch.setenv("LOCAL_SHELL_MCP_RUNTIME_TOKEN_JWT_SECRET", secret)
     get_settings.cache_clear()
 
     audit(

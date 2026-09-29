@@ -51,7 +51,7 @@ def test_run_mcp_stdio_and_legacy_fallback(monkeypatch):
     validated = []
     fake = FakeMcp()
     monkeypatch.setattr(settings_module, "get_settings", lambda: _settings(mode="stdio"))
-    monkeypatch.setattr(settings_module, "validate_public_oauth_configuration", validated.append)
+    monkeypatch.setattr(settings_module, "validate_runtime_token_configuration", validated.append)
     monkeypatch.setattr(tools, "build_mcp", lambda: fake)
 
     main_module.run_mcp()
@@ -84,7 +84,7 @@ def test_run_mcp_streamable_and_sse(monkeypatch):
         )
 
     monkeypatch.setattr(main_module, "_run_uvicorn", fake_run)
-    monkeypatch.setattr(settings_module, "validate_public_oauth_configuration", lambda value: None)
+    monkeypatch.setattr(settings_module, "validate_runtime_token_configuration", lambda value: None)
     monkeypatch.setattr(main_module, "_build_mcp_http_app", lambda mcp: ("wrapped", mcp))
 
     streamable = FakeMcp(streamable=True)
@@ -109,8 +109,8 @@ def test_run_mcp_streamable_and_sse(monkeypatch):
         def add_middleware(self, middleware, **kwargs):
             self.middleware.append((middleware, kwargs))
 
-    monkeypatch.setattr(main_module, "_with_oauth_routes", lambda inner, mcp=None: FakeApp())
-    for auth_mode, expected_middleware_count in (("none", 1), ("oauth", 2)):
+    monkeypatch.setattr(main_module, "_with_runtime_routes", lambda inner, mcp=None: FakeApp())
+    for auth_mode, expected_middleware_count in (("none", 1), ("internal", 2)):
         sse = FakeMcp(sse=True)
         monkeypatch.setattr(settings_module, "get_settings", lambda mode=auth_mode: _settings(auth_mode=mode))
         monkeypatch.setattr(tools, "build_mcp", lambda item=sse: item)
@@ -142,8 +142,8 @@ def test_build_mcp_http_app_applies_timeout_and_middleware(monkeypatch):
             self.middleware.append((middleware, kwargs))
 
     fake_app = FakeApp()
-    monkeypatch.setattr(main_module, "_with_oauth_routes", lambda inner, mcp=None: fake_app)
-    monkeypatch.setattr(settings_module, "get_settings", lambda: _settings(auth_mode="oauth"))
+    monkeypatch.setattr(main_module, "_with_runtime_routes", lambda inner, mcp=None: fake_app)
+    monkeypatch.setattr(settings_module, "get_settings", lambda: _settings(auth_mode="internal"))
     mcp = FakeInnerMcp()
 
     result = main_module._build_mcp_http_app(mcp)
@@ -165,7 +165,7 @@ def test_run_http(monkeypatch):
     settings = _settings(mode="http")
     calls = []
     monkeypatch.setattr(settings_module, "get_settings", lambda: settings)
-    monkeypatch.setattr(settings_module, "validate_public_oauth_configuration", lambda value: calls.append(("validate", value)))
+    monkeypatch.setattr(settings_module, "validate_runtime_token_configuration", lambda value: calls.append(("validate", value)))
     monkeypatch.setattr(http_app, "build_http_app", lambda: "http-app")
 
     def fake_run(app, run_settings):  # noqa: ANN001

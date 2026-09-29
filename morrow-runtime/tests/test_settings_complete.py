@@ -84,8 +84,7 @@ port: 9001
     monkeypatch.setenv("LOCAL_SHELL_MCP_CONFIG", str(config))
     monkeypatch.setenv("LOCAL_SHELL_MCP_WORKSPACE_ROOT", str(workspace))
     monkeypatch.setenv("LOCAL_SHELL_MCP_STATE_DIR", str(tmp_path / "state"))
-    monkeypatch.setenv("LOCAL_SHELL_MCP_OAUTH_JWT_SECRET", "x" * 40)
-    monkeypatch.setenv("LOCAL_SHELL_MCP_OAUTH_ADMIN_PIN", "secret-pin-value")
+    monkeypatch.setenv("LOCAL_SHELL_MCP_RUNTIME_TOKEN_JWT_SECRET", "x" * 40)
     monkeypatch.setenv("LOCAL_SHELL_MCP_CONTROL_API_KEY", "secret-control-key-value")
     settings.get_settings.cache_clear()
     loaded = settings.get_settings()
@@ -98,11 +97,8 @@ port: 9001
     assert workspace.is_dir()
 
     dumped = settings.safe_settings_dump(loaded)
-    assert dumped["oauth_jwt_secret"] == "<redacted>"
-    assert dumped["oauth_admin_pin"] == "<redacted>"
+    assert dumped["runtime_token_jwt_secret"] == "<redacted>"
     assert dumped["control_api_key"] == "<redacted>"
-    loaded.oauth_admin_pin = None
-    assert settings.safe_settings_dump(loaded)["oauth_admin_pin"] is None
 
 
 def test_environment_variables_override_yaml_config(tmp_path, monkeypatch):
@@ -143,7 +139,7 @@ def test_lowercase_environment_variable_overrides_yaml_config(tmp_path, monkeypa
     monkeypatch.setenv("LOCAL_SHELL_MCP_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("LOCAL_SHELL_MCP_AUTH_MODE", "none")
     monkeypatch.delenv("LOCAL_SHELL_MCP_PORT", raising=False)
-    monkeypatch.setenv("morrow_runtime_port", "9102")
+    monkeypatch.setenv("local_shell_mcp_port", "9102")
     settings.get_settings.cache_clear()
 
     assert settings.get_settings().port == 9102
@@ -185,7 +181,7 @@ def test_pydantic_settings_validation_and_copy_paths(tmp_path):
     [
         ({"max_jobs": -1}, "greater than or equal"),
         ({"max_audit_archive_bytes": -1}, "greater than or equal"),
-        ({"oauth_access_token_ttl_s": -1}, "greater than or equal"),
+        ({"runtime_token_access_token_ttl_s": -1}, "greater than or equal"),
         ({"port": 0}, "greater than zero"),
         ({"file_download_default_max_downloads": -1}, "greater than or equal"),
     ],
@@ -196,25 +192,25 @@ def test_additional_numeric_validation(updates, message):
 
 
 def test_oauth_validation_early_returns_and_secret_read(tmp_path):
-    settings.validate_public_oauth_configuration(
-        settings.Settings(auth_mode="none", oauth_jwt_secret="short")
+    settings.validate_runtime_token_configuration(
+        settings.Settings(auth_mode="none", runtime_token_jwt_secret="short")
     )
-    settings.validate_public_oauth_configuration(
+    settings.validate_runtime_token_configuration(
         settings.Settings(
-            auth_mode="oauth",
-            oauth_jwt_secret="s" * 32,
+            auth_mode="internal",
+            runtime_token_jwt_secret="s" * 32,
             public_base_url=None,
         )
     )
 
     missing = tmp_path / "missing"
-    assert settings._read_oauth_secret(missing) is None
+    assert settings._read_runtime_secret(missing) is None
     short = tmp_path / "short"
     short.write_text("tiny", encoding="utf-8")
-    assert settings._read_oauth_secret(short) is None
+    assert settings._read_runtime_secret(short) is None
     valid = tmp_path / "valid"
     valid.write_text("v" * 32, encoding="utf-8")
-    assert settings._read_oauth_secret(valid) == "v" * 32
+    assert settings._read_runtime_secret(valid) == "v" * 32
 
 
 def _load_fallback_settings(monkeypatch):

@@ -68,7 +68,7 @@ from .live_channel import (
 )
 from .models import ToolResult
 from .models import ok_result as _ok
-from .oauth import ALL_OAUTH_SCOPES
+from .internal_tokens import RUNTIME_SCOPES
 from .patch_ops import git_apply_command, git_apply_prefix, normalize_patch_text
 from .playwright_ops import playwright_run_script
 from .process_utils import managed_process_kwargs
@@ -292,10 +292,6 @@ SECRET_PATTERNS = {
 }
 
 
-def _oauth_security_scheme(scopes: list[str] | tuple[str, ...]) -> dict[str, Any]:
-    return {"type": "oauth2", "scopes": list(ALL_OAUTH_SCOPES)}
-
-
 NOAUTH_SECURITY_SCHEMES = [{"type": "noauth"}]
 PUBLIC_TOOL_TIMEOUT_S = PUBLIC_TOOL_WATCHDOG_TIMEOUT_S
 MCP_BASE_INSTRUCTIONS = (
@@ -355,10 +351,15 @@ def _security_meta(schemes: list[dict[str, Any]]) -> dict[str, Any]:
     return {"securitySchemes": schemes}
 
 
-def _oauth_meta(scopes: list[str]) -> dict[str, Any]:
-    if get_settings().auth_mode == "none":
+def _runtime_meta(scopes: list[str]) -> dict[str, Any]:
+    settings = get_settings()
+    if settings.auth_mode == "none" and not settings.require_session_capability:
         return _security_meta([*NOAUTH_SECURITY_SCHEMES])
-    return _security_meta([_oauth_security_scheme(scopes)])
+    scheme = (
+        {"type": "apiKey", "in": "header", "name": "X-Morrow-Runtime-Capability"}
+        if settings.require_session_capability else {"type": "http", "scheme": "bearer"}
+    )
+    return {**_security_meta([scheme]), "morrow/runtimeScopes": list(RUNTIME_SCOPES)}
 
 
 def _live_workspace_api_base() -> str:
@@ -808,12 +809,7 @@ def _install_mcp_tool_watchdogs(mcp: FastMCP) -> None:
     for tool in mcp._tool_manager._tools.values():  # noqa: SLF001
         original = tool.fn
         tool_name = tool.name
-        required_scopes: list[str] = []
-        for scheme in (tool.meta or {}).get("securitySchemes", []):
-            if scheme.get("type") == "oauth2":
-                required_scopes.extend(str(scope) for scope in scheme.get("scopes", []))
-                break
-        tool_required_scopes = tuple(dict.fromkeys(required_scopes))
+        tool_required_scopes = tuple((tool.meta or {}).get("morrow/runtimeScopes", []))
         signature = inspect.signature(original)
 
         async def wrapped(  # noqa: ANN202
@@ -2549,7 +2545,7 @@ async def _remote_call(
 def _register_environment_tools(
     mcp: FastMCP, settings: Any, read_only_tool: ToolAnnotations
 ) -> None:
-    shell_read_meta = _oauth_meta(["shell:read"])
+    shell_read_meta = _runtime_meta(["shell:read"])
 
     @mcp.tool(structured_output=True, annotations=read_only_tool, meta=shell_read_meta)
     async def environment_get(machine: str | None = None) -> ToolResult:
@@ -2596,7 +2592,7 @@ def _register_environment_tools(
 
 
 def _register_command_tools(mcp: FastMCP, settings: Any) -> None:
-    shell_execute_meta = _oauth_meta(["shell:read", "shell:execute"])
+    shell_execute_meta = _runtime_meta(["shell:read", "shell:execute"])
 
     @mcp.tool(structured_output=True, meta=shell_execute_meta)
     async def run_shell(
@@ -2653,8 +2649,8 @@ def _register_command_tools(mcp: FastMCP, settings: Any) -> None:
 
 
 def _register_shell_tools(mcp: FastMCP, settings: Any, read_only_tool: ToolAnnotations) -> None:
-    shell_read_meta = _oauth_meta(["shell:read"])
-    shell_execute_meta = _oauth_meta(["shell:read", "shell:execute"])
+    shell_read_meta = _runtime_meta(["shell:read"])
+    shell_execute_meta = _runtime_meta(["shell:read", "shell:execute"])
 
     @mcp.tool(structured_output=True, meta=shell_execute_meta)
     async def shell_start(
@@ -2728,8 +2724,8 @@ def _register_shell_tools(mcp: FastMCP, settings: Any, read_only_tool: ToolAnnot
 
 
 def _register_job_tools(mcp: FastMCP, settings: Any, read_only_tool: ToolAnnotations) -> None:
-    shell_read_meta = _oauth_meta(["shell:read"])
-    shell_execute_meta = _oauth_meta(["shell:read", "shell:execute"])
+    shell_read_meta = _runtime_meta(["shell:read"])
+    shell_execute_meta = _runtime_meta(["shell:read", "shell:execute"])
 
     @mcp.tool(structured_output=True, meta=shell_execute_meta)
     async def job_start(
@@ -2854,7 +2850,7 @@ def _register_job_tools(mcp: FastMCP, settings: Any, read_only_tool: ToolAnnotat
 def _register_workspace_read_tools(
     mcp: FastMCP, settings: Any, read_only_tool: ToolAnnotations
 ) -> None:
-    shell_read_meta = _oauth_meta(["shell:read"])
+    shell_read_meta = _runtime_meta(["shell:read"])
 
     @mcp.tool(structured_output=True, annotations=read_only_tool, meta=shell_read_meta)
     async def file_list(
@@ -2980,7 +2976,7 @@ def _register_workspace_read_tools(
 
 
 def _register_download_tools(mcp: FastMCP, read_only_tool: ToolAnnotations) -> None:
-    file_share_meta = _oauth_meta(["shell:read", "file:share"])
+    file_share_meta = _runtime_meta(["shell:read", "file:share"])
 
     @mcp.tool(structured_output=True, meta=file_share_meta)
     async def link_create(
@@ -3013,9 +3009,9 @@ def _register_download_tools(mcp: FastMCP, read_only_tool: ToolAnnotations) -> N
 
 
 def _register_workspace_write_tools(mcp: FastMCP, settings: Any) -> None:
-    shell_write_meta = _oauth_meta(["shell:read", "shell:write"])
-    patch_meta = _oauth_meta(["shell:read", "shell:write"])
-    transfer_meta = _oauth_meta(["remote:use", "shell:read", "shell:write"])
+    shell_write_meta = _runtime_meta(["shell:read", "shell:write"])
+    patch_meta = _runtime_meta(["shell:read", "shell:write"])
+    transfer_meta = _runtime_meta(["remote:use", "shell:read", "shell:write"])
 
     @mcp.tool(structured_output=True, meta=shell_write_meta)
     async def file_write(
@@ -3137,9 +3133,9 @@ def _current_principal_subject() -> str:
 
 
 def _register_maintenance_tools(mcp: FastMCP, read_only_tool: ToolAnnotations) -> None:
-    shell_read_meta = _oauth_meta(["shell:read"])
-    shell_write_meta = _oauth_meta(["shell:read", "shell:write"])
-    shell_execute_meta = _oauth_meta(["shell:read", "shell:execute"])
+    shell_read_meta = _runtime_meta(["shell:read"])
+    shell_write_meta = _runtime_meta(["shell:read", "shell:write"])
+    shell_execute_meta = _runtime_meta(["shell:read", "shell:execute"])
 
     @mcp.tool(structured_output=True, meta=shell_write_meta)
     async def session_manage(
@@ -3290,8 +3286,8 @@ def _register_dynamic_mcp_tools(
     mcp: FastMCP, settings: Any, read_only_tool: ToolAnnotations
 ) -> None:
     manager = DynamicMCPManager(settings.state_dir, max_timeout_s=settings.max_timeout_s)
-    shell_read_meta = _oauth_meta(["shell:read"])
-    shell_execute_meta = _oauth_meta(["shell:read", "shell:execute"])
+    shell_read_meta = _runtime_meta(["shell:read"])
+    shell_execute_meta = _runtime_meta(["shell:read", "shell:execute"])
 
     @mcp.tool(structured_output=True, meta=shell_execute_meta)
     async def mcp_manage(
@@ -3359,8 +3355,8 @@ def _register_dynamic_mcp_tools(
 
 
 def _register_browser_tools(mcp: FastMCP, settings: Any, read_only_tool: ToolAnnotations) -> None:
-    browser_meta = _oauth_meta(["browser:use"])
-    browser_execute_meta = _oauth_meta(["browser:use", "shell:execute"])
+    browser_meta = _runtime_meta(["browser:use"])
+    browser_execute_meta = _runtime_meta(["browser:use", "shell:execute"])
     session_manager = get_browser_session_manager(settings.state_dir)
 
     @mcp.tool(structured_output=True, meta=browser_meta)
@@ -3460,7 +3456,7 @@ def _register_browser_tools(mcp: FastMCP, settings: Any, read_only_tool: ToolAnn
 
 
 def _register_remote_admin_tools(mcp: FastMCP) -> None:
-    remote_meta = _oauth_meta(["remote:use"])
+    remote_meta = _runtime_meta(["remote:use"])
     mobile_annotations = ToolAnnotations(
         readOnlyHint=False,
         destructiveHint=True,
@@ -3634,7 +3630,7 @@ def _register_live_workspace_tools(
         return _live_workspace_html()
 
     tool_meta = {
-        **_oauth_meta(list(ALL_OAUTH_SCOPES)),
+        **_runtime_meta(list(RUNTIME_SCOPES)),
         "ui": {"resourceUri": LIVE_RESOURCE_VERSIONED_URI},
         # Use the content-versioned URI as the render cache key. Keep the stable
         # resource registered as a compatibility alias for direct readers.
@@ -3656,9 +3652,9 @@ def _register_live_workspace_tools(
         principal = current_principal()
         subject = _current_principal_subject()
         scopes = (
-            tuple(ALL_OAUTH_SCOPES)
+            tuple(RUNTIME_SCOPES)
             if principal is None
-            else tuple(sorted(principal_scopes(principal))) or tuple(ALL_OAUTH_SCOPES)
+            else tuple(sorted(principal_scopes(principal))) or tuple(RUNTIME_SCOPES)
         )
         session_manager = get_session_runtime_manager()
         logical_session_id = None
@@ -3761,7 +3757,7 @@ def _register_live_workspace_tools(
             openWorldHint=False,
         ),
         meta={
-            **_oauth_meta(list(ALL_OAUTH_SCOPES)),
+            **_runtime_meta(list(RUNTIME_SCOPES)),
             "ui": {"visibility": ["app"]},
         },
     )

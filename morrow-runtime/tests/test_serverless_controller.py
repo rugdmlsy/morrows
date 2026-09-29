@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import hashlib
 import http.client
 import io
@@ -11,17 +10,13 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import urlsplit
 
 import pytest
 import zstandard as zstd
-from starlette.applications import Starlette
-from starlette.routing import Route
-from starlette.testclient import TestClient
 
 import morrow_runtime.audit as audit_module
 import morrow_runtime.jobs as jobs_module
-import morrow_runtime.oauth as oauth_module
 import morrow_runtime.peer_transfer as peer_transfer_module
 import morrow_runtime.remote as remote_module
 import morrow_runtime.state_store as state_store_module
@@ -44,7 +39,7 @@ def _configure_stateless(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **env:
     monkeypatch.setenv("LOCAL_SHELL_MCP_STATELESS_CONTROLLER", "true")
     monkeypatch.setenv("LOCAL_SHELL_MCP_WORKSPACE_ROOT", str(tmp_path / "workspace"))
     monkeypatch.setenv("LOCAL_SHELL_MCP_STATE_DIR", str(tmp_path / "state"))
-    monkeypatch.setenv("LOCAL_SHELL_MCP_OAUTH_JWT_SECRET", "s" * 48)
+    monkeypatch.setenv("LOCAL_SHELL_MCP_RUNTIME_TOKEN_JWT_SECRET", "s" * 48)
     monkeypatch.setenv("LOCAL_SHELL_MCP_PUBLIC_BASE_URL", "https://controller.test")
     monkeypatch.setenv("LOCAL_SHELL_MCP_STATE_BACKEND_PREFIX", f"test-{tmp_path.name}")
     for key, value in env.items():
@@ -57,7 +52,7 @@ def _configure_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **env:
     root = tmp_path / "workspace"
     monkeypatch.setenv("LOCAL_SHELL_MCP_WORKSPACE_ROOT", str(root))
     monkeypatch.setenv("LOCAL_SHELL_MCP_STATE_DIR", str(tmp_path / "state"))
-    monkeypatch.setenv("LOCAL_SHELL_MCP_OAUTH_JWT_SECRET", "s" * 48)
+    monkeypatch.setenv("LOCAL_SHELL_MCP_RUNTIME_TOKEN_JWT_SECRET", "s" * 48)
     for key, value in env.items():
         monkeypatch.setenv("LOCAL_SHELL_MCP_" + key.upper(), value)
     get_settings.cache_clear()
@@ -83,13 +78,13 @@ def test_stateless_oauth_requires_strong_explicit_signing_secret(tmp_path, monke
     monkeypatch.setenv("LOCAL_SHELL_MCP_STATELESS_CONTROLLER", "true")
     monkeypatch.setenv("LOCAL_SHELL_MCP_WORKSPACE_ROOT", str(tmp_path / "workspace"))
     monkeypatch.setenv("LOCAL_SHELL_MCP_STATE_DIR", str(tmp_path / "state"))
-    monkeypatch.delenv("LOCAL_SHELL_MCP_OAUTH_JWT_SECRET", raising=False)
+    monkeypatch.delenv("LOCAL_SHELL_MCP_RUNTIME_TOKEN_JWT_SECRET", raising=False)
     get_settings.cache_clear()
 
-    with pytest.raises(RuntimeError, match="OAUTH_JWT_SECRET"):
+    with pytest.raises(RuntimeError, match="RUNTIME_TOKEN_JWT_SECRET"):
         get_settings()
 
-    monkeypatch.setenv("LOCAL_SHELL_MCP_OAUTH_JWT_SECRET", "short")
+    monkeypatch.setenv("LOCAL_SHELL_MCP_RUNTIME_TOKEN_JWT_SECRET", "short")
     get_settings.cache_clear()
     with pytest.raises(RuntimeError, match="at least 32 bytes"):
         get_settings()
@@ -100,7 +95,7 @@ def test_stateless_without_oauth_does_not_require_jwt_secret(tmp_path, monkeypat
     monkeypatch.setenv("LOCAL_SHELL_MCP_AUTH_MODE", "none")
     monkeypatch.setenv("LOCAL_SHELL_MCP_WORKSPACE_ROOT", str(tmp_path / "workspace"))
     monkeypatch.setenv("LOCAL_SHELL_MCP_STATE_DIR", str(tmp_path / "state"))
-    monkeypatch.delenv("LOCAL_SHELL_MCP_OAUTH_JWT_SECRET", raising=False)
+    monkeypatch.delenv("LOCAL_SHELL_MCP_RUNTIME_TOKEN_JWT_SECRET", raising=False)
     get_settings.cache_clear()
 
     settings = get_settings()
@@ -296,87 +291,6 @@ async def test_stateless_rejects_dynamic_stdio_mcp(tmp_path, monkeypatch):
             command="python3",
             refresh=False,
         )
-
-
-def test_stateless_oauth_code_uses_state_backend(tmp_path, monkeypatch):
-    _configure_stateless(tmp_path, monkeypatch, oauth_admin_pin="correct-pin")
-    oauth_module._CLIENTS.clear()
-    oauth_module._CODES.clear()
-    app = Starlette(
-        routes=[
-            Route("/oauth/register", oauth_module.oauth_register, methods=["POST"]),
-            Route("/oauth/authorize", oauth_module.oauth_authorize_post, methods=["POST"]),
-            Route("/oauth/token", oauth_module.oauth_token, methods=["POST"]),
-        ]
-    )
-    client = TestClient(app, base_url="https://controller.test")
-    redirect = "https://client.test/callback"
-    registered = client.post(
-        "/oauth/register",
-        json={"client_name": "serverless test", "redirect_uris": [redirect]},
-    )
-    client_id = registered.json()["client_id"]
-    verifier = "serverless-verifier"
-    challenge = (
-        base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
-    )
-    authorized = client.post(
-        "/oauth/authorize",
-        data={
-            "response_type": "code",
-            "client_id": client_id,
-            "redirect_uri": redirect,
-            "code_challenge": challenge,
-            "code_challenge_method": "S256",
-            "pin": "correct-pin",
-        },
-        follow_redirects=False,
-    )
-    code = parse_qs(urlsplit(authorized.headers["location"]).query)["code"][0]
-    assert get_state_store().read_bytes(oauth_module.OAUTH_CODE_STORE_FILE_NAME) is not None
-
-    oauth_module._CODES.clear()
-    token = client.post(
-        "/oauth/token",
-        data={
-            "grant_type": "authorization_code",
-            "code": code,
-            "client_id": client_id,
-            "redirect_uri": redirect,
-            "code_verifier": verifier,
-        },
-    )
-
-    assert token.status_code == 200
-    assert token.json()["token_type"] == "Bearer"
-
-
-def test_shared_oauth_client_reads_reload_non_file_backend(tmp_path, monkeypatch):
-    _configure_stateless(tmp_path, monkeypatch)
-    oauth_module._CLIENTS.clear()
-    oauth_module._LOADED_CLIENT_STORE_SIGNATURE = None
-    store = get_state_store()
-
-    def write_clients(*client_ids: str) -> None:
-        rows = {
-            client_id: {
-                "redirect_uris": [f"https://{client_id}.test/callback"],
-                "client_name": client_id,
-                "created_at": 1,
-                "approved": True,
-            }
-            for client_id in client_ids
-        }
-        store.write_bytes(
-            oauth_module.OAUTH_CLIENT_STORE_FILE_NAME,
-            json.dumps({"version": 1, "clients": rows}).encode(),
-        )
-
-    write_clients("first")
-    assert oauth_module._get_client("first") is not None
-
-    write_clients("first", "second")
-    assert oauth_module._get_client("second") is not None
 
 
 @pytest.mark.asyncio
