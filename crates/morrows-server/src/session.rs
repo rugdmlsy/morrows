@@ -598,6 +598,10 @@ async fn execute_remote_session_runtime(
         Value::String(format!("Bearer {}", credential.token)),
     );
     env.insert(
+        "MORROWS_AGENT_BEARER_TOKEN".into(),
+        Value::String(credential.token.clone()),
+    );
+    env.insert(
         "MORROWS_AGENT_INSTANCE_ID".into(),
         Value::String(attempt.agent_instance_id.to_string()),
     );
@@ -906,11 +910,13 @@ fn configure_session_runtime_env(
     token: &str,
 ) {
     command.env_remove("MORROWS_AGENT_AUTHORIZATION");
+    command.env_remove("MORROWS_AGENT_BEARER_TOKEN");
     crate::configure_memory_cli(command);
     command.env_remove("MORROWS_AGENT_INSTANCE_ID");
     command.env_remove("MORROWS_SESSION_ID");
     command.env_remove("MORROWS_ACCOUNT_ID");
     command.env("MORROWS_AGENT_AUTHORIZATION", format!("Bearer {token}"));
+    command.env("MORROWS_AGENT_BEARER_TOKEN", token);
     command.env(
         "MORROWS_AGENT_INSTANCE_ID",
         attempt.agent_instance_id.to_string(),

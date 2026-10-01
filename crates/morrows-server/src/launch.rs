@@ -767,6 +767,10 @@ async fn execute_remote_agent(
         Value::String(format!("Bearer {}", morrows_credential.token)),
     );
     env.insert(
+        "MORROWS_AGENT_BEARER_TOKEN".into(),
+        Value::String(morrows_credential.token.clone()),
+    );
+    env.insert(
         "MORROWS_AGENT_INSTANCE_ID".into(),
         Value::String(execution.attempt.agent_instance_id.to_string()),
     );
@@ -1569,11 +1573,16 @@ async fn execute_codex_with_root(
     command.env_remove("MORROWS_RUNTIME_CONTROL_KEY");
     command.env_remove("LOCAL_SHELL_MCP_CONTROL_API_KEY");
     command.env_remove("MORROWS_AGENT_AUTHORIZATION");
+    command.env_remove("MORROWS_AGENT_BEARER_TOKEN");
     command.env_remove("MORROWS_AGENT_INSTANCE_ID");
     crate::configure_memory_cli(&mut command);
     command.env(
         "MORROWS_AGENT_AUTHORIZATION",
         format!("Bearer {}", morrows_credential.token),
+    );
+    command.env(
+        "MORROWS_AGENT_BEARER_TOKEN",
+        morrows_credential.token.as_str(),
     );
     command.env(
         "MORROWS_AGENT_INSTANCE_ID",
@@ -1730,8 +1739,8 @@ pub(crate) fn inject_morrows_config(args: &mut Vec<String>) {
     let morrows_url = morrows_mcp_url();
     let overrides = [
         format!("mcp_servers.morrows.url=\"{morrows_url}\""),
-        "mcp_servers.morrows.env_http_headers.Authorization=\"MORROWS_AGENT_AUTHORIZATION\""
-            .to_owned(),
+        "mcp_servers.morrows.bearer_token_env_var=\"MORROWS_AGENT_BEARER_TOKEN\"".to_owned(),
+        "mcp_servers.morrows.env_http_headers={}".to_owned(),
         "mcp_servers.morrows.http_headers={}".to_owned(),
     ];
     for value in overrides.into_iter().rev() {
@@ -1772,7 +1781,7 @@ pub(crate) fn codex_args(
     intake_only: bool,
 ) -> Vec<String> {
     if let Some(session) = resume_session {
-        let mut args = vec!["exec".into()];
+        let mut args = vec!["exec".into(), "--disable".into(), "apps".into()];
         if !intake_only {
             args.push("--approve-for-me".into());
         }
@@ -1794,6 +1803,8 @@ pub(crate) fn codex_args(
     }
     let mut args = vec![
         "exec".into(),
+        "--disable".into(),
+        "apps".into(),
         "--json".into(),
         "--color".into(),
         "never".into(),
@@ -2299,7 +2310,10 @@ mod tests {
             Some("session-123"),
             false,
         );
-        assert_eq!(&resumed[0..3], &["exec", "--approve-for-me", "resume"]);
+        assert_eq!(
+            &resumed[0..5],
+            &["exec", "--disable", "apps", "--approve-for-me", "resume"]
+        );
         assert_eq!(resumed[resumed.len() - 2], "session-123");
         assert!(!resumed.join(" ").contains("task"));
     }
@@ -2351,8 +2365,10 @@ mod tests {
             false,
         );
         assert_eq!(resumed_implementation[0], "exec");
-        assert_eq!(resumed_implementation[1], "--approve-for-me");
-        assert_eq!(resumed_implementation[2], "resume");
+        assert_eq!(resumed_implementation[1], "--disable");
+        assert_eq!(resumed_implementation[2], "apps");
+        assert_eq!(resumed_implementation[3], "--approve-for-me");
+        assert_eq!(resumed_implementation[4], "resume");
         assert!(
             !resumed_implementation
                 .iter()
@@ -2361,7 +2377,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_morrows_config_uses_profile_oauth() {
+    fn codex_morrows_config_uses_runtime_bearer_and_disables_apps() {
         let profile = LaunchProfile {
             id: uuid::Uuid::new_v4(),
             name: "codex".into(),
@@ -2378,10 +2394,14 @@ mod tests {
         let mut args = codex_args(&profile, "/tmp/work", "/tmp/last", None, false);
         inject_morrows_config(&mut args);
         let joined = args.join(" ");
-        assert!(joined.contains(
-            "mcp_servers.morrows.env_http_headers.Authorization=\"MORROWS_AGENT_AUTHORIZATION\""
-        ));
+        assert!(
+            joined.contains(
+                "mcp_servers.morrows.bearer_token_env_var=\"MORROWS_AGENT_BEARER_TOKEN\""
+            )
+        );
+        assert!(args.windows(2).any(|pair| pair == ["--disable", "apps"]));
         assert!(!joined.contains("MORROWS_AGENT_INSTANCE_ID"));
+        assert!(!joined.contains("MORROWS_AGENT_AUTHORIZATION"));
         assert!(!joined.contains("Bearer "));
         assert!(!joined.contains("mrw_agent_"));
     }
