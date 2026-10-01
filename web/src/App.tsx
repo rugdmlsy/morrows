@@ -727,7 +727,7 @@ export default function App() {
   const [newAgentEmail, setNewAgentEmail] = useState("");
   const [newAgentCredentialRef, setNewAgentCredentialRef] = useState("~/.codex");
   const [newAgentDisplayName, setNewAgentDisplayName] = useState("");
-  const [newAgentModel, setNewAgentModel] = useState("");
+  const [newAgentModel, setNewAgentModel] = useState("gpt-5.6-luna");
   const [agentCreateBusy, setAgentCreateBusy] = useState(false);
   const [agentCreateResult, setAgentCreateResult] = useState<ManagedCodexProvision | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -1398,7 +1398,7 @@ export default function App() {
       setNewAgentEmail("");
       setNewAgentCredentialRef("~/.codex");
       setNewAgentDisplayName("");
-      setNewAgentModel("");
+      setNewAgentModel("gpt-5.6-luna");
       await Promise.all([refreshFleet(), refreshQueueBase()]);
       setError(null);
     } catch (e) {
@@ -1414,7 +1414,7 @@ export default function App() {
     setNewAgentEmail("");
     setNewAgentCredentialRef("~/.codex");
     setNewAgentDisplayName("");
-    setNewAgentModel("");
+    setNewAgentModel("gpt-5.6-luna");
   }
 
   async function createTask(event: FormEvent) {
@@ -3358,7 +3358,7 @@ export default function App() {
                           <input
                             value={newAgentModel}
                             onChange={(event) => setNewAgentModel(event.target.value)}
-                            placeholder="gpt-5.6"
+                            placeholder="gpt-5.6-luna"
                           />
                         </label>
                       </div>

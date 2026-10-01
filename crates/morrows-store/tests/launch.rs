@@ -76,6 +76,7 @@ async fn launch_profile_validation_and_enqueue_are_safe_and_idempotent() {
         .register_launch_profile(profile_input(worker.id))
         .await
         .unwrap();
+    assert_eq!(profile.model.as_deref(), Some(DEFAULT_CODEX_MODEL));
     let first_assignment = assignment(&store, worker.id, "launch").await;
     let attempt = store
         .enqueue_launch(input(json!({

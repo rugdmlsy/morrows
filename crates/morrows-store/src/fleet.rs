@@ -538,6 +538,10 @@ impl Store {
         nonempty(program, "program")?;
         validate_credential_reference(Some("codex_home"), Some(credential_ref))?;
         nonempty(default_cwd, "default_cwd")?;
+        let model = model
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(DEFAULT_CODEX_MODEL);
 
         let profile = self.get_profile(profile_id).await?;
         if profile.provider != "openai" || !profile.name.to_ascii_lowercase().contains("codex") {

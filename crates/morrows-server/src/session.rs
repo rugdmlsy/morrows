@@ -215,14 +215,49 @@ async fn runtime_options(
         Some(account_id) => Some(state.store.get_account(account_id).await?),
         None => None,
     };
-    let (models, efforts) = discover_runtime_model_options(profile, account.as_ref()).await;
+    let (mut models, efforts) = discover_runtime_model_options(profile, account.as_ref()).await;
+    let selected_model = latest
+        .as_ref()
+        .and_then(|attempt| attempt.model.clone())
+        .or_else(|| profile.model.clone())
+        .or_else(|| {
+            (profile.adapter == "codex_cli").then(|| morrows_core::DEFAULT_CODEX_MODEL.to_owned())
+        })
+        .or_else(|| {
+            models
+                .first()
+                .and_then(|model| model.get("id"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .unwrap_or_default();
+    if !selected_model.is_empty()
+        && !models
+            .iter()
+            .any(|model| model.get("id").and_then(Value::as_str) == Some(selected_model.as_str()))
+    {
+        let label = if selected_model == morrows_core::DEFAULT_CODEX_MODEL {
+            "GPT-5.6-Luna"
+        } else {
+            selected_model.as_str()
+        };
+        models.insert(
+            0,
+            json!({
+                "id": selected_model.clone(),
+                "label": label,
+                "reasoning_efforts": efforts.clone(),
+                "default_reasoning_effort": ""
+            }),
+        );
+    }
     Ok(Json(json!({
         "available": true,
         "adapter": profile.adapter,
         "launch_profile_id": profile.id,
         "models": models,
         "reasoning_efforts": efforts,
-        "selected_model": latest.as_ref().and_then(|attempt| attempt.model.clone()).or_else(|| profile.model.clone()).unwrap_or_default(),
+        "selected_model": selected_model,
         "selected_reasoning_effort": latest.as_ref().and_then(|attempt| attempt.reasoning_effort.clone()).unwrap_or_default()
     })))
 }

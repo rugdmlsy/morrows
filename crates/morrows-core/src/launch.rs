@@ -1,6 +1,8 @@
 use super::*;
 use schemars::JsonSchema;
 
+pub const DEFAULT_CODEX_MODEL: &str = "gpt-5.6-luna";
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RegisterLaunchProfile {
     pub name: String,

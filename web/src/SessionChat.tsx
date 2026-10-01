@@ -788,7 +788,6 @@ export default function SessionChat({
                       }
                     }}
                   >
-                    <option value="">{zh ? "配置默认" : "Config default"}</option>
                     {runtimeOptions?.models.map((model) => (
                       <option key={model.id} value={model.id}>{model.label}</option>
                     ))}
@@ -810,7 +809,7 @@ export default function SessionChat({
                 <button
                   type="button"
                   className="session-runtime-start"
-                  disabled={runtimeBusy || runtimeActive || !runtimeOptions?.available}
+                  disabled={runtimeBusy || runtimeActive || !runtimeOptions?.available || !runtimeModel}
                   title={runtime?.error || runtimeOptions?.reason || undefined}
                   onClick={() => void startAgentRuntime()}
                 >

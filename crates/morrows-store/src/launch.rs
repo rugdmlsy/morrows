@@ -13,6 +13,9 @@ impl Store {
         input.program = input.program.trim().to_owned();
         input.default_cwd = trim_optional(input.default_cwd);
         input.model = trim_optional(input.model);
+        if input.adapter == "codex_cli" && input.model.is_none() {
+            input.model = Some(DEFAULT_CODEX_MODEL.to_owned());
+        }
         if input.name.is_empty() {
             return Err(DomainError::InvalidInput(
                 "launch profile name cannot be empty".into(),
