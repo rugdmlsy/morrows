@@ -1730,7 +1730,8 @@ pub(crate) fn inject_morrows_config(args: &mut Vec<String>) {
     let morrows_url = morrows_mcp_url();
     let overrides = [
         format!("mcp_servers.morrows.url=\"{morrows_url}\""),
-        "mcp_servers.morrows.env_http_headers={}".to_owned(),
+        "mcp_servers.morrows.env_http_headers.Authorization=\"MORROWS_AGENT_AUTHORIZATION\""
+            .to_owned(),
         "mcp_servers.morrows.http_headers={}".to_owned(),
     ];
     for value in overrides.into_iter().rev() {
@@ -2377,7 +2378,9 @@ mod tests {
         let mut args = codex_args(&profile, "/tmp/work", "/tmp/last", None, false);
         inject_morrows_config(&mut args);
         let joined = args.join(" ");
-        assert!(!joined.contains("MORROWS_AGENT_AUTHORIZATION"));
+        assert!(joined.contains(
+            "mcp_servers.morrows.env_http_headers.Authorization=\"MORROWS_AGENT_AUTHORIZATION\""
+        ));
         assert!(!joined.contains("MORROWS_AGENT_INSTANCE_ID"));
         assert!(!joined.contains("Bearer "));
         assert!(!joined.contains("mrw_agent_"));
