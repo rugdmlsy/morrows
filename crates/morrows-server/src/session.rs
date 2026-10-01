@@ -580,10 +580,15 @@ async fn execute_remote_session_runtime(
             3600,
         )
         .await?;
-    let deliveries = store
+    let _deliveries = store
         .claim_session_deliveries_for_runtime(attempt.id, 100)
         .await?;
-    let prompt = build_session_runtime_prompt(&attempt, &session, summary.as_ref(), &deliveries);
+    let history = store
+        .session_history(attempt.session_id, None, None, 100)
+        .await?;
+    let pending_messages = pending_human_session_messages(history.messages);
+    let prompt =
+        build_session_runtime_prompt(&attempt, &session, summary.as_ref(), &pending_messages);
 
     let mut runtime_profile = profile.clone();
     runtime_profile.model = attempt.model.clone().or(profile.model.clone());
@@ -939,10 +944,15 @@ async fn run_session_runtime_child(
     let summary = store
         .get_latest_session_summary_revision(attempt.session_id)
         .await?;
-    let deliveries = store
+    let _deliveries = store
         .claim_session_deliveries_for_runtime(attempt.id, 100)
         .await?;
-    let prompt = build_session_runtime_prompt(attempt, &session, summary.as_ref(), &deliveries);
+    let history = store
+        .session_history(attempt.session_id, None, None, 100)
+        .await?;
+    let pending_messages = pending_human_session_messages(history.messages);
+    let prompt =
+        build_session_runtime_prompt(attempt, &session, summary.as_ref(), &pending_messages);
 
     let Some(mut stdin) = child.stdin.take() else {
         let _ = child.kill().await;
@@ -988,17 +998,28 @@ async fn run_session_runtime_child(
     Ok(())
 }
 
+fn pending_human_session_messages(
+    messages: Vec<morrows_core::SessionMessage>,
+) -> Vec<morrows_core::SessionMessage> {
+    messages
+        .into_iter()
+        .filter(|message| {
+            message.author_type == "human"
+                && message.status == "queued"
+                && message.recalled_at.is_none()
+        })
+        .collect()
+}
+
 fn build_session_runtime_prompt(
     attempt: &SessionRuntimeAttempt,
     session: &morrows_core::Session,
     summary: Option<&SessionSummaryRevision>,
-    deliveries: &[morrows_core::AgentDelivery],
+    pending_messages: &[morrows_core::SessionMessage],
 ) -> String {
-    let messages = deliveries
+    let messages = pending_messages
         .iter()
-        .filter(|delivery| delivery.kind == "session_message")
-        .filter_map(|delivery| delivery.payload.get("body").and_then(Value::as_str))
-        .map(|body| body.chars().take(4000).collect::<String>())
+        .map(|message| message.body.chars().take(4000).collect::<String>())
         .collect::<Vec<_>>()
         .join("\n---\n");
     let recovery_summary = summary
@@ -1016,7 +1037,7 @@ fn build_session_runtime_prompt(
         (None, None) => "This is a general Session with no Project or Task scope.".to_owned(),
     };
     format!(
-        "You are AgentInstance {agent} started for Morrows Session {session_id}.\n{scope}\nUse the configured Morrows MCP server as the durable source of truth. The latest structured Session summary is injected below as bounded recovery context. Treat it as a recovery aid, not as a substitute for canonical records: use session_summary_get if you need the exact latest structured summary, and use session_get for paged raw history or details not covered by the summary. Process the human messages and respond with session_reply. Update session_summary_revise after materially advancing the Session.\n\nLatest structured Session recovery summary:\n{recovery_summary}\n\nPending human messages already delivered to this runtime:\n{messages}\n",
+        "You are AgentInstance {agent} started for Morrows Session {session_id}.\n{scope}\nUse the configured Morrows MCP server as the durable source of truth. The latest structured Session summary is injected below as bounded recovery context. Treat it as a recovery aid, not as a substitute for canonical records: use session_summary_get if you need the exact latest structured summary, and use session_get for paged raw history or details not covered by the summary. Process the human messages and respond with session_reply. Update session_summary_revise after materially advancing the Session.\n\nLatest structured Session recovery summary:\n{recovery_summary}\n\nPending human messages awaiting an Agent reply:\n{messages}\n",
         agent = attempt.agent_instance_id,
         session_id = attempt.session_id,
         scope = scope,
@@ -1364,6 +1385,16 @@ mod tests {
             .create_human_session_message(session.id, "hello runtime")
             .await
             .unwrap();
+        // A previous runtime may have consumed the delivery and then failed before replying.
+        // The durable human message remains queued and must be recovered by the next runtime.
+        assert_eq!(
+            store
+                .acknowledge_session_deliveries(session.id, agent.id, "previous_failed_runtime",)
+                .await
+                .unwrap(),
+            1
+        );
+
         let summary = store
             .create_session_summary_revision(CreateSessionSummaryRevision {
                 session_id: session.id,
