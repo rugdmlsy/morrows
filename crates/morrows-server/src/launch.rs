@@ -1771,13 +1771,16 @@ pub(crate) fn codex_args(
     intake_only: bool,
 ) -> Vec<String> {
     if let Some(session) = resume_session {
-        let mut args = vec![
-            "exec".into(),
+        let mut args = vec!["exec".into()];
+        if !intake_only {
+            args.push("--approve-for-me".into());
+        }
+        args.extend([
             "resume".into(),
             "--json".into(),
             "-o".into(),
             last_message_path.into(),
-        ];
+        ]);
         if let Some(model) = profile.model.as_deref() {
             args.extend(["-m".into(), model.into()]);
         }
@@ -2295,7 +2298,7 @@ mod tests {
             Some("session-123"),
             false,
         );
-        assert_eq!(&resumed[0..3], &["exec", "resume", "--json"]);
+        assert_eq!(&resumed[0..3], &["exec", "--approve-for-me", "resume"]);
         assert_eq!(resumed[resumed.len() - 2], "session-123");
         assert!(!resumed.join(" ").contains("task"));
     }
@@ -2338,6 +2341,22 @@ mod tests {
         );
         assert!(resumed.iter().any(|arg| arg == "approval_policy=\"never\""));
         assert!(!resumed.iter().any(|arg| arg == "--approve-for-me"));
+
+        let resumed_implementation = codex_args(
+            &profile,
+            "/tmp/work",
+            "/tmp/last",
+            Some("session-123"),
+            false,
+        );
+        assert_eq!(resumed_implementation[0], "exec");
+        assert_eq!(resumed_implementation[1], "--approve-for-me");
+        assert_eq!(resumed_implementation[2], "resume");
+        assert!(
+            !resumed_implementation
+                .iter()
+                .any(|arg| arg == "approval_policy=\"never\"")
+        );
     }
 
     #[test]
