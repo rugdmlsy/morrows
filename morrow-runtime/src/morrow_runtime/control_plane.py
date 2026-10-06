@@ -192,9 +192,17 @@ async def _tool_call(request: Request) -> dict[str, Any]:
     )
     token = _CURRENT_PRINCIPAL.set(principal)
     try:
-        _content, structured = await build_mcp().call_tool(tool, arguments)
+        call_result = await build_mcp().call_tool(tool, arguments)
     finally:
         _CURRENT_PRINCIPAL.reset(token)
+    if isinstance(call_result, tuple) and len(call_result) == 2:
+        _content, structured = call_result
+    else:
+        structured = getattr(call_result, "structuredContent", None)
+        if structured is None and hasattr(call_result, "model_dump"):
+            structured = call_result.model_dump(mode="json")
+        if structured is None:
+            structured = call_result
     if isinstance(structured, dict) and "data" in structured:
         result = structured["data"]
     else:

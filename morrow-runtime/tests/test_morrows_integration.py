@@ -423,4 +423,16 @@ def test_control_scoped_tool_call_uses_existing_session_without_capability_rotat
         assert escape.status_code == 400
         assert "cannot escape" in escape.text
 
+        missing = client.post(
+            f"/api/control/sessions/{session_id}/tools/call",
+            headers=headers,
+            json={
+                "subject": "shared",
+                "tool": "file_read",
+                "arguments": {"path": "does-not-exist.txt"},
+            },
+        )
+        assert missing.status_code == 200
+        assert missing.json()["result"]["status"] == "not_found"
+
         assert get_session_runtime_manager().get(session_id)["status"] == "active"
