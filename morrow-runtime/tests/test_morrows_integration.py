@@ -365,6 +365,8 @@ def test_control_cleanup_wait_is_bounded_and_never_reports_false_cancel(tmp_path
 
 def test_control_scoped_tool_call_uses_existing_session_without_capability_rotation(tmp_path, monkeypatch):
     _settings(tmp_path, monkeypatch)
+    monkeypatch.setenv("LOCAL_SHELL_MCP_AUTH_MODE", "internal")
+    monkeypatch.setenv("LOCAL_SHELL_MCP_REQUIRE_SESSION_CAPABILITY", "true")
     monkeypatch.setenv("LOCAL_SHELL_MCP_CONTROL_API_KEY", "trusted-control-key")
     get_settings.cache_clear()
     with TestClient(_build_mcp_http_app(build_mcp()), base_url="http://testserver") as client:

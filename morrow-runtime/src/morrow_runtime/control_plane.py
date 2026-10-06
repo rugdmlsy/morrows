@@ -178,6 +178,7 @@ async def _tool_call(request: Request) -> dict[str, Any]:
         raise PermissionError("logical_session_id cannot escape the bound RuntimeScope")
     arguments = {**arguments, "logical_session_id": session_id}
     from .auth import _CURRENT_PRINCIPAL, Principal
+    from .internal_tokens import RUNTIME_SCOPES
     from .tools import build_mcp
 
     principal = Principal(
@@ -185,7 +186,7 @@ async def _tool_call(request: Request) -> dict[str, Any]:
         subject=subject,
         claims={
             "auth": "control",
-            "scope": "shell:read shell:write shell:execute remote:use",
+            "scope": " ".join(RUNTIME_SCOPES),
             "bound_session": session_id,
         },
     )
