@@ -291,6 +291,24 @@ impl Store {
         self.get_assignment_intake(assignment.id).await
     }
 
+    async fn archive_intake_session_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        intake: &AssignmentIntake,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<(), DomainError> {
+        if let Some(session_id) = intake.interview_session_id {
+            sqlx::query(
+                "UPDATE sessions SET status='archived',updated_at=? WHERE id=? AND status='open'",
+            )
+            .bind(now.to_rfc3339())
+            .bind(session_id.to_string())
+            .execute(&mut **tx)
+            .await
+            .map_err(storage)?;
+        }
+        Ok(())
+    }
+
     pub async fn begin_task_execution(
         &self,
         task_id: Id,
@@ -304,6 +322,8 @@ impl Store {
                 .await
                 .map_err(storage)?;
             crate::task_graph::enforce_gate_conn(&mut tx, task_id).await?;
+            let intake = load_intake_tx(&mut tx, assignment.id).await?;
+            Self::archive_intake_session_tx(&mut tx, &intake, Utc::now()).await?;
             tx.commit().await.map_err(storage)?;
             return Ok(assignment);
         }
@@ -341,6 +361,7 @@ impl Store {
                 "assignment intake phase changed concurrently".into(),
             ));
         }
+        Self::archive_intake_session_tx(&mut tx, &intake, Utc::now()).await?;
         append_event_tx(
             &mut tx,
             "agent_instance",

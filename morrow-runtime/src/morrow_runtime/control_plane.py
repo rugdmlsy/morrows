@@ -132,6 +132,75 @@ async def _revoke(request: Request) -> dict[str, Any]:
     return {"revoked": True, "capability_id": capability_id}
 
 
+_CONTROL_TOOL_NAMES = {
+    "environment_get",
+    "run_shell",
+    "run_python",
+    "shell_start",
+    "shell_send",
+    "shell_read",
+    "shell_stop",
+    "shell_list",
+    "job_start",
+    "job_list",
+    "job_tail",
+    "job_stop",
+    "job_retry",
+    "file_list",
+    "file_tree",
+    "file_glob",
+    "file_grep",
+    "file_read",
+    "image_view",
+    "file_write",
+    "file_edit",
+    "file_delete",
+    "file_patch",
+}
+
+
+async def _tool_call(request: Request) -> dict[str, Any]:
+    body = await request.json()
+    session_id = _session_id(request)
+    subject = str(body["subject"])
+    session = await asyncio.to_thread(
+        get_session_runtime_manager().get, session_id, subject=subject
+    )
+    if session["status"] != "active":
+        raise ValueError("cannot call tools for a terminal Session")
+    tool = str(body["tool"]).strip()
+    if tool not in _CONTROL_TOOL_NAMES:
+        raise PermissionError(f"control tool is not allowed: {tool}")
+    arguments = body.get("arguments") or {}
+    if not isinstance(arguments, dict):
+        raise ValueError("arguments must be an object")
+    if "logical_session_id" in arguments and str(arguments["logical_session_id"]) != session_id:
+        raise PermissionError("logical_session_id cannot escape the bound RuntimeScope")
+    arguments = {**arguments, "logical_session_id": session_id}
+    from .auth import _CURRENT_PRINCIPAL, Principal
+    from .tools import build_mcp
+
+    principal = Principal(
+        email=None,
+        subject=subject,
+        claims={
+            "auth": "control",
+            "scope": "shell:read shell:write shell:execute remote:use",
+            "bound_session": session_id,
+        },
+    )
+    token = _CURRENT_PRINCIPAL.set(principal)
+    try:
+        _content, structured = await build_mcp().call_tool(tool, arguments)
+    finally:
+        _CURRENT_PRINCIPAL.reset(token)
+    if isinstance(structured, dict) and "data" in structured:
+        result = structured["data"]
+    else:
+        result = structured
+    return {"tool": tool, "runtime_scope_id": session_id, "result": result}
+
+
 async def _node_call(
     node: str, tool: str, args: dict[str, Any], session_id: str
 ) -> dict[str, Any]:
@@ -407,6 +476,7 @@ def control_routes() -> list[Route]:
         Route(f"{prefix}/sessions/{{session_id}}", guarded(_get), methods=["GET"]),
         Route(f"{prefix}/sessions/{{session_id}}/lifecycle", guarded(_lifecycle), methods=["POST"]),
         Route(f"{prefix}/sessions/{{session_id}}/capabilities", guarded(_issue), methods=["POST"]),
+        Route(f"{prefix}/sessions/{{session_id}}/tools/call", guarded(_tool_call), methods=["POST"]),
         Route(f"{prefix}/capabilities/{{capability_id}}/revoke", guarded(_revoke), methods=["POST"]),
         Route(f"{prefix}/sessions/{{session_id}}/jobs", guarded(_jobs), methods=["GET"]),
         Route(f"{prefix}/sessions/{{session_id}}/shells", guarded(_shells), methods=["GET"]),

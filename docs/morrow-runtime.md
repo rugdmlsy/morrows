@@ -122,3 +122,21 @@ The control-plane identity chain is `Task -> Assignment -> Run -> RunRuntimeBind
 ## Public OAuth ownership
 
 The protected resource is `https://mcp.xycdev.com/morrows`; its issuer is `https://mcp.xycdev.com/morrows/auth`. Both are owned by `morrows-server`, not `morrow-runtime` or standalone LSM. OAuth clients, authorization codes, hashed access tokens and refresh-token grant state persist in the Morrows database (migration 0038), independently of runtime restart or removal. RFC 9728 resource metadata is published at `https://mcp.xycdev.com/.well-known/oauth-protected-resource/morrows`. See [morrows-oauth.md](morrows-oauth.md) for refresh rotation and the bounded legacy-token cutover.
+
+
+## RuntimeScope ownership model
+
+Morrows treats RuntimeScope as execution plumbing, never as a second work lifecycle. Scope ownership is explicit:
+
+- Run-owned RuntimeScope: the only normal execution scope for a concrete Task Run. Managed providers receive a scoped runtime capability at launch. Direct/external providers such as ChatGPT Web use Morrows employee MCP runtime_scope_get / runtime_call; Morrows validates the active implementing executor Assignment and proxies the call through the private loopback control plane. Both paths address the same RunRuntimeBinding.runtime_scope_id.
+- Session-owned RuntimeScope: reserved for durable direct Morrows Sessions that are not executing a Task Run.
+- AgentInstance + Machine ad-hoc RuntimeScope: reserved for future no-Task inspection/maintenance work. It must never be substituted for a Run-owned scope when a Task exists.
+- Standalone LSM: rescue/diagnostic control plane only. It is not a normal Morrows Task execution backend.
+
+runtime_call never returns MORROWS_RUNTIME_CONTROL_KEY or a runtime Session capability to the caller. The trusted Morrows server invokes a small allowlist of shell/job/file tools through morrow-runtime's loopback control API, with the Run subject and RuntimeScope bound server-side. Lifecycle and global-administration tools are intentionally excluded.
+
+This gives managed and external Agents different ingress paths but one execution identity:
+
+Task -> Assignment -> Run -> RunRuntimeBinding -> RuntimeScope -> morrow-runtime worker
+
+A takeover/handoff transfers Morrows execution authority; it does not create a parallel ad-hoc scope.

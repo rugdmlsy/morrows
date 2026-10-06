@@ -1,6 +1,7 @@
 use crate::{
     auth::{AUTH_SOURCE_HEADER, MORROWS_OAUTH_CLIENT_ID_HEADER, MORROWS_OAUTH_CLIENT_NAME_HEADER},
     memory_search::MemorySearch,
+    morrow_runtime::MorrowRuntimeControl,
 };
 use axum::http::request::Parts;
 use morrows_core::{
@@ -27,6 +28,7 @@ use uuid::Uuid;
 pub struct MorrowsMcp {
     pub store: Store,
     memory_search: Option<MemorySearch>,
+    runtime_control: Option<MorrowRuntimeControl>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -36,10 +38,20 @@ impl MorrowsMcp {
         Self::new_with_memory_search(store, None)
     }
 
+    #[cfg(test)]
     pub fn new_with_memory_search(store: Store, memory_search: Option<MemorySearch>) -> Self {
+        Self::new_with_services(store, memory_search, None)
+    }
+
+    pub fn new_with_services(
+        store: Store,
+        memory_search: Option<MemorySearch>,
+        runtime_control: Option<MorrowRuntimeControl>,
+    ) -> Self {
         Self {
             store,
             memory_search,
+            runtime_control,
             tool_router: Self::tool_router(),
         }
     }
@@ -529,6 +541,20 @@ impl CompleteRunRequest {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct RuntimeScopeRequest {
+    pub run_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RuntimeCallRequest {
+    pub run_id: String,
+    pub tool_name: String,
+    #[serde(default)]
+    #[schemars(with = "std::collections::BTreeMap<String, Value>")]
+    pub arguments: serde_json::Map<String, Value>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct AssignmentRequestInput {
     pub task_id: String,
     pub role: String,
@@ -738,6 +764,83 @@ impl MorrowsMcp {
             .await
             .map_err(|e| e.to_string())?;
         Ok(json!({"removed":true}).to_string())
+    }
+
+    #[tool(
+        description = "Read or provision the authenticated executor's existing Run-owned RuntimeScope. Requires an active implementing executor Assignment. Returns only non-secret scope metadata; runtime capabilities and control credentials are never exposed."
+    )]
+    async fn runtime_scope_get(
+        &self,
+        Parameters(req): Parameters<RuntimeScopeRequest>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<String, String> {
+        let agent_id = authenticated_agent(&parts)?;
+        let run_id = parse_id(&req.run_id)?;
+        let (_run, task) = self
+            .store
+            .authorize_run_runtime_access(run_id, agent_id)
+            .await
+            .map_err(|e| e.to_string())?;
+        let control = self
+            .runtime_control
+            .as_ref()
+            .ok_or_else(|| "morrow-runtime integration is not configured".to_string())?;
+        let runtime_scope_id = control
+            .provision_run(&self.store, run_id, &task.title)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(json!({
+            "run_id": run_id,
+            "task_id": task.id,
+            "runtime_scope_id": runtime_scope_id,
+            "kind": "run",
+            "owner_agent_instance_id": agent_id,
+            "status": "active"
+        })
+        .to_string())
+    }
+
+    #[tool(
+        description = "Call an execution tool inside the authenticated executor's Run-owned RuntimeScope through Morrows -> morrow-runtime. Requires an active implementing executor Assignment. Morrows resolves/provisions the existing RunRuntimeBinding server-side; the Agent never receives the runtime capability or control key. Supported tools are limited to runtime shell/job/file execution tools; lifecycle/global administration is not exposed."
+    )]
+    async fn runtime_call(
+        &self,
+        Parameters(req): Parameters<RuntimeCallRequest>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<String, String> {
+        let agent_id = authenticated_agent(&parts)?;
+        let run_id = parse_id(&req.run_id)?;
+        let (_run, task) = self
+            .store
+            .authorize_run_runtime_access(run_id, agent_id)
+            .await
+            .map_err(|e| e.to_string())?;
+        let control = self
+            .runtime_control
+            .as_ref()
+            .ok_or_else(|| "morrow-runtime integration is not configured".to_string())?;
+        let runtime_scope_id = control
+            .provision_run(&self.store, run_id, &task.title)
+            .await
+            .map_err(|e| e.to_string())?;
+        let result = control
+            .call_run_tool(
+                &self.store,
+                run_id,
+                &runtime_scope_id,
+                req.tool_name.trim(),
+                Value::Object(req.arguments),
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(json!({
+            "run_id": run_id,
+            "task_id": task.id,
+            "runtime_scope_id": runtime_scope_id,
+            "tool_name": req.tool_name,
+            "runtime": result
+        })
+        .to_string())
     }
 
     #[tool(

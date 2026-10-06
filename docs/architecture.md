@@ -616,3 +616,12 @@ employee MCP. The Web Task Detail view supports launch/invite, resume, instructi
 stop, and status. Agent/provider and operator/control-plane calls now use separate issued
 Bearer credential classes. Interactive multi-user identity/SSO, TLS termination, and remote
 process launch remain deployment milestones.
+
+
+### RuntimeScope 归属规则
+
+- 具体 Task 存在时，执行只能进入该 Run 的 RunRuntimeBinding -> RuntimeScope。
+- Morrows 启动的 managed Agent 可以持有 Run-scoped runtime capability；网页版/外部 Agent 不持有 capability，而通过 Morrows MCP runtime_call 由控制面代理到同一个 Run-owned RuntimeScope。
+- 非 Task 的持续 Session 使用 Session-owned RuntimeScope；纯临时操作未来使用 AgentInstance + Machine 的 ad-hoc RuntimeScope。
+- ad-hoc RuntimeScope 不能替代正式 Task 的 Run-owned RuntimeScope。
+- standalone LSM 仅用于 Morrows/morrow-runtime 故障后的救援与诊断，不参与正常 Task execution。

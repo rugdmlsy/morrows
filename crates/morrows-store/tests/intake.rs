@@ -101,6 +101,7 @@ async fn executor_can_attest_convergence_without_morrows_session_messages() {
     assert_eq!(converged.conversation_state, INTERVIEW_STATE_CONVERGED);
     assert_eq!(converged.final_summary_message_id, None);
     assert_eq!(converged.confirmation_message_id, None);
+    assert_eq!(store.get_session(session_id).await.unwrap().status, "open");
     assert_eq!(
         store
             .get_assignment(claim.assignment.id)
@@ -111,6 +112,10 @@ async fn executor_can_attest_convergence_without_morrows_session_messages() {
     );
     let implementing = store.begin_task_execution(task.id, agent.id).await.unwrap();
     assert_eq!(implementing.phase, INTAKE_PHASE_IMPLEMENTING);
+    assert_eq!(
+        store.get_session(session_id).await.unwrap().status,
+        "archived"
+    );
 }
 
 #[tokio::test]

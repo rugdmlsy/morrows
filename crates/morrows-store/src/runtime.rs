@@ -4,6 +4,34 @@ use morrows_core::{
 };
 
 impl Store {
+    pub async fn authorize_run_runtime_access(
+        &self,
+        run_id: Id,
+        agent_id: Id,
+    ) -> Result<(Run, Task), DomainError> {
+        let run = self.get_run(run_id).await?;
+        if run.agent_instance_id != agent_id {
+            return Err(DomainError::Conflict(
+                "Run is not owned by the authenticated AgentInstance".into(),
+            ));
+        }
+        if run.status != "running" {
+            return Err(DomainError::Conflict(format!("run is {}", run.status)));
+        }
+        let assignment = self.get_assignment(run.assignment_id).await?;
+        if assignment.agent_instance_id != agent_id
+            || assignment.role != "executor"
+            || assignment.status != "active"
+            || assignment.phase != "implementing"
+        {
+            return Err(DomainError::Conflict(
+                "runtime access requires the active implementing executor Assignment".into(),
+            ));
+        }
+        let task = self.get_task(run.task_id).await?;
+        Ok((run, task))
+    }
+
     pub async fn run_runtime_provisioning_subject(
         &self,
         run_id: Id,

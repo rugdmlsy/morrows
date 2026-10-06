@@ -323,12 +323,14 @@ async fn main() -> anyhow::Result<()> {
 
     let mcp_store = store.clone();
     let mcp_memory_search = managed_memory_search.clone();
+    let mcp_runtime_control = morrow_runtime::MorrowRuntimeControl::from_env()?;
     let mcp_service: StreamableHttpService<MorrowsMcp, LocalSessionManager> =
         StreamableHttpService::new(
             move || {
-                Ok(MorrowsMcp::new_with_memory_search(
+                Ok(MorrowsMcp::new_with_services(
                     mcp_store.clone(),
                     mcp_memory_search.clone(),
+                    mcp_runtime_control.clone(),
                 ))
             },
             Default::default(),

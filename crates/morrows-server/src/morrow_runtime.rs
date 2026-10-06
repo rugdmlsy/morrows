@@ -367,6 +367,26 @@ impl MorrowRuntimeControl {
         Ok(response["complete"].as_bool().unwrap_or(false))
     }
 
+    pub async fn call_run_tool(
+        &self,
+        store: &Store,
+        run_id: Id,
+        session_id: &str,
+        tool: &str,
+        arguments: Value,
+    ) -> anyhow::Result<Value> {
+        let subject = store
+            .run_runtime_provisioning_subject(run_id)
+            .await?
+            .unwrap_or_else(|| self.subject.clone());
+        self.request(
+            "POST",
+            &format!("/sessions/{session_id}/tools/call"),
+            json!({"subject":subject,"tool":tool,"arguments":arguments}),
+        )
+        .await
+    }
+
     pub async fn observe(&self, session_id: &str) -> anyhow::Result<Value> {
         let session = self
             .request("GET", &format!("/sessions/{session_id}"), json!({}))

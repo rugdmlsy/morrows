@@ -1036,3 +1036,35 @@ async fn unrelated_lsm_terminal_events_are_accepted_but_not_persisted_in_morrows
         .unwrap();
     assert!(!inserted);
 }
+
+#[tokio::test]
+async fn runtime_access_is_bound_to_the_run_executor() {
+    let (store, assignment_id, profile_id) = prepared().await;
+    let assignment = store.get_assignment(assignment_id).await.unwrap();
+    let attempt = store
+        .enqueue_launch(input(json!({
+            "assignment_id": assignment_id,
+            "launch_profile_id": profile_id
+        })))
+        .await
+        .unwrap();
+    store.claim_launch_job().await.unwrap().unwrap();
+    let execution = store.begin_launch_attempt(attempt.id).await.unwrap();
+
+    let (run, task) = store
+        .authorize_run_runtime_access(execution.run.id, assignment.agent_instance_id)
+        .await
+        .unwrap();
+    assert_eq!(run.id, execution.run.id);
+    assert_eq!(task.id, run.task_id);
+
+    let other = store
+        .register_agent("other-runtime-agent".into(), &[])
+        .await
+        .unwrap();
+    let denied = store
+        .authorize_run_runtime_access(execution.run.id, other.id)
+        .await
+        .unwrap_err();
+    assert!(denied.to_string().contains("not owned"));
+}

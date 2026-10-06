@@ -361,3 +361,64 @@ def test_control_cleanup_wait_is_bounded_and_never_reports_false_cancel(tmp_path
         assert cleaned.status_code == 200
         assert cleaned.json()["complete"] is True
         assert cleaned.json()["session"]["status"] == "cancelled"
+
+
+def test_control_scoped_tool_call_uses_existing_session_without_capability_rotation(tmp_path, monkeypatch):
+    _settings(tmp_path, monkeypatch)
+    monkeypatch.setenv("LOCAL_SHELL_MCP_CONTROL_API_KEY", "trusted-control-key")
+    get_settings.cache_clear()
+    with TestClient(_build_mcp_http_app(build_mcp()), base_url="http://testserver") as client:
+        headers = {"X-LSM-Control-Key": "trusted-control-key"}
+        created = client.post(
+            "/api/control/sessions",
+            headers=headers,
+            json={"subject": "shared", "idempotency_key": "morrows:run:scoped-call"},
+        )
+        assert created.status_code == 200
+        session_id = created.json()["session"]["session_id"]
+
+        write = client.post(
+            f"/api/control/sessions/{session_id}/tools/call",
+            headers=headers,
+            json={
+                "subject": "shared",
+                "tool": "file_write",
+                "arguments": {"path": "scoped.txt", "content": "hello runtime"},
+            },
+        )
+        assert write.status_code == 200
+        assert write.json()["runtime_scope_id"] == session_id
+
+        read = client.post(
+            f"/api/control/sessions/{session_id}/tools/call",
+            headers=headers,
+            json={
+                "subject": "shared",
+                "tool": "file_read",
+                "arguments": {"path": "scoped.txt"},
+            },
+        )
+        assert read.status_code == 200
+        assert "hello runtime" in str(read.json()["result"])
+
+        denied = client.post(
+            f"/api/control/sessions/{session_id}/tools/call",
+            headers=headers,
+            json={"subject": "shared", "tool": "session_manage", "arguments": {"action": "finish"}},
+        )
+        assert denied.status_code == 400
+        assert "not allowed" in denied.text
+
+        escape = client.post(
+            f"/api/control/sessions/{session_id}/tools/call",
+            headers=headers,
+            json={
+                "subject": "shared",
+                "tool": "file_read",
+                "arguments": {"path": "scoped.txt", "logical_session_id": "other"},
+            },
+        )
+        assert escape.status_code == 400
+        assert "cannot escape" in escape.text
+
+        assert get_session_runtime_manager().get(session_id)["status"] == "active"
