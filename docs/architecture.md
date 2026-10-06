@@ -622,6 +622,8 @@ process launch remain deployment milestones.
 
 - 具体 Task 存在时，执行只能进入该 Run 的 RunRuntimeBinding -> RuntimeScope。
 - Morrows 启动的 managed Agent 可以持有 Run-scoped runtime capability；网页版/外部 Agent 不持有 capability，而通过 Morrows MCP runtime_call 由控制面代理到同一个 Run-owned RuntimeScope。
-- 非 Task 的持续 Session 使用 Session-owned RuntimeScope；纯临时操作未来使用 AgentInstance + Machine 的 ad-hoc RuntimeScope。
+- 非 Task 的持续 Session 使用 Session-owned RuntimeScope；纯临时操作使用持久化的 AgentInstance + Machine ad-hoc RuntimeScope。相同 AgentInstance + Machine 长期复用，reset/底层 scope 丢失时通过 generation 重建。
 - ad-hoc RuntimeScope 不能替代正式 Task 的 Run-owned RuntimeScope。
 - standalone LSM 仅用于 Morrows/morrow-runtime 故障后的救援与诊断，不参与正常 Task execution。
+
+Ad-hoc RuntimeScope 由 Morrows 控制面持久化绑定，不是新的工作生命周期。它没有 Task、Assignment、Run、milestone 或 completion 语义。只要调用者存在 active implementing executor Run，服务端就拒绝 ad-hoc 路径，防止正式工作绕开 `RunRuntimeBinding`。无 Task 时，ad-hoc `runtime_call` 将目标 worker 固定为绑定 Machine，因此一个 ad-hoc scope 不能跨机器逃逸。

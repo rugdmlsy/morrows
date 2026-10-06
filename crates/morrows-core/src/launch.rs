@@ -72,6 +72,16 @@ pub struct LaunchAttempt {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdhocRuntimeBinding {
+    pub agent_instance_id: Id,
+    pub machine_id: Id,
+    pub runtime_scope_id: Option<String>,
+    pub generation: i64,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunRuntimeBinding {
     pub run_id: Id,
     #[serde(alias = "logical_session_id")]

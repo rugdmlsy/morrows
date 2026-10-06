@@ -1,5 +1,5 @@
 use anyhow::{Context, anyhow};
-use morrows_core::Id;
+use morrows_core::{AdhocRuntimeBinding, Id, Machine};
 use morrows_store::Store;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -143,6 +143,147 @@ impl MorrowRuntimeControl {
             session_id
         };
         Ok(session_id)
+    }
+
+    pub async fn provision_adhoc(
+        &self,
+        store: &Store,
+        agent_id: Id,
+        machine: &Machine,
+    ) -> anyhow::Result<AdhocRuntimeBinding> {
+        let subject = adhoc_subject(agent_id, machine.id);
+        for _ in 0..4 {
+            let binding = store
+                .ensure_adhoc_runtime_binding(agent_id, machine.id)
+                .await?;
+            if let Some(runtime_scope_id) = binding.runtime_scope_id.as_deref() {
+                match self
+                    .request("GET", &format!("/sessions/{runtime_scope_id}"), json!({}))
+                    .await
+                {
+                    Ok(observed) => {
+                        let observed_subject = observed["session"]["subject"].as_str();
+                        let status = observed["session"]["status"].as_str();
+                        if observed_subject != Some(subject.as_str()) {
+                            anyhow::bail!(
+                                "ad-hoc RuntimeScope subject does not match its Morrows binding"
+                            );
+                        }
+                        if status == Some("active") {
+                            return Ok(binding);
+                        }
+                        match store
+                            .rotate_adhoc_runtime_binding(agent_id, machine.id, binding.generation)
+                            .await
+                        {
+                            Ok(_) | Err(morrows_core::DomainError::Conflict(_)) => continue,
+                            Err(err) => return Err(err.into()),
+                        }
+                    }
+                    Err(err) if runtime_scope_missing(&err) => {
+                        match store
+                            .rotate_adhoc_runtime_binding(agent_id, machine.id, binding.generation)
+                            .await
+                        {
+                            Ok(_) | Err(morrows_core::DomainError::Conflict(_)) => continue,
+                            Err(err) => return Err(err.into()),
+                        }
+                    }
+                    Err(err) => return Err(err),
+                }
+            }
+            let response = self
+                .request(
+                    "POST",
+                    "/sessions",
+                    json!({
+                        "subject": subject,
+                        "idempotency_key": format!(
+                            "morrows:adhoc:{agent_id}:{}:g{}",
+                            machine.id, binding.generation
+                        ),
+                        "label": format!("Morrows ad-hoc: {} / {}", agent_id, machine.name),
+                        "objective": format!(
+                            "Long-lived ad-hoc runtime workspace for AgentInstance {agent_id} on {}",
+                            machine.name
+                        ),
+                    }),
+                )
+                .await?;
+            let runtime_scope_id = response["session"]["session_id"]
+                .as_str()
+                .ok_or_else(|| anyhow!("morrow-runtime did not return a runtime scope ID"))?;
+            match store
+                .bind_adhoc_runtime_scope(
+                    agent_id,
+                    machine.id,
+                    binding.generation,
+                    runtime_scope_id,
+                )
+                .await
+            {
+                Ok(bound) => return Ok(bound),
+                Err(morrows_core::DomainError::Conflict(_)) => continue,
+                Err(err) => return Err(err.into()),
+            }
+        }
+        anyhow::bail!("ad-hoc RuntimeScope provisioning did not converge")
+    }
+
+    pub async fn call_adhoc_tool(
+        &self,
+        agent_id: Id,
+        machine_id: Id,
+        session_id: &str,
+        tool: &str,
+        arguments: Value,
+    ) -> anyhow::Result<Value> {
+        let subject = adhoc_subject(agent_id, machine_id);
+        self.request(
+            "POST",
+            &format!("/sessions/{session_id}/tools/call"),
+            json!({"subject":subject,"tool":tool,"arguments":arguments}),
+        )
+        .await
+    }
+
+    pub async fn reset_adhoc(
+        &self,
+        store: &Store,
+        agent_id: Id,
+        machine: &Machine,
+    ) -> anyhow::Result<(Option<String>, AdhocRuntimeBinding)> {
+        let binding = store
+            .ensure_adhoc_runtime_binding(agent_id, machine.id)
+            .await?;
+        let old_scope = binding.runtime_scope_id.clone();
+        if let Some(runtime_scope_id) = binding.runtime_scope_id.as_deref() {
+            let subject = adhoc_subject(agent_id, machine.id);
+            match self
+                .request(
+                    "POST",
+                    &format!("/sessions/{runtime_scope_id}/cleanup"),
+                    json!({
+                        "subject":subject,
+                        "wait_seconds":30,
+                        "terminal_action":"cancel"
+                    }),
+                )
+                .await
+            {
+                Ok(response) if response["complete"].as_bool() == Some(true) => {}
+                Ok(_) => anyhow::bail!(
+                    "ad-hoc RuntimeScope cleanup is incomplete; binding was not rotated"
+                ),
+                Err(err) if runtime_scope_missing(&err) => {}
+                Err(err) => return Err(err),
+            }
+        }
+        store
+            .rotate_adhoc_runtime_binding(agent_id, machine.id, binding.generation)
+            .await?;
+        let fresh = self.provision_adhoc(store, agent_id, machine).await?;
+        Ok((old_scope, fresh))
     }
 
     pub async fn provision_agent(
@@ -421,6 +562,14 @@ impl MorrowRuntimeControl {
         )
         .await
     }
+}
+
+fn adhoc_subject(agent_id: Id, machine_id: Id) -> String {
+    format!("morrows:adhoc:{agent_id}:{machine_id}")
+}
+
+fn runtime_scope_missing(err: &anyhow::Error) -> bool {
+    err.to_string().contains("Unknown logical session:")
 }
 
 pub fn runtime_not_found(err: &anyhow::Error) -> bool {

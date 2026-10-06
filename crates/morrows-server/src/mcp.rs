@@ -56,6 +56,26 @@ impl MorrowsMcp {
         }
     }
 
+    async fn resolve_runtime_machine(
+        &self,
+        machine_ref: &str,
+    ) -> Result<morrows_core::Machine, String> {
+        let machine_ref = machine_ref.trim();
+        if machine_ref.is_empty() {
+            return Err("machine must be nonempty".into());
+        }
+        if let Ok(id) = parse_id(machine_ref) {
+            return self.store.get_machine(id).await.map_err(|e| e.to_string());
+        }
+        self.store
+            .list_machines()
+            .await
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .find(|machine| machine.name == machine_ref)
+            .ok_or_else(|| format!("machine {machine_ref} not found"))
+    }
+
     async fn ensure_task_read_access(&self, task_id: Id, agent_id: Id) -> Result<(), String> {
         self.store
             .get_agent(agent_id)
@@ -542,16 +562,31 @@ impl CompleteRunRequest {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct RuntimeScopeRequest {
-    pub run_id: String,
+    #[serde(default)]
+    pub run_id: Option<String>,
+    #[serde(default)]
+    pub machine: Option<String>,
+    #[serde(default)]
+    pub adhoc: bool,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct RuntimeCallRequest {
-    pub run_id: String,
+    #[serde(default)]
+    pub run_id: Option<String>,
+    #[serde(default)]
+    pub machine: Option<String>,
+    #[serde(default)]
+    pub adhoc: bool,
     pub tool_name: String,
     #[serde(default)]
     #[schemars(with = "std::collections::BTreeMap<String, Value>")]
     pub arguments: serde_json::Map<String, Value>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RuntimeScopeResetRequest {
+    pub machine: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -767,7 +802,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Read or provision the authenticated executor's existing Run-owned RuntimeScope. Requires an active implementing executor Assignment. Returns only non-secret scope metadata; runtime capabilities and control credentials are never exposed."
+        description = "Read or provision a runtime scope owned by the authenticated Agent. For formal Task execution pass run_id only; this requires the active implementing executor and returns the existing Run-owned RuntimeScope. For no-Task temporary work pass adhoc=true plus machine and omit run_id; Morrows reuses the long-lived AgentInstance+Machine ad-hoc RuntimeScope. Ad-hoc access is rejected while this Agent has any active implementing Task Run. No runtime capability or control credential is exposed."
     )]
     async fn runtime_scope_get(
         &self,
@@ -775,70 +810,214 @@ impl MorrowsMcp {
         Extension(parts): Extension<Parts>,
     ) -> Result<String, String> {
         let agent_id = authenticated_agent(&parts)?;
-        let run_id = parse_id(&req.run_id)?;
-        let (_run, task) = self
-            .store
-            .authorize_run_runtime_access(run_id, agent_id)
-            .await
-            .map_err(|e| e.to_string())?;
         let control = self
             .runtime_control
             .as_ref()
             .ok_or_else(|| "morrow-runtime integration is not configured".to_string())?;
-        let runtime_scope_id = control
-            .provision_run(&self.store, run_id, &task.title)
+        if let Some(run_id) = req.run_id.as_deref() {
+            if req.adhoc || req.machine.is_some() {
+                return Err("run_id mode cannot be combined with adhoc or machine".into());
+            }
+            let run_id = parse_id(run_id)?;
+            let (_run, task) = self
+                .store
+                .authorize_run_runtime_access(run_id, agent_id)
+                .await
+                .map_err(|e| e.to_string())?;
+            let runtime_scope_id = control
+                .provision_run(&self.store, run_id, &task.title)
+                .await
+                .map_err(|e| e.to_string())?;
+            return Ok(json!({
+                "run_id": run_id,
+                "task_id": task.id,
+                "runtime_scope_id": runtime_scope_id,
+                "kind": "run",
+                "owner_agent_instance_id": agent_id,
+                "status": "active"
+            })
+            .to_string());
+        }
+        if !req.adhoc {
+            return Err("omit run_id only with adhoc=true and machine".into());
+        }
+        if self
+            .store
+            .has_active_implementing_executor_run(agent_id)
+            .await
+            .map_err(|e| e.to_string())?
+        {
+            return Err(
+                "ad-hoc runtime is unavailable while this Agent has an active implementing Task Run; use that Run's run_id".into(),
+            );
+        }
+        let machine_ref = req
+            .machine
+            .as_deref()
+            .ok_or_else(|| "adhoc runtime requires machine".to_string())?;
+        let machine = self.resolve_runtime_machine(machine_ref).await?;
+        let binding = control
+            .provision_adhoc(&self.store, agent_id, &machine)
             .await
             .map_err(|e| e.to_string())?;
         Ok(json!({
-            "run_id": run_id,
-            "task_id": task.id,
-            "runtime_scope_id": runtime_scope_id,
-            "kind": "run",
-            "owner_agent_instance_id": agent_id,
-            "status": "active"
+            "kind":"adhoc",
+            "owner_agent_instance_id":agent_id,
+            "machine_id":machine.id,
+            "machine":machine.name,
+            "runtime_scope_id":binding.runtime_scope_id,
+            "generation":binding.generation,
+            "status":"active"
         })
         .to_string())
     }
 
     #[tool(
-        description = "Call an execution tool inside the authenticated executor's Run-owned RuntimeScope through Morrows -> morrow-runtime. Requires an active implementing executor Assignment. Morrows resolves/provisions the existing RunRuntimeBinding server-side; the Agent never receives the runtime capability or control key. Supported tools are limited to runtime shell/job/file execution tools; lifecycle/global administration is not exposed."
+        description = "Call a shell/job/file execution tool through Morrows -> morrow-runtime. Formal Task mode: pass run_id only and Morrows requires the active implementing executor, reusing that Run-owned RuntimeScope. No-Task temporary mode: omit run_id and pass adhoc=true plus machine; Morrows uses the caller's persistent AgentInstance+Machine ad-hoc RuntimeScope and hard-binds the nested runtime tool to that worker. Ad-hoc mode is rejected while this Agent has an active implementing Task Run. Runtime capabilities/control credentials are never exposed."
     )]
     async fn runtime_call(
         &self,
-        Parameters(req): Parameters<RuntimeCallRequest>,
+        Parameters(mut req): Parameters<RuntimeCallRequest>,
         Extension(parts): Extension<Parts>,
     ) -> Result<String, String> {
         let agent_id = authenticated_agent(&parts)?;
-        let run_id = parse_id(&req.run_id)?;
-        let (_run, task) = self
-            .store
-            .authorize_run_runtime_access(run_id, agent_id)
-            .await
-            .map_err(|e| e.to_string())?;
         let control = self
             .runtime_control
             .as_ref()
             .ok_or_else(|| "morrow-runtime integration is not configured".to_string())?;
-        let runtime_scope_id = control
-            .provision_run(&self.store, run_id, &task.title)
+        if let Some(run_id) = req.run_id.as_deref() {
+            if req.adhoc || req.machine.is_some() {
+                return Err("run_id mode cannot be combined with adhoc or machine".into());
+            }
+            let run_id = parse_id(run_id)?;
+            let (_run, task) = self
+                .store
+                .authorize_run_runtime_access(run_id, agent_id)
+                .await
+                .map_err(|e| e.to_string())?;
+            let runtime_scope_id = control
+                .provision_run(&self.store, run_id, &task.title)
+                .await
+                .map_err(|e| e.to_string())?;
+            let result = control
+                .call_run_tool(
+                    &self.store,
+                    run_id,
+                    &runtime_scope_id,
+                    req.tool_name.trim(),
+                    Value::Object(req.arguments),
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+            return Ok(json!({
+                "kind":"run",
+                "run_id": run_id,
+                "task_id": task.id,
+                "runtime_scope_id": runtime_scope_id,
+                "tool_name": req.tool_name,
+                "runtime": result
+            })
+            .to_string());
+        }
+        if !req.adhoc {
+            return Err("omit run_id only with adhoc=true and machine".into());
+        }
+        if self
+            .store
+            .has_active_implementing_executor_run(agent_id)
+            .await
+            .map_err(|e| e.to_string())?
+        {
+            return Err(
+                "ad-hoc runtime is unavailable while this Agent has an active implementing Task Run; use that Run's run_id".into(),
+            );
+        }
+        let machine_ref = req
+            .machine
+            .as_deref()
+            .ok_or_else(|| "adhoc runtime requires machine".to_string())?;
+        let machine = self.resolve_runtime_machine(machine_ref).await?;
+        let worker_name = runtime_worker_name(&machine);
+        if let Some(requested) = req.arguments.get("machine") {
+            let requested = requested
+                .as_str()
+                .ok_or_else(|| "nested runtime machine must be a string".to_string())?;
+            if requested != worker_name && requested != machine.name {
+                return Err(
+                    "nested runtime machine cannot differ from the ad-hoc binding machine".into(),
+                );
+            }
+        }
+        req.arguments
+            .insert("machine".into(), Value::String(worker_name));
+        let binding = control
+            .provision_adhoc(&self.store, agent_id, &machine)
             .await
             .map_err(|e| e.to_string())?;
+        let runtime_scope_id = binding
+            .runtime_scope_id
+            .as_deref()
+            .ok_or_else(|| "ad-hoc runtime binding has no scope".to_string())?;
         let result = control
-            .call_run_tool(
-                &self.store,
-                run_id,
-                &runtime_scope_id,
+            .call_adhoc_tool(
+                agent_id,
+                machine.id,
+                runtime_scope_id,
                 req.tool_name.trim(),
                 Value::Object(req.arguments),
             )
             .await
             .map_err(|e| e.to_string())?;
         Ok(json!({
-            "run_id": run_id,
-            "task_id": task.id,
-            "runtime_scope_id": runtime_scope_id,
-            "tool_name": req.tool_name,
-            "runtime": result
+            "kind":"adhoc",
+            "owner_agent_instance_id":agent_id,
+            "machine_id":machine.id,
+            "machine":machine.name,
+            "runtime_scope_id":runtime_scope_id,
+            "generation":binding.generation,
+            "tool_name":req.tool_name,
+            "runtime":result
+        })
+        .to_string())
+    }
+
+    #[tool(
+        description = "Reset the authenticated Agent's long-lived ad-hoc RuntimeScope for one Machine. The old scope is cleaned/cancelled before Morrows advances the persistent binding generation and provisions a fresh scope. Rejected while this Agent has an active implementing Task Run. The binding remains owned by the caller; no runtime secret is returned."
+    )]
+    async fn runtime_scope_reset(
+        &self,
+        Parameters(req): Parameters<RuntimeScopeResetRequest>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<String, String> {
+        let agent_id = authenticated_agent(&parts)?;
+        if self
+            .store
+            .has_active_implementing_executor_run(agent_id)
+            .await
+            .map_err(|e| e.to_string())?
+        {
+            return Err(
+                "ad-hoc runtime reset is unavailable while this Agent has an active implementing Task Run".into(),
+            );
+        }
+        let machine = self.resolve_runtime_machine(&req.machine).await?;
+        let control = self
+            .runtime_control
+            .as_ref()
+            .ok_or_else(|| "morrow-runtime integration is not configured".to_string())?;
+        let (old_runtime_scope_id, binding) = control
+            .reset_adhoc(&self.store, agent_id, &machine)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(json!({
+            "kind":"adhoc",
+            "owner_agent_instance_id":agent_id,
+            "machine_id":machine.id,
+            "machine":machine.name,
+            "old_runtime_scope_id":old_runtime_scope_id,
+            "runtime_scope_id":binding.runtime_scope_id,
+            "generation":binding.generation,
+            "status":"active"
         })
         .to_string())
     }
@@ -2155,6 +2334,16 @@ fn auth_provenance(parts: &Parts) -> Value {
         "oauth_client_id": text(MORROWS_OAUTH_CLIENT_ID_HEADER),
         "oauth_client_name": text(MORROWS_OAUTH_CLIENT_NAME_HEADER),
     })
+}
+
+fn runtime_worker_name(machine: &morrows_core::Machine) -> String {
+    machine
+        .metadata
+        .get("morrow_runtime_worker")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(&machine.name)
+        .to_owned()
 }
 
 fn authenticated_agent(parts: &Parts) -> Result<Id, String> {

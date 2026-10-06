@@ -1068,3 +1068,116 @@ async fn runtime_access_is_bound_to_the_run_executor() {
         .unwrap_err();
     assert!(denied.to_string().contains("not owned"));
 }
+
+#[tokio::test]
+async fn adhoc_runtime_binding_is_stable_per_agent_and_machine() {
+    let store = Store::connect("sqlite::memory:").await.unwrap();
+    let agent_a = store.register_agent("adhoc-a".into(), &[]).await.unwrap();
+    let agent_b = store.register_agent("adhoc-b".into(), &[]).await.unwrap();
+    let machine_a = store
+        .register_machine(input(json!({
+            "name":"adhoc-mac","hostname":"mac.local","status":"online"
+        })))
+        .await
+        .unwrap();
+    let machine_b = store
+        .register_machine(input(json!({
+            "name":"adhoc-node","hostname":"node.local","status":"online"
+        })))
+        .await
+        .unwrap();
+
+    let initial = store
+        .ensure_adhoc_runtime_binding(agent_a.id, machine_a.id)
+        .await
+        .unwrap();
+    assert_eq!(initial.generation, 1);
+    assert!(initial.runtime_scope_id.is_none());
+
+    let bound = store
+        .bind_adhoc_runtime_scope(agent_a.id, machine_a.id, 1, "s_adhoc_a_mac_g1")
+        .await
+        .unwrap();
+    assert_eq!(bound.runtime_scope_id.as_deref(), Some("s_adhoc_a_mac_g1"));
+
+    let replay = store
+        .ensure_adhoc_runtime_binding(agent_a.id, machine_a.id)
+        .await
+        .unwrap();
+    assert_eq!(replay.runtime_scope_id, bound.runtime_scope_id);
+    assert_eq!(replay.generation, 1);
+
+    let other_machine = store
+        .ensure_adhoc_runtime_binding(agent_a.id, machine_b.id)
+        .await
+        .unwrap();
+    let other_agent = store
+        .ensure_adhoc_runtime_binding(agent_b.id, machine_a.id)
+        .await
+        .unwrap();
+    assert_ne!(other_machine.machine_id, bound.machine_id);
+    assert_ne!(other_agent.agent_instance_id, bound.agent_instance_id);
+    assert!(other_machine.runtime_scope_id.is_none());
+    assert!(other_agent.runtime_scope_id.is_none());
+
+    let rotated = store
+        .rotate_adhoc_runtime_binding(agent_a.id, machine_a.id, 1)
+        .await
+        .unwrap();
+    assert_eq!(rotated.generation, 2);
+    assert!(rotated.runtime_scope_id.is_none());
+
+    let rebound = store
+        .bind_adhoc_runtime_scope(agent_a.id, machine_a.id, 2, "s_adhoc_a_mac_g2")
+        .await
+        .unwrap();
+    assert_eq!(rebound.generation, 2);
+    assert_eq!(
+        rebound.runtime_scope_id.as_deref(),
+        Some("s_adhoc_a_mac_g2")
+    );
+    assert!(
+        store
+            .bind_adhoc_runtime_scope(agent_a.id, machine_a.id, 1, "stale")
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn active_implementing_run_blocks_adhoc_mode() {
+    let (store, assignment_id, profile_id) = prepared().await;
+    let assignment = store.get_assignment(assignment_id).await.unwrap();
+    assert!(
+        !store
+            .has_active_implementing_executor_run(assignment.agent_instance_id)
+            .await
+            .unwrap()
+    );
+    let attempt = store
+        .enqueue_launch(input(json!({
+            "assignment_id":assignment_id,
+            "launch_profile_id":profile_id
+        })))
+        .await
+        .unwrap();
+    store.claim_launch_job().await.unwrap().unwrap();
+    let execution = store.begin_launch_attempt(attempt.id).await.unwrap();
+    assert_eq!(execution.run.status, "running");
+    assert!(
+        store
+            .has_active_implementing_executor_run(assignment.agent_instance_id)
+            .await
+            .unwrap()
+    );
+    let other = store
+        .register_agent("adhoc-other".into(), &[])
+        .await
+        .unwrap();
+    assert!(
+        !store
+            .has_active_implementing_executor_run(other.id)
+            .await
+            .unwrap()
+    );
+}

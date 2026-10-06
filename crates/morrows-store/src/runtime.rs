@@ -1,9 +1,144 @@
 use super::*;
 use morrows_core::{
-    AttachExecutionEvidence, LaunchAttempt, RunExecutionEvidence, RunRuntimeBinding,
+    AdhocRuntimeBinding, AttachExecutionEvidence, LaunchAttempt, RunExecutionEvidence,
+    RunRuntimeBinding,
 };
 
 impl Store {
+    pub async fn has_active_implementing_executor_run(
+        &self,
+        agent_id: Id,
+    ) -> Result<bool, DomainError> {
+        sqlx::query_scalar(
+            "SELECT EXISTS(
+                SELECT 1
+                FROM assignments a
+                JOIN runs r ON r.assignment_id=a.id
+                WHERE a.agent_instance_id=?
+                  AND a.role='executor'
+                  AND a.status='active'
+                  AND a.phase='implementing'
+                  AND r.status='running'
+            )",
+        )
+        .bind(agent_id.to_string())
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage)
+    }
+
+    pub async fn adhoc_runtime_binding(
+        &self,
+        agent_id: Id,
+        machine_id: Id,
+    ) -> Result<Option<AdhocRuntimeBinding>, DomainError> {
+        let row = sqlx::query(
+            "SELECT * FROM adhoc_runtime_bindings
+             WHERE agent_instance_id=? AND machine_id=?",
+        )
+        .bind(agent_id.to_string())
+        .bind(machine_id.to_string())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage)?;
+        row.map(row_to_adhoc_runtime_binding).transpose()
+    }
+
+    pub async fn ensure_adhoc_runtime_binding(
+        &self,
+        agent_id: Id,
+        machine_id: Id,
+    ) -> Result<AdhocRuntimeBinding, DomainError> {
+        self.get_agent(agent_id).await?;
+        self.get_machine(machine_id).await?;
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO adhoc_runtime_bindings(
+                agent_instance_id,machine_id,runtime_scope_id,generation,created_at,updated_at
+             ) VALUES(?,?,NULL,1,?,?)
+             ON CONFLICT(agent_instance_id,machine_id) DO NOTHING",
+        )
+        .bind(agent_id.to_string())
+        .bind(machine_id.to_string())
+        .bind(&now)
+        .bind(&now)
+        .execute(&self.pool)
+        .await
+        .map_err(storage)?;
+        self.adhoc_runtime_binding(agent_id, machine_id)
+            .await?
+            .ok_or_else(|| DomainError::Storage("ad-hoc runtime binding disappeared".into()))
+    }
+
+    pub async fn bind_adhoc_runtime_scope(
+        &self,
+        agent_id: Id,
+        machine_id: Id,
+        generation: i64,
+        runtime_scope_id: &str,
+    ) -> Result<AdhocRuntimeBinding, DomainError> {
+        if runtime_scope_id.trim().is_empty() {
+            return Err(DomainError::InvalidInput(
+                "runtime_scope_id must be nonempty".into(),
+            ));
+        }
+        let now = Utc::now().to_rfc3339();
+        let changed = sqlx::query(
+            "UPDATE adhoc_runtime_bindings
+             SET runtime_scope_id=?,updated_at=?
+             WHERE agent_instance_id=? AND machine_id=? AND generation=?
+               AND (runtime_scope_id IS NULL OR runtime_scope_id=?)",
+        )
+        .bind(runtime_scope_id)
+        .bind(&now)
+        .bind(agent_id.to_string())
+        .bind(machine_id.to_string())
+        .bind(generation)
+        .bind(runtime_scope_id)
+        .execute(&self.pool)
+        .await
+        .map_err(storage)?
+        .rows_affected();
+        if changed != 1 {
+            return Err(DomainError::Conflict(
+                "ad-hoc runtime binding changed concurrently".into(),
+            ));
+        }
+        self.adhoc_runtime_binding(agent_id, machine_id)
+            .await?
+            .ok_or_else(|| DomainError::Storage("ad-hoc runtime binding disappeared".into()))
+    }
+
+    pub async fn rotate_adhoc_runtime_binding(
+        &self,
+        agent_id: Id,
+        machine_id: Id,
+        expected_generation: i64,
+    ) -> Result<AdhocRuntimeBinding, DomainError> {
+        let now = Utc::now().to_rfc3339();
+        let changed = sqlx::query(
+            "UPDATE adhoc_runtime_bindings
+             SET runtime_scope_id=NULL,generation=generation+1,updated_at=?
+             WHERE agent_instance_id=? AND machine_id=? AND generation=?",
+        )
+        .bind(&now)
+        .bind(agent_id.to_string())
+        .bind(machine_id.to_string())
+        .bind(expected_generation)
+        .execute(&self.pool)
+        .await
+        .map_err(storage)?
+        .rows_affected();
+        if changed != 1 {
+            return Err(DomainError::Conflict(
+                "ad-hoc runtime binding changed concurrently".into(),
+            ));
+        }
+        self.adhoc_runtime_binding(agent_id, machine_id)
+            .await?
+            .ok_or_else(|| DomainError::Storage("ad-hoc runtime binding disappeared".into()))
+    }
+
     pub async fn authorize_run_runtime_access(
         &self,
         run_id: Id,
@@ -774,4 +909,17 @@ impl Store {
         .map_err(storage)?;
         Ok(())
     }
+}
+
+fn row_to_adhoc_runtime_binding(
+    row: sqlx::sqlite::SqliteRow,
+) -> Result<AdhocRuntimeBinding, DomainError> {
+    Ok(AdhocRuntimeBinding {
+        agent_instance_id: parse_id(row.try_get("agent_instance_id").map_err(storage)?)?,
+        machine_id: parse_id(row.try_get("machine_id").map_err(storage)?)?,
+        runtime_scope_id: row.try_get("runtime_scope_id").map_err(storage)?,
+        generation: row.try_get("generation").map_err(storage)?,
+        created_at: parse_dt(row.try_get("created_at").map_err(storage)?)?,
+        updated_at: parse_dt(row.try_get("updated_at").map_err(storage)?)?,
+    })
 }
