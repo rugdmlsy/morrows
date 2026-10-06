@@ -436,3 +436,38 @@ def test_control_scoped_tool_call_uses_existing_session_without_capability_rotat
         assert missing.json()["result"]["status"] == "not_found"
 
         assert get_session_runtime_manager().get(session_id)["status"] == "active"
+
+
+def test_control_session_verify_enforces_subject_without_exposing_it(tmp_path, monkeypatch):
+    _settings(tmp_path, monkeypatch)
+    monkeypatch.setenv("LOCAL_SHELL_MCP_CONTROL_API_KEY", "trusted-control-key")
+    get_settings.cache_clear()
+    with TestClient(_build_mcp_http_app(build_mcp()), base_url="http://testserver") as client:
+        headers = {"X-LSM-Control-Key": "trusted-control-key"}
+        created = client.post(
+            "/api/control/sessions",
+            headers=headers,
+            json={"subject": "morrows:adhoc:agent:machine", "idempotency_key": "adhoc:g1"},
+        )
+        assert created.status_code == 200
+        session_id = created.json()["session"]["session_id"]
+
+        public = client.get(f"/api/control/sessions/{session_id}", headers=headers)
+        assert public.status_code == 200
+        assert "subject" not in public.json()["session"]
+
+        verified = client.post(
+            f"/api/control/sessions/{session_id}/verify",
+            headers=headers,
+            json={"subject": "morrows:adhoc:agent:machine"},
+        )
+        assert verified.status_code == 200
+        assert verified.json() == {"session_id": session_id, "status": "active"}
+
+        denied = client.post(
+            f"/api/control/sessions/{session_id}/verify",
+            headers=headers,
+            json={"subject": "morrows:adhoc:other:machine"},
+        )
+        assert denied.status_code == 400
+        assert "different principal" in denied.text

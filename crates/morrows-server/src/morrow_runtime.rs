@@ -158,17 +158,15 @@ impl MorrowRuntimeControl {
                 .await?;
             if let Some(runtime_scope_id) = binding.runtime_scope_id.as_deref() {
                 match self
-                    .request("GET", &format!("/sessions/{runtime_scope_id}"), json!({}))
+                    .request(
+                        "POST",
+                        &format!("/sessions/{runtime_scope_id}/verify"),
+                        json!({"subject":subject}),
+                    )
                     .await
                 {
                     Ok(observed) => {
-                        let observed_subject = observed["session"]["subject"].as_str();
-                        let status = observed["session"]["status"].as_str();
-                        if observed_subject != Some(subject.as_str()) {
-                            anyhow::bail!(
-                                "ad-hoc RuntimeScope subject does not match its Morrows binding"
-                            );
-                        }
+                        let status = observed["status"].as_str();
                         if status == Some("active") {
                             return Ok(binding);
                         }

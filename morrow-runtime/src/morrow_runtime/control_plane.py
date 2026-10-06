@@ -90,6 +90,18 @@ async def _get(request: Request) -> dict[str, Any]:
     return {"session": session}
 
 
+async def _verify(request: Request) -> dict[str, Any]:
+    body = await request.json()
+    session_id = _session_id(request)
+    subject = str(body["subject"])
+    session = await asyncio.to_thread(
+        get_session_runtime_manager().get,
+        session_id,
+        subject=subject,
+    )
+    return {"session_id": session_id, "status": session["status"]}
+
+
 async def _lifecycle(request: Request) -> dict[str, Any]:
     body = await request.json()
     action = str(body["action"])
@@ -483,6 +495,7 @@ def control_routes() -> list[Route]:
     return [
         Route(f"{prefix}/sessions", guarded(_start), methods=["POST"]),
         Route(f"{prefix}/sessions/{{session_id}}", guarded(_get), methods=["GET"]),
+        Route(f"{prefix}/sessions/{{session_id}}/verify", guarded(_verify), methods=["POST"]),
         Route(f"{prefix}/sessions/{{session_id}}/lifecycle", guarded(_lifecycle), methods=["POST"]),
         Route(f"{prefix}/sessions/{{session_id}}/capabilities", guarded(_issue), methods=["POST"]),
         Route(f"{prefix}/sessions/{{session_id}}/tools/call", guarded(_tool_call), methods=["POST"]),
