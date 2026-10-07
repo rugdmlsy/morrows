@@ -617,6 +617,39 @@ async fn migration_preserves_m21_uuids_and_references_and_capacity_is_append_onl
                 .map(|row| format!("{row}|phase:Some(\"implementing\")"))
                 .collect();
         }
+        if table == "runs" {
+            // Migration 0043 gives the provider-owned conversation reference an
+            // explicit name. The value is preserved exactly; only the column name changes.
+            expected = expected
+                .into_iter()
+                .map(|row| row.replace("|external_session_ref:", "|provider_conversation_ref:"))
+                .collect();
+        }
+        if table == "message_threads" {
+            // Migration 0043 folds Human/Agent transcripts into the existing Task
+            // collaboration thread model. Legacy collaboration threads keep their IDs
+            // and contents and receive the default collaboration kind.
+            expected = expected
+                .into_iter()
+                .map(|row| {
+                    format!("{row}|kind:Some(\"collaboration\")|target_agent_instance_id:None")
+                })
+                .collect();
+        }
+        if table == "messages" {
+            // Existing collaboration messages become explicit Agent-authored messages.
+            // Their original author, body, metadata and IDs remain unchanged.
+            let agent_marker = format!("|author_type:Some(\"agent\")|body:");
+            expected = expected
+                .into_iter()
+                .map(|row| {
+                    format!(
+                        "{}|client_message_id:None|recalled_at:None",
+                        row.replace("|body:", &agent_marker)
+                    )
+                })
+                .collect();
+        }
         if table == "handoffs" {
             // Migration 0028 only appends the nullable milestone_id link to
             // legacy handoffs; every preexisting value must remain byte-for-byte

@@ -43,11 +43,9 @@ Human / Web UI / automation
 - Durable per-task dispatch policies and append-only dispatch decisions
 - Explainable capacity-aware Dispatcher with atomic Assignment creation
 - Durable executor LaunchProfile / LaunchAttempt records and background launch jobs
-- Safe Codex CLI launch, Session resume, stop, and Run/Session reconciliation
+- Safe Codex CLI launch, provider-conversation resume, stop, and Run/provider reconciliation
 - Durable launch instructions, visible in the Web UI and over the employee MCP
-- First-class Agent Sessions with summary-only list loading and paged message history
-- Session WebUI cache: history is fetched only after selection, then incrementally refreshed for the open Session
-- Employee Session inbox/read/reply MCP tools backed by a durable Agent delivery outbox
+- Task-scoped Human↔Agent messages backed by Task collaboration and a durable Agent delivery outbox
 - Issued/revocable Agent Bearer credentials; runtime credentials are short-lived and Run-bound, bridge credentials are explicitly issued by the local control plane
 - Issued/revocable control-plane Operator credentials with `viewer` / `operator` / `admin` RBAC for loopback/CLI compatibility; the public WebUI uses Morrows OAuth
 - External handoff adapters for LSM, Antigravity, and Gemini with owned accept/status
@@ -59,7 +57,7 @@ Human / Web UI / automation
 - One private authentication directory per managed Codex Account; credential files are not stored in the Morrows database or committed to Git
 - Reusable local deployment script `scripts/deploy.sh` for build, tmux restart, and health verification
 
-Not yet implemented: direct process control for all external agent products, interactive multi-user accounts/SSO, built-in TLS termination, or distributed deployment. External adapters invite an existing agent Session; they do not open those products automatically.
+Not yet implemented: direct process control for all external agent products, interactive multi-user accounts/SSO, built-in TLS termination, or distributed deployment. External adapters invite an existing provider conversation; they do not open those products automatically.
 
 ## Run
 
@@ -228,7 +226,6 @@ Only hashes are stored in SQLite and list responses never return token/hash mate
 
 Employee MCP tools currently cover:
 
-- `session_inbox`, `session_get`, `session_reply`: receive and answer Agent Sessions addressed to the caller.
 - `work_request_submit`: submit a new work request without choosing priority, assignee, or launcher.
 - `whoami`: identify the caller and default discovery scope.
 - `task_list`: default to the caller's assigned unfinished tasks; filter by agent, project, state, and page, or use `scope=all` to discover other work.
@@ -240,18 +237,16 @@ Employee MCP tools currently cover:
 - `artifact_create`, `decision_create`, `thread_create`, `message_create`: record work products and collaboration.
 - `handoff_create`, `handoff_get`, `handoff_accept`, `task_collaboration`: continue work across employees without sharing provider chat history.
 - `assignment_renew`, `run_checkpoint`, `run_complete`, `task_events`: maintain an existing assignment and report progress/completion.
-- `task_claim`: atomically create the caller's Assignment + Run for an `assignment_mode=open` task; success means execution ownership is live, and concurrent same-role claims have one winner.
+- `task_claim`: atomically create the caller's Assignment + intake Run for an `assignment_mode=open` task. Success grants task responsibility, not implementation authority. The executor must complete intake/Human Interview and wait for Assignment phase `implementing`. Concurrent same-role claims have one winner.
 - `task_request_assignment` / `assignment_request_list` / `assignment_request_withdraw`: approval workflow for `approval` tasks; `dispatch` tasks are assigned only by the dispatcher.
 - `project_memory_publish`: task participants explicitly publish project knowledge with provenance, verification limits, retained revisions, retry idempotency and stale-supersession checks.
 - `run_completion_check`: read original acceptance criteria, a report template and blockers. Executor tasks declaring `acceptance_criteria` / `freeze_requires` require current context and per-criterion evidence references on completion; the server does not independently verify experiments. If the task produced an experiment, research, evaluation, audit, or final report, `report_path` may optionally record its actual file path or URI for direct discovery; it is not required for completion and does not satisfy acceptance criteria by itself.
 
-Authenticated agents may read any task or project. Default agent filtering is a discovery preference, not a read authorization boundary. Collaboration writes still require task ownership, assignment history, or an open task Session. Execution updates and private Sessions remain owner-scoped. The employee MCP may create only the caller's own Assignment + Run through `task_claim` on `open` tasks; `approval` and `dispatch` remain control-plane constrained. See the [employee discovery contract](docs/employee-discovery.md) for filtering, pagination, and response formats.
+Authenticated agents may read any task or project. Default agent filtering is a discovery preference, not a read authorization boundary. Task writes require task ownership or assignment history. Task messages do not grant write authorization. The employee MCP may create only the caller's own Assignment + Run through `task_claim` on `open` tasks; `approval` and `dispatch` remain control-plane constrained. See the [employee discovery contract](docs/employee-discovery.md) for filtering, pagination, and response formats.
 
-A Session is an independent durable conversation object with an optional scope: a **general Session** is unbound, a **project Session** belongs to a Project, and a **task Session** belongs to a Task (its Project is derived from the Task). The WebUI loads only Session summaries at startup; selecting a Session loads the latest message page into an in-memory cache, older history is fetched explicitly, and only the selected Session polls for new messages.
+Human↔Agent discussion belongs directly to Task collaboration. A Task + AgentInstance can have one `human_agent` MessageThread; Human and Agent turns are durable `Message` records. Morrows no longer creates its own Session ID. Human messages remain queued until consumed or answered, and a queued message can be recalled before runtime claim. `AgentDelivery` reliably carries only `task_message` and `launch_instruction`.
 
-Human messages are durable and remain awaiting reply until the addressed Agent replies. A separate transactional `AgentDelivery` exposes only two user-facing delivery states: **awaiting delivery** and **delivered**; delivered means Morrows successfully wrote the message into an Agent runtime prompt. Queued messages can be recalled before runtime claim.
-
-The WebUI can explicitly start/resume a local Agent CLI for a Session through a dedicated Session runtime that binds AgentInstance, Account, LaunchProfile, Morrows Session, and the persisted provider thread/session reference without creating a fake Task or Run. Task launches also bind to the open Session for that Task + Agent (creating one when necessary) and share the same Provider-thread continuity with direct Session runtimes. Run / LaunchAttempt records describe execution lifecycle rather than a separate conversation identity. General Session messages are never consumed by Task launches and cannot wake unrelated interrupted Runs.
+Provider continuity lives only in `Run.provider_conversation_ref`. A Codex / Claude / CodeBuddy session, thread, or conversation ID belongs to the Provider Plane. It is not a Morrows work identity and does not authorize access to private provider history.
 
 External adapters such as `lsm_external`, `antigravity_external`, `gemini_external`, and `codebuddy_external` remain compatibility launch backends. Their lifecycle endpoints are control-plane REST operations; they are no longer exposed as employee MCP tools. Provider-specific active launch adapters should be preferred when an automation API/CLI exists.
 
@@ -271,7 +266,7 @@ Morrows cleanly decouples into three planes:
 
 > **Ultimate Recovery Invariant**
 >
-> Task identity is independent of model, account, machine, Morrows Session, and Provider Thread. Even if the original Agent process, Provider Session, execution machine, and temporary workspace directories disappear completely, a new Agent can reconstruct full state and proceed solely from Morrows canonical records.
+> Task identity is independent of model, account, machine, provider conversation, and RuntimeScope. Even if the original Agent process, Provider Session, execution machine, and temporary workspace directories disappear completely, a new Agent can reconstruct full state and proceed solely from Morrows canonical records.
 
 ### Normalized naming model
 
@@ -288,9 +283,8 @@ To avoid ambiguity from bare words such as `session` and `run`, Morrows uses col
 | **持久终端 / 终端** | `PersistentShell` | `shell session` | A long-lived command-line environment inside a RuntimeScope |
 | **浏览器实例** | `BrowserInstance` | `browser session` | A controlled stateful browser instance inside a RuntimeScope |
 | **模型会话** | `ProviderThread` | `Provider Session` | A provider-private continuous model conversation, such as Codex / Claude / Gemini |
-| **会话** | `Session` | `Conversation` | A durable one-to-one working conversation with a specific AgentInstance; it may be general-, project-, or task-scoped and spans multiple runtime/Run attempts |
 | **上下文快照** | `ContextSnapshot` | `ContextRevision` | Frozen work background, goals, and memory view used to initialize a WorkExecution |
-| **记忆** | `Memory` | `Memory` / `Context` | Durable knowledge across tasks and Sessions, scoped to organization/project/Agent/task |
+| **记忆** | `Memory` | `Memory` / `Context` | Durable knowledge across tasks, scoped to organization/project/Agent/task |
 | **成果物** | `Artifact` | `Artifact` | A formally archived and globally referenceable work product |
 | **决策记录** | `Decision` | `Decision` | A confirmed technical or business decision that constrains or guides later work |
 | **工作交接** | `Handoff` | `Handoff` | A structured protocol transferring work responsibility from one execution to another |

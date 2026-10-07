@@ -35,8 +35,8 @@ pub struct AssignmentIntake {
     pub human_response: Option<String>,
     pub approved_by_actor_id: Option<String>,
     pub approved_at: Option<DateTime<Utc>>,
-    /// Durable Task-scoped Session used for the multi-turn Human Interview.
-    pub interview_session_id: Option<Id>,
+    /// Durable task-scoped collaboration thread used for the multi-turn Human Interview.
+    pub interview_thread_id: Option<Id>,
     /// not_started, waiting_for_agent, waiting_for_human, or converged.
     pub conversation_state: String,
     pub interview_started_at: Option<DateTime<Utc>>,

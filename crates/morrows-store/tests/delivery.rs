@@ -39,39 +39,21 @@ async fn setup() -> (
 }
 
 #[tokio::test]
-async fn session_message_enters_delivery_outbox_and_only_target_can_ack() {
-    let (store, a, b, _, _, _) = setup().await;
-    let session = store
-        .create_session(CreateSession {
-            agent_instance_id: a.id,
-            title: "Direct".into(),
-        })
-        .await
-        .unwrap();
+async fn task_message_enters_delivery_outbox_and_only_target_can_ack() {
+    let (store, a, b, task, _, _) = setup().await;
     let message = store
-        .create_human_session_message(session.id, "hello delivery")
+        .create_human_task_message(task.id, a.id, "hello delivery", None)
         .await
         .unwrap();
 
     let inbox = store.agent_delivery_inbox(a.id, 80).await.unwrap();
     assert_eq!(inbox.len(), 1);
     let delivery = &inbox[0];
-    assert_eq!(delivery.kind, "session_message");
+    assert_eq!(delivery.kind, "task_message");
+    assert_eq!(delivery.task_id, Some(task.id));
     assert_eq!(delivery.source_id, message.id);
-    assert_eq!(delivery.payload["session_id"], session.id.to_string());
+    assert_eq!(delivery.payload["thread_id"], message.thread_id.to_string());
     assert_eq!(delivery.payload["body"], "hello delivery");
-
-    let summary = store.list_sessions(Some(a.id)).await.unwrap().remove(0);
-    assert_eq!(summary.queued_count, 1);
-    assert_eq!(summary.undelivered_count, 1);
-    let history = store
-        .session_history(session.id, None, None, 20)
-        .await
-        .unwrap();
-    assert_eq!(
-        history.messages[0].delivery_status.as_deref(),
-        Some("queued")
-    );
 
     assert!(matches!(
         store
@@ -94,37 +76,28 @@ async fn session_message_enters_delivery_outbox_and_only_target_can_ack() {
             .is_empty()
     );
 
-    let summary = store.list_sessions(Some(a.id)).await.unwrap().remove(0);
-    assert_eq!(summary.queued_count, 1, "delivery is not a reply");
-    assert_eq!(summary.undelivered_count, 0);
-    let history = store
-        .session_history(session.id, None, None, 20)
+    let thread = store
+        .task_agent_thread(task.id, a.id)
         .await
+        .unwrap()
         .unwrap();
-    assert_eq!(
-        history.messages[0].delivery_status.as_deref(),
-        Some("delivered")
-    );
+    let messages = store.thread_messages(thread.id).await.unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].body, "hello delivery");
+    assert_eq!(messages[0].author_type, "human");
 }
 
 #[tokio::test]
-async fn session_reply_atomically_consumes_pending_delivery() {
-    let (store, a, _, _, _, _) = setup().await;
-    let session = store
-        .create_session(CreateSession {
-            agent_instance_id: a.id,
-            title: "Reply".into(),
-        })
-        .await
-        .unwrap();
-    store
-        .create_human_session_message(session.id, "please answer")
+async fn task_thread_reply_atomically_consumes_pending_delivery() {
+    let (store, a, _, task, _, _) = setup().await;
+    let human = store
+        .create_human_task_message(task.id, a.id, "please answer", None)
         .await
         .unwrap();
     assert_eq!(store.agent_delivery_inbox(a.id, 80).await.unwrap().len(), 1);
 
-    store
-        .agent_reply_session(session.id, a.id, "answered")
+    let reply = store
+        .agent_reply_task_thread(human.thread_id, a.id, "answered")
         .await
         .unwrap();
 
@@ -135,6 +108,10 @@ async fn session_reply_atomically_consumes_pending_delivery() {
             .unwrap()
             .is_empty()
     );
+    let messages = store.thread_messages(human.thread_id).await.unwrap();
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0].status, "delivered");
+    assert_eq!(reply.author_type, "agent");
 }
 
 #[tokio::test]
@@ -268,22 +245,14 @@ async fn abandoned_local_claim_is_returned_to_queue() {
 }
 
 #[tokio::test]
-async fn session_message_client_id_is_idempotent_and_queued_message_can_be_recalled() {
-    let (store, a, _, _, _, _) = setup().await;
-    let session = store
-        .create_session(CreateSession {
-            agent_instance_id: a.id,
-            title: "Recall".into(),
-        })
-        .await
-        .unwrap();
-
+async fn task_message_client_id_is_idempotent_and_queued_message_can_be_recalled() {
+    let (store, a, _, task, _, _) = setup().await;
     let first = store
-        .create_human_session_message_idempotent(session.id, "send once", Some("client-message-1"))
+        .create_human_task_message(task.id, a.id, "send once", Some("client-message-1"))
         .await
         .unwrap();
     let duplicate = store
-        .create_human_session_message_idempotent(session.id, "send once", Some("client-message-1"))
+        .create_human_task_message(task.id, a.id, "send once", Some("client-message-1"))
         .await
         .unwrap();
 
@@ -292,21 +261,17 @@ async fn session_message_client_id_is_idempotent_and_queued_message_can_be_recal
     assert_eq!(store.agent_delivery_inbox(a.id, 80).await.unwrap().len(), 1);
     assert!(matches!(
         store
-            .create_human_session_message_idempotent(
-                session.id,
-                "different body",
-                Some("client-message-1"),
-            )
+            .create_human_task_message(task.id, a.id, "different body", Some("client-message-1"),)
             .await,
         Err(DomainError::Conflict(_))
     ));
 
     let recalled = store
-        .recall_human_session_message(session.id, first.id)
+        .recall_human_task_message(task.id, a.id, first.id)
         .await
         .unwrap();
     assert!(recalled.recalled_at.is_some());
-    assert!(recalled.delivery_status.is_none());
+    assert_eq!(recalled.status, "recalled");
     assert!(
         store
             .agent_delivery_inbox(a.id, 80)
@@ -315,14 +280,8 @@ async fn session_message_client_id_is_idempotent_and_queued_message_can_be_recal
             .is_empty()
     );
 
-    let summary = store.list_sessions(Some(a.id)).await.unwrap().remove(0);
-    assert_eq!(summary.message_count, 0);
-    assert_eq!(summary.queued_count, 0);
-    assert_eq!(summary.undelivered_count, 0);
-    assert!(summary.last_message_preview.is_none());
-
     let recalled_again = store
-        .recall_human_session_message(session.id, first.id)
+        .recall_human_task_message(task.id, a.id, first.id)
         .await
         .unwrap();
     assert_eq!(recalled_again.id, first.id);
@@ -330,17 +289,10 @@ async fn session_message_client_id_is_idempotent_and_queued_message_can_be_recal
 }
 
 #[tokio::test]
-async fn session_message_cannot_be_recalled_after_delivery() {
-    let (store, a, _, _, _, _) = setup().await;
-    let session = store
-        .create_session(CreateSession {
-            agent_instance_id: a.id,
-            title: "Delivered".into(),
-        })
-        .await
-        .unwrap();
+async fn task_message_cannot_be_recalled_after_delivery() {
+    let (store, a, _, task, _, _) = setup().await;
     let message = store
-        .create_human_session_message(session.id, "already delivered")
+        .create_human_task_message(task.id, a.id, "already delivered", None)
         .await
         .unwrap();
     let delivery = store
@@ -355,28 +307,17 @@ async fn session_message_cannot_be_recalled_after_delivery() {
 
     assert!(matches!(
         store
-            .recall_human_session_message(session.id, message.id)
+            .recall_human_task_message(task.id, a.id, message.id)
             .await,
         Err(DomainError::Conflict(_))
     ));
 }
 
 #[tokio::test]
-async fn session_message_cannot_be_recalled_after_runtime_claim() {
-    let (store, a, _, _, assignment, profile) = setup().await;
-    let session = store
-        .create_scoped_session(
-            CreateSession {
-                agent_instance_id: a.id,
-                title: "Claimed".into(),
-            },
-            None,
-            Some(assignment.task_id),
-        )
-        .await
-        .unwrap();
+async fn task_message_cannot_be_recalled_after_launch_claim() {
+    let (store, a, _, task, assignment, profile) = setup().await;
     let message = store
-        .create_human_session_message(session.id, "claimed delivery")
+        .create_human_task_message(task.id, a.id, "claimed delivery", None)
         .await
         .unwrap();
 
@@ -410,7 +351,7 @@ async fn session_message_cannot_be_recalled_after_runtime_claim() {
 
     assert!(matches!(
         store
-            .recall_human_session_message(session.id, message.id)
+            .recall_human_task_message(task.id, a.id, message.id)
             .await,
         Err(DomainError::Conflict(_))
     ));

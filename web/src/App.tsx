@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { FormEvent, PointerEvent as ReactPointerEvent } from "react";
 import "./App.css";
-import SessionChat from "./SessionChat";
 import AssignmentRequests from "./AssignmentRequests";
 import { api } from "./api";
 import OperatorLogin from "./OperatorLogin";
@@ -129,12 +128,18 @@ type Collaboration = {
   }[];
   artifacts: { id: string; title: string; uri: string; kind: string; description: string }[];
   decisions: { id: string; title: string; rationale: string }[];
-  threads: { id: string; title: string }[];
+  threads: {
+    id: string;
+    title: string;
+    kind: "collaboration" | "human_agent" | string;
+    target_agent_instance_id?: string | null;
+  }[];
   messages: {
     id: string;
     thread_id: string;
     body: string;
-    created_by: string;
+    created_by?: string | null;
+    author_type: "human" | "agent" | "system" | string;
     message_type: string;
     recipient_agent_instance_id?: string | null;
     recipient_role?: string | null;
@@ -142,6 +147,9 @@ type Collaboration = {
     correlation_id?: string | null;
     requires_response: boolean;
     status: string;
+    client_message_id?: string | null;
+    recalled_at?: string | null;
+    created_at: string;
   }[];
   dependencies: { depends_on_task_id: string }[];
   relationships: {
@@ -212,7 +220,7 @@ type Run = {
   task_id: string;
   assignment_id: string;
   agent_instance_id: string;
-  external_session_ref?: string | null;
+  provider_conversation_ref?: string | null;
   status: string;
   stop_reason?: string | null;
   failure_reason?: string | null;
@@ -372,12 +380,10 @@ type LaunchAttempt = {
   agent_instance_id: string;
   launch_profile_id: string;
   run_id?: string | null;
-  session_id?: string | null;
   job_id?: string | null;
   resume_from_attempt_id?: string | null;
   status: string;
   cwd?: string | null;
-  external_session_ref?: string | null;
   pid?: number | null;
   exit_code?: number | null;
   stdout_path?: string | null;
@@ -388,28 +394,11 @@ type LaunchAttempt = {
   ended_at?: string | null;
 };
 
-type TaskSession = {
-  id: string;
-  agent_instance_id: string;
-  agent_name: string;
-  project_id?: string | null;
-  project_name?: string | null;
-  task_id?: string | null;
-  task_title?: string | null;
-  title: string;
-  status: string;
-  message_count: number;
-  queued_count: number;
-  undelivered_count: number;
-  last_message_preview?: string | null;
-  updated_at: string;
-};
-
 type AssignmentIntakeView = {
   assignment: Assignment;
   intake: {
     assignment_id: string;
-    interview_session_id?: string | null;
+    interview_thread_id?: string | null;
     conversation_state: string;
     interview_started_at?: string | null;
     final_summary_message_id?: string | null;
@@ -640,7 +629,7 @@ export default function App() {
     const saved = Number(window.localStorage.getItem("morrows.projectsPaneWidth"));
     return Number.isFinite(saved) && saved >= 260 && saved <= 720 ? saved : 360;
   });
-  const [view, setView] = useState<"sessions" | "queue" | "tasks" | "agents">("sessions");
+  const [view, setView] = useState<"queue" | "tasks" | "agents">("queue");
   const [projects, setProjects] = useState<Project[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [taskManagement, setTaskManagement] = useState<TaskManagementSummary[]>([]);
@@ -715,11 +704,9 @@ export default function App() {
   const [projectMemories, setProjectMemories] = useState<MemoryEntry[]>([]);
   const [selectedProjectMemoryId, setSelectedProjectMemoryId] = useState<string | null>(null);
   const [projectMemoryLoading, setProjectMemoryLoading] = useState(false);
-  const [taskSessions, setTaskSessions] = useState<TaskSession[]>([]);
   const [assignmentIntake, setAssignmentIntake] = useState<AssignmentIntakeView | null>(null);
-  const [sessionAgentId, setSessionAgentId] = useState<string | null>(null);
-  const [sessionTargetId, setSessionTargetId] = useState<string | null>(null);
-  const [sessionTaskId, setSessionTaskId] = useState<string | null>(null);
+  const [taskMessageDraft, setTaskMessageDraft] = useState("");
+  const [taskMessageBusy, setTaskMessageBusy] = useState(false);
   const [renamingAgentId, setRenamingAgentId] = useState<string | null>(null);
   const [agentNameDraft, setAgentNameDraft] = useState("");
   const [agentRenameBusy, setAgentRenameBusy] = useState(false);
@@ -935,19 +922,6 @@ export default function App() {
     }
   }, []);
 
-  const refreshSessionScopes = useCallback(async () => {
-    try {
-      const [nextTasks, nextProjects] = await Promise.all([
-        api<Task[]>("/api/tasks"),
-        api<Project[]>("/api/projects"),
-      ]);
-      setTasks(nextTasks);
-      setProjects(nextProjects);
-      setError(null);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
-  }, []);
 
   const refreshQueueBase = useCallback(async () => {
     try {
@@ -990,7 +964,7 @@ export default function App() {
   const refreshDetail = useCallback(async () => {
     if (view !== "queue" || !selectedId || selectedProjectId) return;
     try {
-      const [nextAssignments, nextRuns, nextEvents, nextContext, nextContextPackage, nextCollaboration, nextPolicy, nextPreview, nextDispatchDecisions, nextLaunchAttempts, nextLaunchInstructions, nextTaskSessions, nextGate] = await Promise.all([
+      const [nextAssignments, nextRuns, nextEvents, nextContext, nextContextPackage, nextCollaboration, nextPolicy, nextPreview, nextDispatchDecisions, nextLaunchAttempts, nextLaunchInstructions, nextGate] = await Promise.all([
         api<Assignment[]>(`/api/tasks/${selectedId}/assignments`),
         api<Run[]>(`/api/tasks/${selectedId}/runs`),
         api<EventItem[]>(`/api/tasks/${selectedId}/events`),
@@ -1001,9 +975,7 @@ export default function App() {
         api<DispatchPreview>(`/api/tasks/${selectedId}/dispatch-preview/executor`).catch(() => null),
         api<DispatchDecision[]>(`/api/tasks/${selectedId}/dispatch-decisions`),
         api<LaunchAttempt[]>(`/api/tasks/${selectedId}/launch-attempts`),
-        api<LaunchInstruction[]>(`/api/tasks/${selectedId}/launch-instructions`),
-        api<TaskSession[]>(`/api/sessions?task_id=${encodeURIComponent(selectedId)}`),
-        api<TaskGate>(`/api/tasks/${selectedId}/gate`),
+        api<LaunchInstruction[]>(`/api/tasks/${selectedId}/launch-instructions`),        api<TaskGate>(`/api/tasks/${selectedId}/gate`),
       ]);
       setAssignments(nextAssignments);
       setRuns(nextRuns);
@@ -1016,7 +988,6 @@ export default function App() {
       setDispatchDecisions(nextDispatchDecisions);
       setLaunchAttempts(nextLaunchAttempts);
       setLaunchInstructions(nextLaunchInstructions);
-      setTaskSessions(nextTaskSessions);
       setTaskGate(nextGate);
       const intakeAssignment = nextAssignments.find(
         (assignment) => assignment.role === "executor" && assignment.status === "active" && assignment.phase !== "implementing",
@@ -1049,12 +1020,6 @@ export default function App() {
     return () => window.clearInterval(timer);
   }, [refreshFleet]);
 
-  useEffect(() => {
-    if (view !== "sessions") return;
-    void refreshSessionScopes();
-    const timer = window.setInterval(() => void refreshSessionScopes(), 5000);
-    return () => window.clearInterval(timer);
-  }, [view, refreshSessionScopes]);
 
   useEffect(() => {
     if (view === "queue") {
@@ -1712,6 +1677,40 @@ export default function App() {
     }
   }
 
+  async function sendTaskMessage(agentId: string) {
+    if (!selectedId || !taskMessageDraft.trim()) return;
+    setTaskMessageBusy(true);
+    try {
+      await api("/api/tasks/" + selectedId + "/agents/" + agentId + "/messages", {
+        method: "POST",
+        body: JSON.stringify({ body: taskMessageDraft.trim() }),
+      });
+      setTaskMessageDraft("");
+      await refreshDetail();
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setTaskMessageBusy(false);
+    }
+  }
+
+  async function recallTaskMessage(agentId: string, messageId: string) {
+    if (!selectedId) return;
+    setTaskMessageBusy(true);
+    try {
+      await api("/api/tasks/" + selectedId + "/agents/" + agentId + "/messages/" + messageId, {
+        method: "DELETE",
+      });
+      await refreshDetail();
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setTaskMessageBusy(false);
+    }
+  }
+
   function actorDisplayName(actorId: string) {
     if (actorId === "human:webui") return locale === "zh-CN" ? "WebUI 用户" : "WebUI user";
     if (actorId === "human:local") return locale === "zh-CN" ? "本地用户" : "Local user";
@@ -1785,12 +1784,6 @@ export default function App() {
   }
 
   const viewMeta = {
-    sessions: {
-      zh: "会话",
-      en: "Sessions",
-      descZh: "人类与特定 Agent 实例的一对一持久化沟通 · 按需加载历史 · 可靠投递",
-      descEn: "Persistent Agent sessions · lazy history · durable delivery",
-    },
     queue: {
       zh: "项目",
       en: "Projects",
@@ -1854,14 +1847,6 @@ export default function App() {
           >
             <span className="nav-label"><span className="nav-icon"><SidebarIcon name="task" /></span><span className="nav-text">{t("tasks")}</span></span>
             <span className="nav-count">{tasks.length}</span>
-          </button>
-          <button
-            className={view === "sessions" ? "nav-active" : ""}
-            onClick={() => setView("sessions")}
-            aria-current={view === "sessions" ? "page" : undefined}
-            title={sidebarCollapsed ? t("sessions") : undefined}
-          >
-            <span className="nav-label"><span className="nav-icon"><SidebarIcon name="session" /></span><span className="nav-text">{t("sessions")}</span></span>
           </button>
 
           <div className="nav-group">{locale === "zh-CN" ? "资源 RESOURCES" : "RESOURCES"}</div>
@@ -1994,7 +1979,6 @@ export default function App() {
               void refreshFleet();
               void refreshQueueBase();
               void refreshTaskManagement();
-              void refreshSessionScopes();
               if (selectedId) void refreshDetail();
             }} />
             <button
@@ -2895,101 +2879,116 @@ export default function App() {
                         </div>}
                       </div>
 
-                      {assignmentIntake && (() => {
-                        const interviewSession = taskSessions.find(
-                          (session) => session.id === assignmentIntake.intake.interview_session_id,
+                      {(() => {
+                        const executorAssignment =
+                          assignments.find((assignment) => assignment.role === "executor" && assignment.status === "active")
+                          ?? [...assignments].reverse().find((assignment) => assignment.role === "executor");
+                        const executorAgentId = executorAssignment?.agent_instance_id ?? null;
+                        const interviewThreadId = assignmentIntake?.intake.interview_thread_id ?? null;
+                        const humanAgentThread = collaboration?.threads.find((thread) =>
+                          thread.kind === "human_agent"
+                          && (!executorAgentId || thread.target_agent_instance_id === executorAgentId)
+                          && (!interviewThreadId || thread.id === interviewThreadId)
+                        ) ?? collaboration?.threads.find((thread) =>
+                          thread.kind === "human_agent"
+                          && (!executorAgentId || thread.target_agent_instance_id === executorAgentId)
                         );
-                        const state = assignmentIntake.intake.conversation_state;
+                        const threadMessages = humanAgentThread
+                          ? collaboration?.messages.filter((message) => message.thread_id === humanAgentThread.id) ?? []
+                          : [];
+                        const state = assignmentIntake?.intake.conversation_state;
                         const statusText = state === "waiting_for_human"
                           ? (locale === "zh-CN" ? "Agent 正在等你回复" : "Agent is waiting for your reply")
                           : state === "waiting_for_agent"
-                            ? (locale === "zh-CN" ? "你的回复已投递，Agent 会继续访谈" : "Your reply was delivered; the Agent will continue the interview")
+                            ? (locale === "zh-CN" ? "消息已排队，Agent 会继续处理" : "Message queued; the Agent will continue")
                             : state === "converged"
-                              ? (locale === "zh-CN" ? "访谈已收敛，正在切换到实施运行时" : "Interview converged; switching to the implementation runtime")
-                              : assignmentIntake.assignment.phase === "context_review"
+                              ? (locale === "zh-CN" ? "访谈已收敛" : "Interview converged")
+                              : assignmentIntake?.assignment.phase === "context_review"
                                 ? (locale === "zh-CN" ? "Agent 正在读取 Project Memory 与 Task Context" : "Agent is reviewing Project Memory and Task Context")
-                                : (locale === "zh-CN" ? "准备开始 Human Interview" : "Preparing the Human Interview");
+                                : executorAgentId
+                                  ? (locale === "zh-CN" ? "任务消息" : "Task messages")
+                                  : (locale === "zh-CN" ? "尚未分配 executor" : "No executor assigned");
                         return (
-                          <div className="human-interview-panel">
+                          <div className="task-session-section">
                             <div className="mini-card-row">
                               <div>
-                                <h3 className="detail-section-title tone-violet">Human Interview</h3>
+                                <h3 className="detail-section-title tone-violet">
+                                  {assignmentIntake ? "Human Interview" : (locale === "zh-CN" ? "任务消息" : "Task messages")}
+                                </h3>
                                 <small>{statusText}</small>
                               </div>
-                              {interviewSession && (
-                                <button
-                                  type="button"
-                                  className="secondary"
-                                  onClick={() => {
-                                    setSessionTargetId(interviewSession.id);
-                                    setSessionTaskId(null);
-                                    setSessionAgentId(null);
-                                    setView("sessions");
-                                  }}
-                                >
-                                  {locale === "zh-CN" ? "继续访谈" : "Continue interview"}
-                                </button>
+                              {assignmentIntake && (
+                                <div className="intake-state-row">
+                                  <span>{locale === "zh-CN" ? "阶段" : "Phase"} · <code>{assignmentIntake.assignment.phase}</code></span>
+                                  <span>{locale === "zh-CN" ? "对话" : "Conversation"} · <code>{state}</code></span>
+                                </div>
                               )}
                             </div>
-                            <div className="intake-state-row">
-                              <span>{locale === "zh-CN" ? "阶段" : "Phase"} · <code>{assignmentIntake.assignment.phase}</code></span>
-                              <span>{locale === "zh-CN" ? "对话" : "Conversation"} · <code>{state}</code></span>
+                            <div className="stack">
+                              {threadMessages.map((message) => {
+                                const authorAgent = message.created_by
+                                  ? orderedAgents.find((entry) => entry.instance.id === message.created_by)
+                                  : null;
+                                const authorName = message.author_type === "human"
+                                  ? (locale === "zh-CN" ? "你" : "You")
+                                  : message.author_type === "agent"
+                                    ? (authorAgent ? cleanAgentDisplayName(authorAgent, locale) : "Agent")
+                                    : message.author_type;
+                                return (
+                                  <div className="mini-card" key={message.id}>
+                                    <div className="mini-card-row">
+                                      <strong>{authorName}</strong>
+                                      <small>
+                                        {message.recalled_at
+                                          ? (locale === "zh-CN" ? "已撤回" : "Recalled")
+                                          : message.status}
+                                        {" · "}{formatAge(locale, message.created_at)}
+                                      </small>
+                                    </div>
+                                    {!message.recalled_at && <p>{message.body}</p>}
+                                    {message.author_type === "human" && message.status === "queued" && !message.recalled_at && executorAgentId && (
+                                      <button
+                                        type="button"
+                                        className="secondary"
+                                        disabled={taskMessageBusy}
+                                        onClick={() => void recallTaskMessage(executorAgentId, message.id)}
+                                      >
+                                        {locale === "zh-CN" ? "撤回" : "Recall"}
+                                      </button>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                              {!threadMessages.length && (
+                                <div className="empty compact">
+                                  {locale === "zh-CN" ? "还没有任务消息。" : "No task messages yet."}
+                                </div>
+                              )}
                             </div>
-                            {interviewSession?.last_message_preview && (
-                              <p className="human-interview-preview">{interviewSession.last_message_preview}</p>
-                            )}
-                            {!interviewSession && assignmentIntake.assignment.phase === "human_interview" && (
-                              <small>{locale === "zh-CN" ? "访谈 Session 正在创建；无需手动审批。" : "The interview Session is being created; no manual approval is required."}</small>
+                            {executorAgentId && (
+                              <form
+                                className="dispatch-form"
+                                onSubmit={(event) => {
+                                  event.preventDefault();
+                                  void sendTaskMessage(executorAgentId);
+                                }}
+                              >
+                                <label>
+                                  <span>{locale === "zh-CN" ? "发送给 executor" : "Message executor"}</span>
+                                  <textarea
+                                    value={taskMessageDraft}
+                                    onChange={(event) => setTaskMessageDraft(event.target.value)}
+                                    placeholder={locale === "zh-CN" ? "补充约束、回答访谈问题或继续任务对话…" : "Add a constraint, answer an interview question, or continue the task discussion…"}
+                                  />
+                                </label>
+                                <button type="submit" disabled={taskMessageBusy || !taskMessageDraft.trim()}>
+                                  {taskMessageBusy ? (locale === "zh-CN" ? "发送中…" : "Sending…") : (locale === "zh-CN" ? "发送" : "Send")}
+                                </button>
+                              </form>
                             )}
                           </div>
                         );
                       })()}
-
-                      <div className="task-session-section">
-                        <div className="mini-card-row">
-                          <h3 className="detail-section-title tone-violet">{locale === "zh-CN" ? "相关会话" : "Related sessions"}</h3>
-                          <button
-                            type="button"
-                            className="secondary"
-                            onClick={() => {
-                              setSessionTaskId(selectedTask.id);
-                              setSessionTargetId(null);
-                              setSessionAgentId(null);
-                              setView("sessions");
-                            }}
-                          >
-                            {locale === "zh-CN" ? "新建任务会话" : "New task session"}
-                          </button>
-                        </div>
-                        <div className="stack">
-                          {taskSessions.map((session) => {
-                            const agent = orderedAgents.find((entry) => entry.instance.id === session.agent_instance_id);
-                            return (
-                              <button
-                                type="button"
-                                className="mini-card task-session-link"
-                                key={session.id}
-                                onClick={() => {
-                                  setSessionTargetId(session.id);
-                                  setSessionTaskId(null);
-                                  setSessionAgentId(null);
-                                  setView("sessions");
-                                }}
-                              >
-                                <div className="mini-card-row">
-                                  <strong>{session.title}</strong>
-                                  <span>{session.queued_count > 0 ? (locale === "zh-CN" ? `${session.queued_count} 待回复` : `${session.queued_count} pending`) : ""}</span>
-                                </div>
-                                <small>{agent ? cleanAgentDisplayName(agent, locale) : session.agent_name} · {formatAge(locale, session.updated_at)}</small>
-                                {session.last_message_preview && <p>{session.last_message_preview}</p>}
-                              </button>
-                            );
-                          })}
-                          {!taskSessions.length && (
-                            <div className="empty compact">{locale === "zh-CN" ? "这个任务还没有会话。" : "No sessions are attached to this task yet."}</div>
-                          )}
-                        </div>
-                      </div>
 
                       <h3 className="detail-section-title tone-green">{t("assignments")}</h3>
                       <div className="stack">
@@ -3031,7 +3030,8 @@ export default function App() {
                                         const previous = launchAttempts.find((attempt) =>
                                           attempt.launch_profile_id === profile.id &&
                                           attempt.agent_instance_id === item.agent_instance_id &&
-                                          !!attempt.external_session_ref &&
+                                          !!attempt.run_id &&
+                                          runs.some((run) => run.id === attempt.run_id && !!run.provider_conversation_ref) &&
                                           ["completed", "failed"].includes(attempt.status)
                                         );
                                         return previous && <button className="secondary" disabled={launchBusy} onClick={() => void enqueueLaunch(item.id, profile.id, previous.id)}>{t("resumeSession")}</button>;
@@ -3058,7 +3058,6 @@ export default function App() {
                             </div>
                             <small>{shortId(attempt.agent_instance_id)} · {attempt.cwd || "—"}</small>
                             {attempt.run_id && <small>Run {shortId(attempt.run_id)}</small>}
-                            {attempt.external_session_ref && <small>{t("externalSession")} · {attempt.external_session_ref}</small>}
                             {attempt.pid !== null && attempt.pid !== undefined && <small>{t("processId")} · {attempt.pid}</small>}
                             {attempt.exit_code !== null && attempt.exit_code !== undefined && <small>{t("exitCode")} · {attempt.exit_code}</small>}
                             {attempt.stdout_path && <code>{t("stdoutLog")} · {attempt.stdout_path}</code>}
@@ -3092,7 +3091,7 @@ export default function App() {
                           const observation = execution?.observation;
                           return <div className="mini-card run-card" key={run.id}>
                             <div className="mini-card-row"><code>{shortId(run.id)}</code><StateBadge state={run.status} locale={locale} /></div>
-                            <small>{run.external_session_ref || t("noExternalSession")} · {formatAge(locale, run.started_at)}</small>
+                            <small>{run.provider_conversation_ref || t("noExternalSession")} · {formatAge(locale, run.started_at)}</small>
                             {run.context_revision_id && <small>{t("pinnedContext")} · {shortId(run.context_revision_id)}</small>}
                             {(run.failure_reason || run.stop_reason) && <small>{formatState(locale, run.failure_reason || run.stop_reason || "")}</small>}
                             <div className="run-actions">
@@ -3183,7 +3182,7 @@ export default function App() {
                           {collaboration.messages.filter((message) => message.thread_id === thread.id).map((message) =>
                             <div className="message-row" key={message.id}>
                               <small>
-                                {message.message_type} · {shortId(message.created_by)}
+                                {message.message_type} · {message.created_by ? shortId(message.created_by) : message.author_type}
                                 {message.recipient_agent_instance_id ? ` → ${shortId(message.recipient_agent_instance_id)}` : ""}
                                 {message.recipient_role ? ` (${formatRole(locale, message.recipient_role)})` : ""}
                                 {message.reply_to_message_id ? ` · ${t("replyTo")} ${shortId(message.reply_to_message_id)}` : ""}
@@ -3245,25 +3244,6 @@ export default function App() {
               )}
             </section>
           </div>
-        ) : view === "sessions" ? (
-          <SessionChat
-            agents={orderedAgents.map((entry) => ({
-              id: entry.instance.id,
-              name: cleanAgentDisplayName(entry, locale),
-              status: entry.instance.status,
-              account_id: entry.account?.id ?? null,
-              account_email: entry.account?.email ?? null,
-            }))}
-            projects={projects.map((project) => ({ id: project.id, name: project.name }))}
-            tasks={tasks.map((task) => ({ id: task.id, project_id: task.project_id, title: task.title }))}
-            locale={locale}
-            initialAgentId={sessionAgentId}
-            initialSessionId={sessionTargetId}
-            initialTaskId={sessionTaskId}
-            onInitialAgentHandled={() => setSessionAgentId(null)}
-            onInitialSessionHandled={() => setSessionTargetId(null)}
-            onInitialTaskHandled={() => setSessionTaskId(null)}
-          />
         ) : (
           <section className="fleet-page">
             <div className="fleet-overview">
@@ -3471,18 +3451,6 @@ export default function App() {
                         <strong title={new Date(agent.last_heartbeat_at).toLocaleString(locale)}>{formatAge(locale, agent.last_heartbeat_at)}</strong>
                         {capacity?.quota_state && <small>{t("quota")} · {formatState(locale, capacity.quota_state)}</small>}
                       </div>
-                      <button
-                        type="button"
-                        className="agent-chat-button"
-                        onClick={() => {
-                          setSessionAgentId(agent.id);
-                          setSessionTargetId(null);
-                          setSessionTaskId(null);
-                          setView("sessions");
-                        }}
-                      >
-                        {t("openSession")}
-                      </button>
                     </div>
 
                     <details className="agent-technical">

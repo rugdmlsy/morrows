@@ -300,7 +300,7 @@ const translations = {
     cancelTask: "Cancel task",
     cancelTaskConfirm: "Cancel task “{title}”?\n\nTask history will be preserved. If it is running, Morrows will stop the active execution and use the existing runtime cleanup flow.",
     deleteTask: "Delete task",
-    deleteTaskConfirm: "Permanently delete task “{title}”?\n\nOnly tasks without execution, Session, context, or collaboration history can be deleted. This cannot be undone.",
+    deleteTaskConfirm: "Permanently delete task “{title}”?\n\nOnly tasks without execution, message-thread, context, or collaboration history can be deleted. This cannot be undone.",
     reworkReasonPrompt: "Enter the rework reason. The source task will remain completed.",
     reopenReasonPrompt: "Enter the reopen reason. This is only for mistaken completion and is rejected after rework or downstream consumption.",
     taskRelationships: "Task relationships",

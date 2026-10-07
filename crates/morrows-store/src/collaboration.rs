@@ -213,7 +213,7 @@ impl Store {
         let now = Utc::now();
         let mut tx = self.pool.begin().await.map_err(storage)?;
         sqlx::query(
-            "INSERT INTO message_threads(id,task_id,created_by,title,created_at) VALUES(?,?,?,?,?)",
+            "INSERT INTO message_threads(id,task_id,created_by,title,created_at,kind) VALUES(?,?,?,?,?,'collaboration')",
         )
         .bind(id.to_string())
         .bind(task_id.to_string())
@@ -240,6 +240,8 @@ impl Store {
             task_id,
             created_by: actor,
             title: input.title,
+            kind: "collaboration".into(),
+            target_agent_instance_id: None,
             created_at: now,
         })
     }
@@ -295,17 +297,46 @@ impl Store {
         }
 
         self.get_agent(actor).await?;
-        let task: String = sqlx::query_scalar("SELECT task_id FROM message_threads WHERE id=?")
-            .bind(thread_id.to_string())
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(storage)?
-            .ok_or_else(|| DomainError::NotFound("thread".into()))?;
+        let thread = sqlx::query(
+            "SELECT task_id,kind,target_agent_instance_id FROM message_threads WHERE id=?",
+        )
+        .bind(thread_id.to_string())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage)?
+        .ok_or_else(|| DomainError::NotFound("thread".into()))?;
+        let task: String = thread.try_get("task_id").map_err(storage)?;
+        let kind: String = thread.try_get("kind").map_err(storage)?;
+        let target: Option<String> = thread
+            .try_get("target_agent_instance_id")
+            .map_err(storage)?;
+        if kind == "human_agent" {
+            if target.as_deref() != Some(actor.to_string().as_str()) {
+                return Err(DomainError::Conflict(
+                    "human/agent thread belongs to another AgentInstance".into(),
+                ));
+            }
+            if input.message_type != "note"
+                || input.recipient_agent_instance_id.is_some()
+                || input.recipient_role.is_some()
+                || input.reply_to_message_id.is_some()
+                || input.correlation_id.is_some()
+                || input.requires_response
+                || input.status != "sent"
+            {
+                return Err(DomainError::InvalidInput(
+                    "human/agent thread replies accept only the message body".into(),
+                ));
+            }
+            return self
+                .agent_reply_task_thread(thread_id, actor, &input.body)
+                .await;
+        }
         let id = Uuid::new_v4();
         let now = Utc::now();
         let mut tx = self.pool.begin().await.map_err(storage)?;
         sqlx::query(
-            "INSERT INTO messages(id,thread_id,created_by,body,message_type,recipient_agent_instance_id,recipient_role,reply_to_message_id,correlation_id,requires_response,status,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO messages(id,thread_id,created_by,author_type,body,message_type,recipient_agent_instance_id,recipient_role,reply_to_message_id,correlation_id,requires_response,status,created_at) VALUES(?,?,?,'agent',?,?,?,?,?,?,?,?,?)",
         )
         .bind(id.to_string())
         .bind(thread_id.to_string())
@@ -338,7 +369,8 @@ impl Store {
         Ok(Message {
             id,
             thread_id,
-            created_by: actor,
+            created_by: Some(actor),
+            author_type: "agent".into(),
             body: input.body,
             message_type: input.message_type,
             recipient_agent_instance_id: input.recipient_agent_instance_id,
@@ -347,6 +379,8 @@ impl Store {
             correlation_id: input.correlation_id,
             requires_response: input.requires_response,
             status: input.status,
+            client_message_id: None,
+            recalled_at: None,
             created_at: now,
         })
     }
@@ -843,21 +877,26 @@ fn row_to_decision(r: sqlx::sqlite::SqliteRow) -> Result<Decision, DomainError> 
     })
 }
 
-fn row_to_thread(r: sqlx::sqlite::SqliteRow) -> Result<MessageThread, DomainError> {
+pub(crate) fn row_to_thread(r: sqlx::sqlite::SqliteRow) -> Result<MessageThread, DomainError> {
     Ok(MessageThread {
         id: parse_id(r.try_get("id").map_err(storage)?)?,
         task_id: parse_id(r.try_get("task_id").map_err(storage)?)?,
         created_by: parse_id(r.try_get("created_by").map_err(storage)?)?,
         created_at: parse_dt(r.try_get("created_at").map_err(storage)?)?,
         title: r.try_get("title").map_err(storage)?,
+        kind: r.try_get("kind").map_err(storage)?,
+        target_agent_instance_id: parse_opt_id(
+            r.try_get("target_agent_instance_id").map_err(storage)?,
+        )?,
     })
 }
 
-fn row_to_message(r: sqlx::sqlite::SqliteRow) -> Result<Message, DomainError> {
+pub(crate) fn row_to_message(r: sqlx::sqlite::SqliteRow) -> Result<Message, DomainError> {
     Ok(Message {
         id: parse_id(r.try_get("id").map_err(storage)?)?,
         thread_id: parse_id(r.try_get("thread_id").map_err(storage)?)?,
-        created_by: parse_id(r.try_get("created_by").map_err(storage)?)?,
+        created_by: parse_opt_id(r.try_get("created_by").map_err(storage)?)?,
+        author_type: r.try_get("author_type").map_err(storage)?,
         body: r.try_get("body").map_err(storage)?,
         message_type: r.try_get("message_type").map_err(storage)?,
         recipient_agent_instance_id: r.try_get("recipient_agent_instance_id").map_err(storage)?,
@@ -866,6 +905,8 @@ fn row_to_message(r: sqlx::sqlite::SqliteRow) -> Result<Message, DomainError> {
         correlation_id: r.try_get("correlation_id").map_err(storage)?,
         requires_response: r.try_get("requires_response").map_err(storage)?,
         status: r.try_get("status").map_err(storage)?,
+        client_message_id: r.try_get("client_message_id").map_err(storage)?,
+        recalled_at: parse_opt_dt(r.try_get("recalled_at").map_err(storage)?)?,
         created_at: parse_dt(r.try_get("created_at").map_err(storage)?)?,
     })
 }

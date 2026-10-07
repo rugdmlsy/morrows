@@ -55,6 +55,8 @@ pub struct MessageThread {
     pub task_id: Id,
     pub created_by: Id,
     pub title: String,
+    pub kind: String,
+    pub target_agent_instance_id: Option<Id>,
     pub created_at: DateTime<Utc>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -79,7 +81,8 @@ pub struct CreateMessage {
 pub struct Message {
     pub id: Id,
     pub thread_id: Id,
-    pub created_by: Id,
+    pub created_by: Option<Id>,
+    pub author_type: String,
     pub body: String,
     #[serde(default = "default_message_type")]
     pub message_type: String,
@@ -95,6 +98,8 @@ pub struct Message {
     pub requires_response: bool,
     #[serde(default = "default_message_status")]
     pub status: String,
+    pub client_message_id: Option<String>,
+    pub recalled_at: Option<DateTime<Utc>>,
 
     pub created_at: DateTime<Utc>,
 }

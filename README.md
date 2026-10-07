@@ -43,23 +43,21 @@ Morrows 是一个本地优先、Agent 原生的工作协作系统，用于协调
 - 持久化的逐任务调度策略与 append-only dispatch decision
 - 可解释、容量感知的 Dispatcher，以及原子 Assignment 创建
 - 持久化 executor LaunchProfile / LaunchAttempt 与后台 launch job
-- 安全的 Codex CLI 启动、Session 恢复、停止，以及 Run/Session 对账
+- 安全的 Codex CLI 启动、Provider conversation 恢复、停止，以及 Run/provider 对账
 - 持久化 launch instruction，可在 Web UI 和员工 MCP 中查看
-- 一等公民 Agent Session：列表只加载摘要，消息历史分页读取
-- Session WebUI 缓存：只有选中 Session 后才拉取历史，并仅对当前 Session 增量刷新
-- 基于持久化 Agent delivery outbox 的员工 Session inbox/read/reply MCP 工具
+- 基于 Task collaboration 与持久化 Agent delivery outbox 的 Human↔Agent 消息
 - 可签发/撤销的 Agent Bearer credential；runtime credential 短期且绑定 Run，bridge credential 由本地控制面显式签发
 - 可签发/撤销的控制平面 Operator credential，支持 `viewer` / `operator` / `admin` RBAC，供 loopback/CLI 管理兼容使用；公网 WebUI 使用 Morrows OAuth
 - LSM、Antigravity、Gemini 等 external handoff adapter，以及受所有权约束的 accept/status
 - 本地 launch job 中断后的启动恢复；`morrow_runtime` 远端 launch 在 Morrows 重启后恢复对同一 durable runtime 的监控
-- 内置 `morrow-runtime` 执行平面：Machine 绑定的远端 worker、持久 Logical Session、作用域化 runtime capability、Task/direct Session provider 进程监督与有界 cleanup；独立 LSM 仅服务自己的客户端和管理/修复/ARP
+- 内置 `morrow-runtime` 执行平面：Machine 绑定的远端 worker、持久 RuntimeScope、作用域化 runtime capability、Task provider 进程监督与有界 cleanup；独立 LSM 仅服务自己的客户端和管理/修复/ARP
 - 中英文 Web UI，首次访问默认中文
 - SQLite 持久化 launcher job 与支持 provider resume 的事务型 Agent delivery outbox
 - Agent Fleet 可手动添加 Codex Agent：填写账号邮箱与目标机器上的凭据引用（如 `~/.codex`、`~/.codex-personal`）；Morrows 不上传、不复制、不保存 Codex `auth.json` 或 Provider 登录 token
 - 每个受管 Codex Account 使用独立认证目录；认证文件不写入 Morrows 数据库，也不会提交到 Git
 - 可复用的本地部署脚本 `scripts/deploy.sh`，负责构建、重启 tmux 服务并执行健康检查
 
-尚未实现：所有外部 Agent 产品的统一直接进程控制、交互式多用户账号/SSO、内置 TLS 终止，以及多控制器/高可用分布式控制面。Codex / CodeBuddy 已可通过 morrow-runtime 在绑定 Machine 上运行；其他 external adapter 仍以邀请已有 Agent Session 为主。
+尚未实现：所有外部 Agent 产品的统一直接进程控制、交互式多用户账号/SSO、内置 TLS 终止，以及多控制器/高可用分布式控制面。Codex / CodeBuddy 已可通过 morrow-runtime 在绑定 Machine 上运行；其他 external adapter 仍以邀请已有 Provider conversation 为主。
 
 ## 运行
 
@@ -232,7 +230,6 @@ PKCE，并把 OAuth token 仅保存在当前标签页的 `sessionStorage` 中。
 
 当前员工 MCP 工具包括：
 
-- `session_inbox`、`session_get`、`session_reply`：接收并回复发给当前 Agent 的 Session。
 - `work_request_submit`：提交新的工作请求；发布者应描述目标、约束、验收条件、证据要求与已知不确定性，但不得预设 Human Interview 问卷，也不得要求未来 executor 按固定问题清单提问。executor 必须在读取 Project Memory、ContextPackage、任务证据及相关 repo/runtime 状态后，自主判断仍未解决且会影响实施的问题，并跳过上下文已经回答的内容。可选 `project_id` 会在创建事务内绑定既有 Project，省略时明确创建未绑定项目的任务；无效 Project 会直接拒绝，不会静默降级。仍不能自行选择优先级、负责人或 launcher。
 - `morrows task-bind-project --task-id … --project-id … --database …`：operator 修复旧的未绑定 Task；只允许首绑，同目标重试幂等，不允许借修复命令把已绑定 Task 改到其他 Project。
 - `whoami`：确认当前 Agent 身份与默认查询范围。
@@ -245,18 +242,16 @@ PKCE，并把 OAuth token 仅保存在当前标签页的 `sessionStorage` 中。
 - `artifact_create`、`decision_create`、`thread_create`、`message_create`：记录成果与协作信息。
 - `handoff_create`、`handoff_get`、`handoff_accept`、`task_collaboration`：无需共享 Provider chat history 即可跨 Agent 延续工作。
 - `assignment_renew`、`run_checkpoint`、`run_complete`、`task_events`：维护已有 Assignment 并汇报进度/完成状态。
-- `task_claim`：对 `assignment_mode=open` 的任务原子创建 Assignment + Run；成功返回即已获得执行权，同一角色并发接单只有一个成功。
+- `task_claim`：对 `assignment_mode=open` 的任务原子创建 Assignment + intake Run；成功表示已获得任务责任，但不授权 implementation。executor 仍必须完成 intake/Human Interview，并等待 Assignment 进入 `implementing`。同一角色并发接单只有一个成功。
 - `task_request_assignment` / `assignment_request_list` / `assignment_request_withdraw`：仅用于 `approval` 任务的接取申请、结果查询与撤回；`dispatch` 任务由调度器分配。
 - `project_memory_publish`：参与任务的 Agent 直接写入所属项目知识，保留来源、验证边界与旧版本，支持幂等重试和旧版本冲突检查。
 - `run_completion_check`：只读获取原始验收条件、报告模板和阻塞原因。声明了 `acceptance_criteria` / `freeze_requires` 的执行任务，完成时必须提供当前上下文和逐项证据引用；服务器不代替实际实验验证。若任务产出了实验、研究、评估、审计或最终报告，可选通过 `report_path` 提交实际文件路径或 URI，便于后续直接定位；该字段不是完成必填项，也不会单独满足验收条件。
 
-任务和项目读取要求已认证的 Agent 身份，不要求任务归属。默认按 Agent 筛选只是发现偏好，不是读取权限边界。协作写入仍要求拥有任务、分配历史或开放的任务会话；执行更新和私人会话仍校验归属。员工 MCP 只有 `task_claim` 能为 `open` 任务原子创建调用者自己的 Assignment + Run；`approval` 与 `dispatch` 仍由控制面约束。完整参数、分页与返回格式见 [员工查询协议](docs/employee-discovery.md)。
+任务和项目读取要求已认证的 Agent 身份，不要求任务归属。默认按 Agent 筛选只是发现偏好，不是读取权限边界。Task 写入仍要求 Task ownership 或 assignment history；Task 消息本身不授予写权限。员工 MCP 只有 `task_claim` 能为 `open` 任务原子创建调用者自己的 Assignment + Run；`approval` 与 `dispatch` 仍由控制面约束。完整参数、分页与返回格式见 [员工查询协议](docs/employee-discovery.md)。
 
-Session 是独立的持久对话对象，但可以选择作用域：**通用会话**不绑定工作，**项目会话**绑定 Project，**任务会话**绑定 Task（其 Project 自动由 Task 推导）。WebUI 启动时只加载 Session 摘要；选中某个 Session 后，才将最新消息页载入内存缓存；更老历史需要显式加载，并且只有当前选中的 Session 会轮询新消息。
+Human↔Agent 对话直接属于 Task collaboration。每个 Task + AgentInstance 可以有一个 `human_agent` MessageThread；Human 与 Agent 消息都持久化为 `Message`，不再创建 Morrows-owned Session ID。消息在目标 Agent 回复前保持等待状态，未被 runtime claim 的 Human 消息可以撤回。事务型 `AgentDelivery` 只负责 `task_message` 与 `launch_instruction` 的可靠投递。
 
-人类消息会持久保存，并在目标 Agent 回复前保持等待状态。独立的事务型 `AgentDelivery` 只暴露两个面向用户的投递状态：**等待投递**与**已投递**；“已投递”表示 Morrows 已成功把消息写入 Agent runtime prompt。消息在 runtime claim 前可以撤回。
-
-WebUI 可以为某个 Session 显式启动/恢复本地 Agent CLI。专用 Session runtime 会绑定 AgentInstance、Account、LaunchProfile、Morrows Session 和持久化 Provider thread/session reference，而不会伪造 Task 或 Run。Task 启动 Agent 时也会自动绑定该 Task + Agent 的开放 Session（不存在则创建），并与直接 Session runtime 共享同一套 Provider thread 续接来源；Run / LaunchAttempt 只描述执行生命周期，不再承担独立的对话身份。通用会话的消息不会被 Task launch 误领取，也不会唤醒无关的中断 Run。
+Provider 对话连续性只保存在 `Run.provider_conversation_ref`。Codex / Claude / CodeBuddy 等外部 Provider 自己的 session/thread/conversation ID 属于 Provider Plane，不是 Morrows 工作身份，也不授予读取 Provider 私有历史的权限。
 
 `lsm_external`、`antigravity_external`、`gemini_external`、`codebuddy_external` 等 external adapter 仍作为兼容 launch backend 存在。它们的生命周期 endpoint 属于控制平面 REST，不再暴露为员工 MCP 工具。当 Provider 存在自动化 API/CLI 时，应优先使用 Provider-specific active launch adapter。
 
@@ -276,7 +271,7 @@ Morrows 明确拆分为三个平面：
 
 > **终极恢复原则（Ultimate Recovery Invariant）**
 >
-> Task 身份独立于模型、账号、机器、Morrows Session 和 Provider Thread。即使原 Agent 进程、Provider Session、执行机器和临时 workspace 全部消失，新 Agent 仍应能仅依靠 Morrows 的 canonical records 重建完整状态并继续工作。
+> Task 身份独立于模型、账号、机器、Provider conversation 和 RuntimeScope。即使原 Agent 进程、Provider Session、执行机器和临时 workspace 全部消失，新 Agent 仍应能仅依靠 Morrows 的 canonical records 重建完整状态并继续工作。
 
 ### 规范化命名模型
 
@@ -293,9 +288,8 @@ Morrows 明确拆分为三个平面：
 | **持久终端 / 终端** | `PersistentShell` | `shell session` | 运行空间内维持环境和状态的常驻命令行交互终端 |
 | **浏览器实例** | `BrowserInstance` | `browser session` | 运行空间内受控、有状态的浏览器实例 |
 | **模型会话** | `ProviderThread` | `Provider Session` | Codex / Claude / Gemini 模型自身的连续私有对话流 |
-| **会话** | `Session` | `Conversation` | 人类与特定 AgentInstance 之间的一对一持久工作会话；可为通用、项目或任务作用域，并跨多次 runtime/Run 持续存在 |
 | **上下文快照** | `ContextSnapshot` | `ContextRevision` | 某次工作执行初始化时冻结的完整工作背景、目标与记忆视图 |
-| **记忆** | `Memory` | `Memory` / `Context` | 跨任务与 Session 长期保存的知识，分 organization/project/Agent/task 等作用域 |
+| **记忆** | `Memory` | `Memory` / `Context` | 跨任务长期保存的知识，分 organization/project/Agent/task 等作用域 |
 | **成果物** | `Artifact` | `Artifact` | 被正式归档、持久托管并可全局引用的工作交付物证据 |
 | **决策记录** | `Decision` | `Decision` | 经确认、会约束或指导后续工作的技术或业务决策 |
 | **工作交接** | `Handoff` | `Handoff` | 工作责任从一个执行转交至另一个执行的结构化交接协议 |

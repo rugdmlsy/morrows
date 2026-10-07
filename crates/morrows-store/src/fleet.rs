@@ -777,12 +777,6 @@ impl Store {
             .execute(&mut *tx)
             .await
             .map_err(storage)?;
-        sqlx::query("UPDATE sessions SET status='archived',updated_at=? WHERE agent_instance_id=? AND status='open'")
-            .bind(&now)
-            .bind(id.to_string())
-            .execute(&mut *tx)
-            .await
-            .map_err(storage)?;
         tx.commit().await.map_err(storage)?;
         self.get_agent(id).await
     }

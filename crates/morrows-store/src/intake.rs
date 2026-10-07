@@ -114,21 +114,21 @@ impl Store {
             )));
         }
         let now = Utc::now();
-        let session_id = match intake.interview_session_id {
+        let thread_id = match intake.interview_thread_id {
             Some(id) => id,
             None => {
-                self.ensure_task_session_for_agent_tx(&mut tx, task_id, agent_id)
+                self.ensure_task_agent_thread_tx(&mut tx, task_id, agent_id)
                     .await?
             }
         };
         sqlx::query(
             "UPDATE assignment_intakes
-             SET interview_session_id=?,conversation_state=?,interview_started_at=COALESCE(interview_started_at,?),
+             SET interview_thread_id=?,conversation_state=?,interview_started_at=COALESCE(interview_started_at,?),
                  interview_status='pending',human_response=NULL,approved_by_actor_id=NULL,approved_at=NULL,
                  final_summary_message_id=NULL,confirmation_message_id=NULL,converged_at=NULL,updated_at=?
              WHERE assignment_id=?",
         )
-        .bind(session_id.to_string())
+        .bind(thread_id.to_string())
         .bind(INTERVIEW_STATE_WAITING_FOR_AGENT)
         .bind(now.to_rfc3339())
         .bind(now.to_rfc3339())
@@ -150,7 +150,7 @@ impl Store {
             "task",
             task_id,
             "intake.interview_started",
-            json!({"assignment_id":assignment.id,"session_id":session_id}),
+            json!({"assignment_id":assignment.id,"thread_id":thread_id}),
             None,
         )
         .await?;
@@ -192,8 +192,8 @@ impl Store {
             .await
             .map_err(storage)?;
         let intake = load_intake_tx(&mut tx, assignment.id).await?;
-        let session_id = intake.interview_session_id.ok_or_else(|| {
-            DomainError::Conflict("human interview has no bound Task Session".into())
+        let thread_id = intake.interview_thread_id.ok_or_else(|| {
+            DomainError::Conflict("human interview has no bound task collaboration thread".into())
         })?;
         if intake.conversation_state == INTERVIEW_STATE_NOT_STARTED {
             return Err(DomainError::Conflict(format!(
@@ -209,7 +209,7 @@ impl Store {
         }
         validate_optional_interview_audit_tx(
             &mut tx,
-            session_id,
+            thread_id,
             task_id,
             agent_id,
             intake.interview_started_at,
@@ -220,9 +220,9 @@ impl Store {
         let now = Utc::now();
         let confirmation_body: Option<String> =
             if let Some(message_id) = input.confirmation_message_id {
-                sqlx::query_scalar("SELECT body FROM session_messages WHERE id=? AND session_id=?")
+                sqlx::query_scalar("SELECT body FROM messages WHERE id=? AND thread_id=?")
                     .bind(message_id.to_string())
-                    .bind(session_id.to_string())
+                    .bind(thread_id.to_string())
                     .fetch_optional(&mut *tx)
                     .await
                     .map_err(storage)?
@@ -254,11 +254,11 @@ impl Store {
         .map_err(storage)?;
         if let Some(message_id) = input.confirmation_message_id {
             sqlx::query(
-                "UPDATE session_messages SET status='delivered'
-                 WHERE id=? AND session_id=? AND author_type='human' AND recalled_at IS NULL",
+                "UPDATE messages SET status='delivered'
+                 WHERE id=? AND thread_id=? AND author_type='human' AND recalled_at IS NULL",
             )
             .bind(message_id.to_string())
-            .bind(session_id.to_string())
+            .bind(thread_id.to_string())
             .execute(&mut *tx)
             .await
             .map_err(storage)?;
@@ -279,7 +279,7 @@ impl Store {
             "intake.interview_converged",
             json!({
                 "assignment_id":assignment.id,
-                "session_id":session_id,
+                "thread_id":thread_id,
                 "final_summary_message_id":input.final_summary_message_id,
                 "confirmation_message_id":input.confirmation_message_id,
                 "convergence_mode":"agent_attested",
@@ -289,24 +289,6 @@ impl Store {
         .await?;
         tx.commit().await.map_err(storage)?;
         self.get_assignment_intake(assignment.id).await
-    }
-
-    async fn archive_intake_session_tx(
-        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-        intake: &AssignmentIntake,
-        now: chrono::DateTime<Utc>,
-    ) -> Result<(), DomainError> {
-        if let Some(session_id) = intake.interview_session_id {
-            sqlx::query(
-                "UPDATE sessions SET status='archived',updated_at=? WHERE id=? AND status='open'",
-            )
-            .bind(now.to_rfc3339())
-            .bind(session_id.to_string())
-            .execute(&mut **tx)
-            .await
-            .map_err(storage)?;
-        }
-        Ok(())
     }
 
     pub async fn begin_task_execution(
@@ -322,8 +304,6 @@ impl Store {
                 .await
                 .map_err(storage)?;
             crate::task_graph::enforce_gate_conn(&mut tx, task_id).await?;
-            let intake = load_intake_tx(&mut tx, assignment.id).await?;
-            Self::archive_intake_session_tx(&mut tx, &intake, Utc::now()).await?;
             tx.commit().await.map_err(storage)?;
             return Ok(assignment);
         }
@@ -361,7 +341,6 @@ impl Store {
                 "assignment intake phase changed concurrently".into(),
             ));
         }
-        Self::archive_intake_session_tx(&mut tx, &intake, Utc::now()).await?;
         append_event_tx(
             &mut tx,
             "agent_instance",
@@ -561,7 +540,7 @@ pub(crate) async fn extend_intake_lease_tx(
 
 async fn validate_optional_interview_audit_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-    session_id: Id,
+    thread_id: Id,
     task_id: Id,
     agent_id: Id,
     interview_started_at: Option<DateTime<Utc>>,
@@ -570,48 +549,48 @@ async fn validate_optional_interview_audit_tx(
 ) -> Result<(), DomainError> {
     let task_id_text = task_id.to_string();
     let agent_id_text = agent_id.to_string();
-    let session = sqlx::query("SELECT agent_instance_id,task_id,status FROM sessions WHERE id=?")
-        .bind(session_id.to_string())
-        .fetch_optional(&mut **tx)
-        .await
-        .map_err(storage)?
-        .ok_or_else(|| DomainError::NotFound(format!("session {session_id}")))?;
-    let session_agent: String = session.try_get("agent_instance_id").map_err(storage)?;
-    let session_task: Option<String> = session.try_get("task_id").map_err(storage)?;
-    let session_status: String = session.try_get("status").map_err(storage)?;
-    if session_agent != agent_id_text
-        || session_task.as_deref() != Some(task_id_text.as_str())
-        || session_status != "open"
+    let thread =
+        sqlx::query("SELECT task_id,kind,target_agent_instance_id FROM message_threads WHERE id=?")
+            .bind(thread_id.to_string())
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(storage)?
+            .ok_or_else(|| DomainError::NotFound(format!("thread {thread_id}")))?;
+    let thread_task: String = thread.try_get("task_id").map_err(storage)?;
+    let thread_kind: String = thread.try_get("kind").map_err(storage)?;
+    let thread_agent: Option<String> = thread
+        .try_get("target_agent_instance_id")
+        .map_err(storage)?;
+    if thread_task != task_id_text
+        || thread_kind != "human_agent"
+        || thread_agent.as_deref() != Some(agent_id_text.as_str())
     {
         return Err(DomainError::Conflict(
-            "human interview Session is not the open Task Session for this Agent".into(),
+            "human interview thread is not the task-scoped Human/Agent thread for this Agent"
+                .into(),
         ));
     }
 
     if let Some(final_summary_message_id) = final_summary_message_id {
         let summary = sqlx::query(
-            "SELECT author_type,author_agent_instance_id,created_at,recalled_at
-             FROM session_messages WHERE id=? AND session_id=?",
+            "SELECT author_type,created_by,created_at,recalled_at
+             FROM messages WHERE id=? AND thread_id=?",
         )
         .bind(final_summary_message_id.to_string())
-        .bind(session_id.to_string())
+        .bind(thread_id.to_string())
         .fetch_optional(&mut **tx)
         .await
         .map_err(storage)?
-        .ok_or_else(|| {
-            DomainError::NotFound(format!("session message {final_summary_message_id}"))
-        })?;
+        .ok_or_else(|| DomainError::NotFound(format!("task message {final_summary_message_id}")))?;
         let summary_author: String = summary.try_get("author_type").map_err(storage)?;
-        let summary_agent: Option<String> = summary
-            .try_get("author_agent_instance_id")
-            .map_err(storage)?;
+        let summary_agent: Option<String> = summary.try_get("created_by").map_err(storage)?;
         let summary_recalled: Option<String> = summary.try_get("recalled_at").map_err(storage)?;
         if summary_author != "agent"
             || summary_agent.as_deref() != Some(agent_id_text.as_str())
             || summary_recalled.is_some()
         {
             return Err(DomainError::Conflict(
-                "optional final_summary_message_id must identify a current Agent-authored message in the interview Session"
+                "optional final_summary_message_id must identify a current Agent-authored message in the interview thread"
                     .into(),
             ));
         }
@@ -626,24 +605,22 @@ async fn validate_optional_interview_audit_tx(
     }
 
     if let Some(confirmation_message_id) = confirmation_message_id {
-        let confirmation = sqlx::query(
-            "SELECT author_type,recalled_at
-             FROM session_messages WHERE id=? AND session_id=?",
-        )
-        .bind(confirmation_message_id.to_string())
-        .bind(session_id.to_string())
-        .fetch_optional(&mut **tx)
-        .await
-        .map_err(storage)?
-        .ok_or_else(|| {
-            DomainError::NotFound(format!("session message {confirmation_message_id}"))
-        })?;
+        let confirmation =
+            sqlx::query("SELECT author_type,recalled_at FROM messages WHERE id=? AND thread_id=?")
+                .bind(confirmation_message_id.to_string())
+                .bind(thread_id.to_string())
+                .fetch_optional(&mut **tx)
+                .await
+                .map_err(storage)?
+                .ok_or_else(|| {
+                    DomainError::NotFound(format!("task message {confirmation_message_id}"))
+                })?;
         let confirmation_author: String = confirmation.try_get("author_type").map_err(storage)?;
         let confirmation_recalled: Option<String> =
             confirmation.try_get("recalled_at").map_err(storage)?;
         if confirmation_author != "human" || confirmation_recalled.is_some() {
             return Err(DomainError::Conflict(
-                "optional confirmation_message_id must identify a current Human message in the interview Session"
+                "optional confirmation_message_id must identify a current Human message in the interview thread"
                     .into(),
             ));
         }
@@ -825,7 +802,7 @@ fn row_to_assignment_intake(row: sqlx::sqlite::SqliteRow) -> Result<AssignmentIn
         human_response: row.try_get("human_response").map_err(storage)?,
         approved_by_actor_id: row.try_get("approved_by_actor_id").map_err(storage)?,
         approved_at: parse_opt_dt(row.try_get("approved_at").map_err(storage)?)?,
-        interview_session_id: parse_opt_id(row.try_get("interview_session_id").map_err(storage)?)?,
+        interview_thread_id: parse_opt_id(row.try_get("interview_thread_id").map_err(storage)?)?,
         conversation_state: row.try_get("conversation_state").map_err(storage)?,
         interview_started_at: parse_opt_dt(row.try_get("interview_started_at").map_err(storage)?)?,
         final_summary_message_id: parse_opt_id(

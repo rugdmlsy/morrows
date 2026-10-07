@@ -491,17 +491,17 @@ async fn continuation_chain_is_ordered_single_owner_and_recovers_checkpoints() {
             .unwrap();
         assert!(intake.project_memory.next_offset.is_none());
         let interview = store.start_intake_interview(task.id, agent).await.unwrap();
-        let interview_session = interview.interview_session_id.unwrap();
+        let interview_thread = interview.interview_thread_id.unwrap();
         let summary = store
-            .agent_reply_session(
-                interview_session,
+            .agent_reply_task_thread(
+                interview_thread,
                 agent,
                 "Final synthesis: continue the same durable task from the latest handoff and checkpoint.",
             )
             .await
             .unwrap();
         let confirmation = store
-            .create_human_session_message(interview_session, "Proceed with that continuation plan.")
+            .create_human_task_message(task.id, agent, "Proceed with that continuation plan.", None)
             .await
             .unwrap();
         store

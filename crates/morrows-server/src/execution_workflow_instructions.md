@@ -1,21 +1,128 @@
 Execution persistence and completion:
 
-At startup, inspect your own runtime identity and call `agent_identity_report`. Report `agent_name` (for example `codex-1`), `account_email`, `platform` (for example `codex`), and `device` (for example `node-01`) from information you actually queried from the current runtime/account/device. Use null for anything you cannot verify; do not ask Morrows to infer it from OAuth metadata, profiles, accounts, launch configuration, or machine records. Re-report when any of those values changes. These fields are descriptive/audit metadata only: authentication and authorization remain bound to the server-authenticated AgentInstance, so self-reporting a different name/account/device never grants another Agent's permissions.
+Runtime identity:
+- Inspect your current runtime identity at startup.
+- Call agent_identity_report.
+- Report agent_name, account_email, platform, and device.
+- Report only values that you verified in the current environment.
+- Use null for values you cannot verify.
+- Self-reported identity is audit metadata only.
+- It never changes authorization.
 
-Persistence is explicit, not automatic extraction from chat, tool output, or provider-private token/context buffers. Morrows cannot recover reasoning that was never persisted. Run milestones are task execution history, not Project Memory: once created they are immediately readable by any authenticated Agent that reads the Task, without project_memory_publish. They never auto-promote into Project Memory. Use run_checkpoint for cheap run-local latest-snapshot updates. Use run_milestone for durable phase boundaries: after a substantive subgoal or verification batch, before starting a long/risky operation whose interruption would be costly, when context/provider budget is becoming constrained, and immediately before handoff. A RunMilestone is immutable and atomically becomes the Run's latest checkpoint; include completed/verified/remaining/blockers, an exact next_step, ordered next_plan, execution_locations, and relevant artifact/decision IDs. Use memory_revise after meaningful changes to shared task progress, blockers, next actions, goals or constraints. It creates an immutable ContextRevision, preserves omitted fields and recursively merges constraint objects; explicit values replace the supplied field/key. Supply the context revision ID you read as expected_context_revision_id to detect stale updates. If context changes after a milestone, create a fresh milestone before handoff so it pins the current ContextRevision. Keep evidence in artifact_create and rationale in decision_create. A plain checkpoint is only the latest snapshot; milestone history and artifacts preserve important intermediate boundaries without copying every action.
+Persist execution state:
+- Morrows does not automatically extract durable state from provider conversations.
+- Morrows cannot recover reasoning that was never persisted.
+- Run milestones are Task execution history.
+- Run milestones are not Project Memory.
+- Use run_checkpoint for a lightweight latest snapshot.
+- Use run_milestone after a substantive subgoal.
+- Use run_milestone after an important verification batch.
+- Use run_milestone before a risky operation when interruption would be costly.
+- Use run_milestone under provider or context budget pressure.
+- Use run_milestone immediately before handoff.
+- Record completed work, verified results, remaining work, and blockers.
+- Record an exact next_step and ordered next_plan.
+- Record execution_locations and relevant evidence IDs.
+- Use memory_revise after meaningful Task context changes.
+- Supply expected_context_revision_id to reject stale updates.
+- Store evidence with artifact_create.
+- Store rationale with decision_create.
 
-The same task can continue through multiple Agents and Runs. Read execution.recovery and the latest handoff in task_context at takeover; a current executor can see the previous executor's last persisted checkpoint, its timestamp, context revision and stop reason. Checkpoints are shared with the next assigned executor, so do not put credentials or unrelated private Session content there. No checkpoint means recovery data is missing, not that no work happened. Recheck repository state, uncommitted files, running operations and existing outputs before repeating effects. Read the referenced evidence and handoff_get, then accept a pending same-task handoff with your own live Run via handoff_accept. If your own executor Assignment lease expires while the Task is still in_progress and the same Run is still running or paused, do not call task_claim and do not start a replacement Run. Call assignment_recover with the original assignment_id, run_id, a fresh lease duration and an audit reason; successful recovery reactivates that same Assignment and restores writes to that same Run. Recovery is allowed only to the original Agent and is rejected when another active executor exists or the Run/Task is terminal. Use assignment_renew instead when the lease is still live.
+Continue work safely:
+- One Task can continue through multiple Agents and Runs.
+- At takeover, read execution.recovery from task_context.
+- Read the latest handoff.
+- Inspect repository state before repeating effects.
+- Inspect uncommitted files.
+- Inspect running operations.
+- Inspect existing outputs.
+- Provider conversation history is private continuity state.
+- Do not rely on provider history as durable Task state.
+- Persist reusable continuation state in Morrows.
+- No checkpoint means recovery data is missing.
+- It does not prove that no work occurred.
+- Accept a pending same-Task handoff only with your own live Run.
 
-When you know your context/token budget or provider allowance is nearly exhausted, do not rely on a last-second free-form checkpoint. First update shared task context and reusable project knowledge where materially changed, then create a run_milestone with kind=budget_pressure containing changed files/locations, verified results, unresolved work, blockers and the exact next step. Then call handoff_create with that latest milestone_id and only evidence IDs already captured by the milestone. New handoffs are rejected if the milestone is not the source Run's latest milestone, if its pinned ContextRevision is stale, or if referenced evidence was selected after it. Do this while you can still call tools. Never mark an unfinished task complete to yield. After handoff succeeds, stop executing; your ownership has ended. If a process ends abruptly, Morrows can continue from the last durable milestone/checkpoint after lease/runtime cleanup, but it still cannot recover unsaved thoughts or unrecorded actions. An enabled control-plane continuation policy selects the first eligible untried configured Agent, retaining ordinary quota/capacity checks; if none is eligible it waits. The role scheduler must be enabled for automatic launch. Agents do not change their own dispatch policy or assume another Agent's credentials.
+Recover an expired Assignment:
+- Do not call task_claim when your original Run still exists.
+- Use assignment_recover for your own expired executor Assignment.
+- Supply the original assignment_id and run_id.
+- Supply a fresh lease duration and audit reason.
+- Morrows rejects recovery when another active executor exists.
+- Morrows rejects recovery for terminal Runs or Tasks.
+- Use assignment_renew when the lease is still live.
 
-Project/organization long-term memory is separate from task progress and Run milestones. Project-memory retrieval is lexical-only: Morrows uses ripgrep over a derived read-only projection and returns authoritative MemoryEntry records. There is no embedding/vector database layer. A grep failure must not be treated as memory loss because canonical paged memory remains available. Proactively publish reusable findings at meaningful milestones and before handoff/completion: new stable facts, decisions with rationale and applicability limits, repeatable failure lessons, or corrections to existing knowledge. Check relevant current knowledge first to avoid duplicating an existing entry. Keep transient command output and progress in task/checkpoint/artifact records; do not publish every action or copy an entire conversation into long-term memory. A useful unresolved hypothesis may be retained with its uncertainty and next verification step; never promote it to a verified fact merely to finish the task. Updating task context alone does not update project memory.
+Handle budget pressure:
+- Do not rely on a last-second free-form checkpoint.
+- Update shared Task context when it materially changed.
+- Update reusable Project knowledge when it materially changed.
+- Create a budget_pressure milestone.
+- Then create the handoff from that latest milestone.
+- Reference only evidence captured by the milestone.
+- Do not mark unfinished work complete only to yield.
+- Stop executing after a handoff succeeds.
 
-Before run_complete on a project-backed executor task, explicitly review whether the task changed reusable project knowledge. If it did, publish the new/revised knowledge with project_memory_publish and return memory_disposition.status=published or updated with the resulting MemoryEntry IDs and a rationale. Use updated when the cited entries supersede existing project memory. If there is genuinely nothing reusable to retain, return status=not_applicable with a concrete rationale and no MemoryEntry IDs. Do not use not_applicable merely to bypass publication. run_completion_check returns the exact memory_disposition_template and verifies cited entries came from this task and project; on Git-backed projects it also requires a consistent authoritative projection; any matching Git publication operation must be indexed, while legacy pre-cutover publications may be accepted from the verified mirror.
+Use Project Memory for reusable knowledge:
+- Project Memory is separate from Task progress.
+- Project Memory is separate from Run milestones.
+- Project-memory retrieval is lexical.
+- Canonical paged memory remains available if grep projection fails.
+- Publish stable reusable facts at meaningful milestones.
+- Publish decisions with rationale and applicability limits.
+- Publish repeatable failure lessons.
+- Publish corrections to existing Project Memory.
+- Review current Project Memory before publishing.
+- Avoid duplicate entries.
+- Keep transient progress in Task, checkpoint, or artifact records.
+- Do not copy an entire provider conversation into Project Memory.
+- Preserve uncertainty for unresolved hypotheses.
+- Do not promote uncertainty to a verified fact only to finish.
 
-Participants may explicitly publish reusable knowledge to their task's project with project_memory_publish; the server binds the project and author to the authorized task, checks its current context revision and task evidence references, and retains provenance and superseded entries. Provide verification_status and basis honestly; verified is the author's claim, not a server certification. Preserve unknowns and conflicting observations. Use a stable idempotency_key for a publication and retry with identical arguments; a changed publication needs a new key. To revise a fact, use its current memory ID as supersedes_memory_id. Stale or cross-project/private supersession is rejected; read the latest entry and reconcile before retrying, and use project_get(include_superseded=true) to inspect retained history. Do not overwrite unrelated useful content while correcting a fact. A project-only Session may read project knowledge but still needs an authorized source Task to publish; preserve candidate findings in its Session summary until such a Task exists. Organization memory remains control-plane managed. Neither task updates nor publication automatically extract or promote facts.
+Publish with provenance:
+- project_memory_publish requires an authorized source Task.
+- The server binds the Project and author to that Task.
+- The server enforces the current ContextRevision and evidence-reference requirements.
+- Report verification_status and basis accurately.
+- Use a stable idempotency_key for one publication.
+- Retry the same publication with identical arguments.
+- Use a new key when the publication changes.
+- Use supersedes_memory_id to revise an existing fact.
+- Do not overwrite unrelated useful content.
 
-When you discover an existing task, inspect `task.assignment_mode` in task_context. For `open`, use `task_claim`: success atomically creates your Assignment and Run, so begin execution immediately and do not wait for separate approval or Run creation. Concurrent claims for the same role have one winner. For `approval`, use `task_request_assignment` and inspect `assignment_request_list` (`include_resolved=true` for outcomes); approval creates/reuses the Assignment and the control plane then starts the Run. For `dispatch`, do not self-claim or request assignment; wait for the dispatcher. Do not create a duplicate work request. If a completed Task needs genuine rework, create a linked successor with `task_rework_create`; do not mutate the completed source or disguise the rework as an unrelated work request. An employee may withdraw only its own pending approval request, with a reason. A pending request grants no task-write or execution permission.
+Acquire Tasks correctly:
+- Inspect task.assignment_mode in task_context.
+- For an open Task, use task_claim.
+- task_claim creates an intake Run.
+- A claim does not authorize implementation.
+- Complete task_intake and the Human Interview.
+- Implement only after the Assignment phase becomes implementing.
+- For an approval Task, use task_request_assignment.
+- For a dispatch Task, wait for the dispatcher.
+- Do not create a duplicate work request.
+- Use task_rework_create for genuine rework of completed work.
 
-Before run_complete, persist current task progress and evidence, complete the project-memory disposition above, then use run_completion_check for the exact criteria, completion_template, memory_disposition_template and blockers. For executor tasks whose context declares acceptance_criteria or freeze_requires, completion also requires the current context revision, a nonempty shared summary, and one passed check per original criterion with rationale and same-task artifact IDs. Supply completion and memory_disposition either through their top-level run_complete fields or inside result, but never duplicate the same field in both places. If the work produced a human-readable experiment, research, evaluation, audit, or final report, optionally pass report_path to run_completion_check/run_complete with the actual file path or URI so later readers can find it directly. report_path is optional metadata: do not invent one, do not create a report solely to satisfy Morrows, and do not treat a report path as acceptance evidence unless the task criteria separately require that report. Explicit result.ok=false or all_acceptance_criteria_met=false prevents completion. If work is incomplete, checkpoint/update context and hand off or report the blocker. Do not weaken criteria, relabel unknown results to pass the gate, or use task context as a substitute for reusable project memory.
+Complete a Run:
+- Persist current Task progress and evidence first.
+- Review whether the Task changed reusable Project knowledge.
+- Publish new or revised Project Memory when appropriate.
+- Otherwise use memory_disposition.status=not_applicable with a concrete rationale.
+- Call run_completion_check before run_complete.
+- Satisfy every saved acceptance criterion.
+- Cite same-Task artifacts for structured completion criteria.
+- Use report_path only when a real human-readable report already exists.
+- Do not invent a report path.
+- A report path is not acceptance evidence by itself.
+- Explicit failure prevents completion.
+- If work is incomplete, persist state and hand off or report the blocker.
+- Do not weaken acceptance criteria.
+- Do not relabel unknown results as passing.
 
-Completion checks run atomically with the state transition and recheck ownership, lifecycle, active leases, unfinished dependencies, context version and evidence references. Failure leaves task/Run/assignment unchanged; a preflight is only a snapshot. The server checks report completeness and reference ownership, not whether artifact content proves a scientific claim or whether tests really passed. Tasks without structured criteria retain legacy completion behavior, except explicit failure is rejected. The server enforces an explicit project-memory disposition for project-backed executor completion, but deciding whether content is genuinely reusable remains the Agent's responsibility; Morrows does not auto-promote task summaries into long-term memory. Only operate on an existing Run owned by you; a direct Session may have no Run.
+Completion validation:
+- Completion validation and the state transition are atomic.
+- Morrows rechecks ownership and lifecycle.
+- Morrows rechecks active leases and unfinished dependencies.
+- Morrows rechecks ContextRevision and evidence references.
+- Failed validation leaves the Task, Run, and Assignment unchanged.
+- The server enforces report-structure and reference-ownership requirements.
+- The server does not prove scientific claims.
+- The server does not prove that tests actually passed.

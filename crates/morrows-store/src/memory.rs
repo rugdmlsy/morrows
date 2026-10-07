@@ -428,12 +428,27 @@ pub(super) async fn task_writer_conn(
             .map_err(storage)?
             .ok_or_else(|| DomainError::NotFound(format!("task {task_id}")))?,
     )?;
-    let allowed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM agent_instances WHERE id=? AND (? OR EXISTS(SELECT 1 FROM assignments WHERE task_id=? AND agent_instance_id=?) OR EXISTS(SELECT 1 FROM sessions WHERE task_id=? AND agent_instance_id=? AND status='open')))")
-        .bind(agent_id.to_string()).bind(task.owner_actor_id == format!("agent:{agent_id}"))
-        .bind(task_id.to_string()).bind(agent_id.to_string()).bind(task_id.to_string()).bind(agent_id.to_string())
-        .fetch_one(&mut *conn).await.map_err(storage)?;
+    let allowed: bool = sqlx::query_scalar(
+        "SELECT EXISTS(
+            SELECT 1 FROM agent_instances
+            WHERE id=? AND (
+                ? OR EXISTS(
+                    SELECT 1 FROM assignments WHERE task_id=? AND agent_instance_id=?
+                )
+            )
+        )",
+    )
+    .bind(agent_id.to_string())
+    .bind(task.owner_actor_id == format!("agent:{agent_id}"))
+    .bind(task_id.to_string())
+    .bind(agent_id.to_string())
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(storage)?;
     if !allowed {
-        return Err(DomainError::Conflict("task is not owned by, assigned to, or shared through an open Task Session with the authenticated agent instance".into()));
+        return Err(DomainError::Conflict(
+            "task is not owned by or assigned to the authenticated agent instance".into(),
+        ));
     }
     Ok(task)
 }

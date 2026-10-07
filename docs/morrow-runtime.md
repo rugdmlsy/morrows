@@ -2,7 +2,7 @@
 
 `morrow-runtime` is Morrows' managed execution plane. It is forked from the standalone Local Shell MCP (LSM) runtime code, but it has a different ownership boundary:
 
-- **Morrows Control Plane** owns Project, Task, Assignment, Run, Session, AgentInstance, Account, Machine, dispatch, permissions, Human Interview, Memory/Milestone/Handoff and provider lifecycle semantics.
+- **Morrows Control Plane** owns Project, Task, Assignment, Run, Task collaboration, AgentInstance, Account, Machine, dispatch, permissions, Human Interview, Memory/Milestone/Handoff and provider lifecycle semantics.
 - **morrow-runtime** owns worker registration/heartbeat, machine-local process execution, internal RuntimeScope, Job/Shell/files, provider process supervision and low-level audit/evidence. Its historical `Logical Session` object is an implementation detail, not a second Morrows work/session lifecycle.
 - **Provider Plane** owns provider-private model threads and resume references.
 - **Standalone LSM remains independent and rescue-only for ordinary Morrows work.** It may continue to authenticate its own clients and serve diagnostics, emergency repair and ARP workflows, but Morrows authentication never passes through it and Morrows does not use its control key as the provider execution runtime.
@@ -36,7 +36,7 @@ The worker bundle vendors runtime Python dependencies such as `httpx`; it must n
 
 ## Agent process execution
 
-Both Task LaunchAttempts and direct Morrows Session runtime attempts use the same executor selection.
+Task LaunchAttempts use the registered executor selection and Run-owned RuntimeScope.
 
 For `morrow_runtime`:
 
@@ -48,7 +48,7 @@ For `morrow_runtime`:
 
 Task intake may have transport without an execution capability. Implementation authority is still controlled by the Morrows Assignment phase.
 
-Direct Morrows Session runtimes receive a dedicated internal RuntimeScope and scoped capability; the conversation remains a Morrows Session while RuntimeScope is execution plumbing.
+Task Runs receive a dedicated internal RuntimeScope and scoped capability. Provider conversation continuity remains separate in Run.provider_conversation_ref.
 
 ## Restart and lost-response behavior
 
@@ -58,11 +58,10 @@ On Morrows restart:
 
 - local child-process launches retain the legacy interrupted/failure reconciliation;
 - managed Task runtimes keep the existing Run and restore a monitor for the same runtime ID;
-- managed direct Session runtimes are preserved; queued attempts are idempotently replayed and running attempts restore status monitoring;
 - transient controller/worker unavailability does not terminalize the Run;
 - an explicit reachable-runtime response that the durable runtime does not exist is treated as deterministic runtime loss rather than polled forever.
 
-Provider session references remain adapter state; they are not Morrows Session identities.
+Provider conversation references are Run state used only for external Provider continuity; they are not Task or RuntimeScope identities.
 
 ## HTTP boundaries
 
@@ -108,7 +107,7 @@ The rollout is intentionally non-disruptive:
 2. enroll a test Machine worker through Morrows;
 3. bind a test AgentInstance to that Machine;
 4. create/select a LaunchProfile with `execution_backend=morrow_runtime`;
-5. verify Task and direct Session remote launches, restart recovery and cancellation;
+5. verify Task remote launches, provider resume, restart recovery and cancellation;
 6. migrate additional profiles selectively.
 
 There is no requirement to migrate standalone LSM workers or disable standalone LSM.
@@ -129,11 +128,10 @@ The protected resource is `https://mcp.xycdev.com/morrows`; its issuer is `https
 Morrows treats RuntimeScope as execution plumbing, never as a second work lifecycle. Scope ownership is explicit:
 
 - Run-owned RuntimeScope: the only normal execution scope for a concrete Task Run. Managed providers receive a scoped runtime capability at launch. Direct/external providers such as ChatGPT Web use Morrows employee MCP runtime_scope_get / runtime_call; Morrows validates the active implementing executor Assignment and proxies the call through the private loopback control plane. Both paths address the same RunRuntimeBinding.runtime_scope_id.
-- Session-owned RuntimeScope: reserved for durable direct Morrows Sessions that are not executing a Task Run.
 - AgentInstance + Machine ad-hoc RuntimeScope: the normal execution scope for no-Task inspection/maintenance work. Morrows persists one binding per AgentInstance + canonical Machine, reuses its RuntimeScope across calls/server restarts, and advances a binding generation only when reset or when the underlying scope has disappeared/terminalized. It must never be substituted for a Run-owned scope when a Task exists.
 - Standalone LSM: rescue/diagnostic control plane only. It is not a normal Morrows Task execution backend.
 
-runtime_call never returns MORROWS_RUNTIME_CONTROL_KEY or a runtime Session capability to the caller. The trusted Morrows server invokes a small allowlist of shell/job/file tools through morrow-runtime's loopback control API, with the Run subject and RuntimeScope bound server-side. Lifecycle and global-administration tools are intentionally excluded.
+runtime_call never returns MORROWS_RUNTIME_CONTROL_KEY or a runtime capability to the caller. The trusted Morrows server invokes a small allowlist of shell/job/file tools through morrow-runtime's loopback control API, with the Run subject and RuntimeScope bound server-side. Lifecycle and global-administration tools are intentionally excluded.
 
 This gives managed and external Agents different ingress paths but one execution identity:
 
@@ -149,6 +147,6 @@ Direct/external Agents can use the employee MCP runtime bridge without creating 
 - `runtime_call(adhoc=true, machine=..., tool_name=...)` hard-binds the nested shell/job/file tool to the Machine's morrow-runtime worker. A nested `machine` argument cannot escape to another worker.
 - `runtime_scope_reset(machine=...)` cleans/cancels the old scope, advances `generation`, and provisions a fresh scope while preserving the durable AgentInstance + Machine binding identity.
 - A formal Task is authoritative whenever it exists: if the caller has an active implementing executor Run, every ad-hoc get/call/reset is rejected and the caller must use that Run's `run_id`.
-- The binding table stores no capability or control secret. Public Agents never receive `MORROWS_RUNTIME_CONTROL_KEY` or a Session capability.
+- The binding table stores no capability or control secret. Public Agents never receive `MORROWS_RUNTIME_CONTROL_KEY` or a runtime capability.
 
 The idempotency key is generation-scoped (`morrows:adhoc:<agent>:<machine>:g<N>`). If Morrows restarts, the persisted binding is reused. If the referenced RuntimeScope is missing or terminal, Morrows advances the generation and safely provisions the successor.

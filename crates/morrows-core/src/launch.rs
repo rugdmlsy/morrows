@@ -54,13 +54,11 @@ pub struct LaunchAttempt {
     pub agent_instance_id: Id,
     pub launch_profile_id: Id,
     pub run_id: Option<Id>,
-    pub session_id: Option<Id>,
     pub job_id: Option<Id>,
     pub resume_from_attempt_id: Option<Id>,
     pub restart_run_id: Option<Id>,
     pub status: String,
     pub cwd: Option<String>,
-    pub external_session_ref: Option<String>,
     pub pid: Option<i64>,
     pub exit_code: Option<i64>,
     pub stdout_path: Option<String>,
@@ -221,7 +219,7 @@ pub struct LaunchExecution {
 pub struct AcceptExternalLaunch {
     #[schemars(with = "String")]
     pub launch_attempt_id: Id,
-    pub external_session_ref: String,
+    pub provider_conversation_ref: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

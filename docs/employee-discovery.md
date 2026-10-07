@@ -6,7 +6,7 @@ promotion boundaries, see [Employee workflow](employee-workflow.md).
 All employee tools require an authenticated, registered Agent. Task and project
 reads are company knowledge: an Agent may explicitly query another Agent's task
 without taking ownership. Writes, assignment renewal, execution completion, and
-private Session operations retain their existing authorization rules.
+provider-private conversation history remains outside Morrows read authorization.
 
 ## Shared MCP instructions
 

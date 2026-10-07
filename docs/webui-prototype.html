@@ -1834,7 +1834,7 @@ async function loadBackendData(manual = false) {
             inst: r.agent_instance_id,
             st: runStMap[r.status] || r.status,
             lease: r.status === 'completed' || r.status === 'handed_off' ? 0 : 70,
-            launch: r.external_session_ref || 'LSM-Run',
+            launch: r.provider_conversation_ref || 'LSM-Run',
             dur: dur,
             note: note,
             ev: '执行证据已关联',

@@ -52,7 +52,6 @@ mod tests {
         body::{Body, to_bytes},
         http::Request,
     };
-    use morrows_core::CreateSession;
     use tower::ServiceExt;
 
     async fn request(
@@ -81,15 +80,19 @@ mod tests {
         let store = Store::connect("sqlite::memory:").await.unwrap();
         let a = store.register_agent("bridge-a", &[]).await.unwrap();
         let b = store.register_agent("bridge-b", &[]).await.unwrap();
-        let session = store
-            .create_session(CreateSession {
-                agent_instance_id: a.id,
-                title: "Bridge".into(),
+        let task = store
+            .create_task(morrows_core::CreateTask {
+                project_id: None,
+                title: "Bridge task".into(),
+                description: "Task delivery".into(),
+                owner_actor_id: "human:operator".into(),
+                priority: 0,
+                state: morrows_core::TaskState::Ready,
             })
             .await
             .unwrap();
         store
-            .create_human_session_message(session.id, "bridge message")
+            .create_human_task_message(task.id, a.id, "bridge message", None)
             .await
             .unwrap();
         let app = routes().with_state(AppState {
@@ -112,7 +115,7 @@ mod tests {
 
         let (_, inbox) = request(&app, "GET", "/agent-deliveries", Some(a.id)).await;
         let delivery_id = inbox[0]["id"].as_str().unwrap();
-        assert_eq!(inbox[0]["kind"], "session_message");
+        assert_eq!(inbox[0]["kind"], "task_message");
 
         assert_eq!(
             request(

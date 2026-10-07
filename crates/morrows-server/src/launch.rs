@@ -401,7 +401,7 @@ pub async fn runtime_sweep(store: Store) {
                 {
                     Ok(true) => {
                         if let Err(err) = store.mark_runtime_scope_terminalized(run_id).await {
-                            tracing::error!(%run_id, %err, "failed recording Session finish");
+                            tracing::error!(%run_id, %err, "failed recording RuntimeScope finish");
                         }
                     }
                     Ok(false) => tracing::warn!(%run_id, "runtime scope finish remains pending"),
@@ -725,7 +725,7 @@ async fn execute_remote_agent(
     } else {
         None
     };
-    let runtime_session_id = match agent_binding.as_ref() {
+    let runtime_scope_id = match agent_binding.as_ref() {
         Some(binding) => binding.runtime_scope_id.clone(),
         None => {
             control
@@ -752,14 +752,14 @@ async fn execute_remote_agent(
     }
     if let Some(binding) = &agent_binding {
         prompt.push_str(&format!(
-            "\nMorrows internal execution scope for this Run: {}. Use it only when a low-level morrow-runtime tool requires a scope identifier. It is not a Morrows Session, Task, or Run identity; do not create, finish, cancel, or delete execution scopes yourself.\n",
+            "\nMorrows internal execution scope for this Run: {}. Use it only when a low-level morrow-runtime tool requires a scope identifier. It is not a Task, Run, or provider conversation identity; do not create, finish, cancel, or delete execution scopes yourself.\n",
             binding.runtime_scope_id,
         ));
     } else {
         prompt.push_str("\nThis is an intake-only launch. Morrows has not issued morrow-runtime execution capability. Complete task_intake, then call task_interview_start and resolve material uncertainties with the Human. When nothing material remains unresolved, call task_interview_finalize. Do not implement or modify external state until a later launch has Assignment phase=implementing.\n");
     }
 
-    let resume_session = resolve_launch_provider_ref(&store, &execution).await?;
+    let resume_provider_ref = resolve_launch_provider_ref(&store, &execution).await?;
     let mut files = Vec::<Value>::new();
     let mut env = serde_json::Map::new();
     env.insert(
@@ -774,12 +774,6 @@ async fn execute_remote_agent(
         "MORROWS_AGENT_INSTANCE_ID".into(),
         Value::String(execution.attempt.agent_instance_id.to_string()),
     );
-    if let Some(session_id) = execution.attempt.session_id {
-        env.insert(
-            "MORROWS_SESSION_ID".into(),
-            Value::String(session_id.to_string()),
-        );
-    }
     if let Some(binding) = &agent_binding {
         env.insert(
             "MORROWS_RUNTIME_CAPABILITY".into(),
@@ -787,7 +781,7 @@ async fn execute_remote_agent(
         );
     }
 
-    let (args, known_session_ref) = match execution.profile.adapter.as_str() {
+    let (args, known_provider_ref) = match execution.profile.adapter.as_str() {
         "codex_cli" => {
             if let Some(home) = remote_codex_home(execution.account.as_ref())? {
                 env.insert("CODEX_HOME".into(), Value::String(home));
@@ -796,7 +790,7 @@ async fn execute_remote_agent(
                 &execution.profile,
                 &cwd,
                 "{runtime_dir}/last-message.txt",
-                resume_session.as_deref(),
+                resume_provider_ref.as_deref(),
                 !execution_authorized,
             );
             inject_morrows_config(&mut args);
@@ -806,7 +800,7 @@ async fn execute_remote_agent(
             (args, None)
         }
         "codebuddy_cli" => {
-            let session_ref = resume_session
+            let session_ref = resume_provider_ref
                 .clone()
                 .unwrap_or_else(|| format!("morrows-{}", execution.attempt.id));
             let config = codebuddy_mcp_config(
@@ -823,7 +817,7 @@ async fn execute_remote_agent(
                 &execution.profile,
                 "{runtime_dir}/codebuddy-mcp.json",
                 &session_ref,
-                resume_session.is_some(),
+                resume_provider_ref.is_some(),
             );
             (args, Some(session_ref))
         }
@@ -840,7 +834,7 @@ async fn execute_remote_agent(
         "stdin_text": prompt,
     });
     if let Err(err) = control
-        .launch_agent(&runtime_session_id, worker_name, execution.attempt.id, spec)
+        .launch_agent(&runtime_scope_id, worker_name, execution.attempt.id, spec)
         .await
     {
         let _ = store
@@ -865,7 +859,7 @@ async fn execute_remote_agent(
         .await
     {
         let _ = control
-            .stop_agent(&runtime_session_id, worker_name, execution.attempt.id)
+            .stop_agent(&runtime_scope_id, worker_name, execution.attempt.id)
             .await;
         if agent_binding.is_some() {
             let _ = control.revoke_for_run(&store, execution.run.id).await;
@@ -900,8 +894,8 @@ async fn execute_remote_agent(
         execution.run.id,
         control,
         worker_name.to_owned(),
-        runtime_session_id,
-        known_session_ref,
+        runtime_scope_id,
+        known_provider_ref,
     )
     .await
 }
@@ -913,8 +907,8 @@ async fn monitor_remote_agent(
     run_id: Id,
     control: MorrowRuntimeControl,
     worker_name: String,
-    runtime_session_id: String,
-    known_session_ref: Option<String>,
+    runtime_scope_id: String,
+    known_provider_ref: Option<String>,
 ) -> anyhow::Result<()> {
     let mut observed_running = attempt.status == "running";
     let mut poll = tokio::time::interval(std::time::Duration::from_millis(750));
@@ -922,21 +916,21 @@ async fn monitor_remote_agent(
         poll.tick().await;
         if store.launch_stop_requested(attempt.id).await? {
             let _ = control
-                .stop_agent(&runtime_session_id, &worker_name, attempt.id)
+                .stop_agent(&runtime_scope_id, &worker_name, attempt.id)
                 .await;
             let _ = control.revoke_for_run(&store, run_id).await;
             store
                 .finish_launch_attempt(
                     attempt.id,
                     None,
-                    known_session_ref.clone(),
+                    known_provider_ref.clone(),
                     Some("run_cancel_requested".into()),
                 )
                 .await?;
             return Ok(());
         }
         match control
-            .agent_status(&runtime_session_id, &worker_name, attempt.id)
+            .agent_status(&runtime_scope_id, &worker_name, attempt.id)
             .await
         {
             Ok(value) => {
@@ -976,7 +970,7 @@ async fn monitor_remote_agent(
                     .finish_launch_attempt(
                         attempt.id,
                         None,
-                        known_session_ref.clone(),
+                        known_provider_ref.clone(),
                         Some(message),
                     )
                     .await?;
@@ -1003,7 +997,7 @@ async fn monitor_remote_agent(
         .get("stderr_tail")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let provider_ref = known_session_ref.or_else(|| extract_external_session_ref(&stdout));
+    let provider_ref = known_provider_ref.or_else(|| extract_provider_conversation_ref(&stdout));
     let success = status == "succeeded" || (status == "exited" && exit_code == Some(0));
     let error = if success {
         None
@@ -1061,6 +1055,7 @@ pub async fn recover_remote_launch_monitors(store: Store) -> anyhow::Result<usiz
             );
             continue;
         };
+        let provider_ref = store.get_run(run_id).await?.provider_conversation_ref;
         let child_store = store.clone();
         let child_control = control.clone();
         tokio::spawn(async move {
@@ -1072,7 +1067,7 @@ pub async fn recover_remote_launch_monitors(store: Store) -> anyhow::Result<usiz
                 child_control,
                 worker_name,
                 binding.runtime_scope_id,
-                attempt.external_session_ref.clone(),
+                provider_ref,
             )
             .await
             {
@@ -1250,15 +1245,15 @@ async fn execute_codebuddy_with_root(
     let stdout_file = std::fs::File::create(&stdout_path)?;
     let stderr_file = std::fs::File::create(&stderr_path)?;
 
-    let resume_session = resolve_launch_provider_ref(&store, &execution).await?;
-    let session_ref = resume_session
+    let resume_provider_ref = resolve_launch_provider_ref(&store, &execution).await?;
+    let session_ref = resume_provider_ref
         .clone()
         .unwrap_or_else(|| format!("morrows-{}", execution.attempt.id));
     let args = codebuddy_args(
         &execution.profile,
         mcp_config_path.to_string_lossy().as_ref(),
         &session_ref,
-        resume_session.is_some(),
+        resume_provider_ref.is_some(),
     );
 
     let mut command = Command::new(&execution.profile.program);
@@ -1316,11 +1311,11 @@ async fn execute_codebuddy_with_root(
     }
     if let Some(binding) = &agent_binding {
         prompt.push_str(&format!(
-            "\nMorrows internal execution scope for this Run: {}. Use it only when a low-level morrow-runtime tool requires a scope identifier. It is not a Morrows Session, Task, or Run identity; do not create, finish, cancel, or delete execution scopes yourself.\n",
+            "\nMorrows internal execution scope for this Run: {}. Use it only when a low-level morrow-runtime tool requires a scope identifier. It is not a Task, Run, or provider conversation identity; do not create, finish, cancel, or delete execution scopes yourself.\n",
             binding.runtime_scope_id,
         ));
     } else {
-        prompt.push_str("\nThis is an intake-only launch. Morrows has not issued morrow-runtime execution capability. Complete task_intake, then call task_interview_start and resolve material uncertainties with the Human. The discussion may happen in the Morrows Task Session or in your current provider conversation. When nothing material remains unresolved, call task_interview_finalize with the current understanding, implementation plan, and unresolved_questions=[]. Session message IDs are optional audit metadata, not a gate. There is no separate operator approval step. After finalize, stop this read-only turn; Morrows will relaunch the implementation runtime automatically. Do not implement or modify external state until a new launch has Assignment phase=implementing.\n");
+        prompt.push_str("\nThis is an intake-only launch. Morrows has not issued morrow-runtime execution capability. Complete task_intake, then call task_interview_start and resolve material uncertainties with the Human. The discussion may happen in the Task collaboration thread or in your current provider conversation. When nothing material remains unresolved, call task_interview_finalize with the current understanding, implementation plan, and unresolved_questions=[]. Task message IDs are optional audit metadata, not a gate. There is no separate operator approval step. After finalize, stop this read-only turn; Morrows will relaunch the implementation runtime automatically. Do not implement or modify external state until a new launch has Assignment phase=implementing.\n");
     }
 
     if let Some(mut stdin) = child.stdin.take() {
@@ -1549,13 +1544,13 @@ async fn execute_codex_with_root(
     let stdout_file = std::fs::File::create(&stdout_path)?;
     let stderr_file = std::fs::File::create(&stderr_path)?;
 
-    let resume_session = resolve_launch_provider_ref(&store, &execution).await?;
+    let resume_provider_ref = resolve_launch_provider_ref(&store, &execution).await?;
 
     let mut args = codex_args(
         &execution.profile,
         &cwd,
         last_message_path.to_string_lossy().as_ref(),
-        resume_session.as_deref(),
+        resume_provider_ref.as_deref(),
         !execution_authorized,
     );
     inject_morrows_config(&mut args);
@@ -1588,9 +1583,6 @@ async fn execute_codex_with_root(
         "MORROWS_AGENT_INSTANCE_ID",
         execution.attempt.agent_instance_id.to_string(),
     );
-    if let Some(session_id) = execution.attempt.session_id {
-        command.env("MORROWS_SESSION_ID", session_id.to_string());
-    }
     if let Some(binding) = &agent_binding {
         command.env("MORROWS_RUNTIME_CAPABILITY", &binding.capability);
     }
@@ -1631,11 +1623,11 @@ async fn execute_codex_with_root(
     }
     if let Some(binding) = &agent_binding {
         prompt.push_str(&format!(
-            "\nMorrows internal execution scope for this Run: {}. Use it only when a low-level morrow-runtime tool requires a scope identifier. It is not a Morrows Session, Task, or Run identity; do not manage its lifecycle. morrow-runtime rejects stale scope identifiers from resumed provider history.\n",
+            "\nMorrows internal execution scope for this Run: {}. Use it only when a low-level morrow-runtime tool requires a scope identifier. It is not a Task, Run, or provider conversation identity; do not manage its lifecycle. morrow-runtime rejects stale scope identifiers from resumed provider history.\n",
             binding.runtime_scope_id,
         ));
     } else {
-        prompt.push_str("\nThis is an intake-only launch. Morrows has not issued morrow-runtime execution capability. Complete task_intake, then call task_interview_start and resolve material uncertainties with the Human. The discussion may happen in the Morrows Task Session or in your current provider conversation. When nothing material remains unresolved, call task_interview_finalize with the current understanding, implementation plan, and unresolved_questions=[]. Session message IDs are optional audit metadata, not a gate. There is no separate operator approval step. After finalize, stop this read-only turn; Morrows will relaunch the implementation runtime automatically. Do not implement or modify external state until a new launch has Assignment phase=implementing.\n");
+        prompt.push_str("\nThis is an intake-only launch. Morrows has not issued morrow-runtime execution capability. Complete task_intake, then call task_interview_start and resolve material uncertainties with the Human. The discussion may happen in the Task collaboration thread or in your current provider conversation. When nothing material remains unresolved, call task_interview_finalize with the current understanding, implementation plan, and unresolved_questions=[]. Task message IDs are optional audit metadata, not a gate. There is no separate operator approval step. After finalize, stop this read-only turn; Morrows will relaunch the implementation runtime automatically. Do not implement or modify external state until a new launch has Assignment phase=implementing.\n");
     }
     if let Some(mut stdin) = child.stdin.take() {
         if let Err(err) = stdin.write_all(prompt.as_bytes()).await {
@@ -1707,7 +1699,7 @@ async fn execute_codex_with_root(
     };
     let exit_code = status.code().map(i64::from);
     let stdout = fs::read_to_string(&stdout_path).await.unwrap_or_default();
-    let session_ref = extract_external_session_ref(&stdout);
+    let session_ref = extract_provider_conversation_ref(&stdout);
     let error = if status.success() {
         None
     } else if let Some(message) = extract_codex_error(&stdout) {
@@ -1777,10 +1769,10 @@ pub(crate) fn codex_args(
     profile: &LaunchProfile,
     cwd: &str,
     last_message_path: &str,
-    resume_session: Option<&str>,
+    resume_provider_ref: Option<&str>,
     intake_only: bool,
 ) -> Vec<String> {
-    if let Some(session) = resume_session {
+    if let Some(session) = resume_provider_ref {
         let mut args = vec!["exec".into(), "--disable".into(), "apps".into()];
         if !intake_only {
             args.push("--approve-for-me".into());
@@ -1834,19 +1826,22 @@ async fn resolve_launch_provider_ref(
     execution: &LaunchExecution,
 ) -> anyhow::Result<Option<String>> {
     if let Some(previous_id) = execution.attempt.resume_from_attempt_id {
-        if let Some(provider_ref) = store
-            .get_launch_attempt(previous_id)
-            .await?
-            .external_session_ref
-        {
-            return Ok(Some(provider_ref));
+        let previous = store.get_launch_attempt(previous_id).await?;
+        if let Some(run_id) = previous.run_id {
+            if let Some(provider_ref) = store.get_run(run_id).await?.provider_conversation_ref {
+                return Ok(Some(provider_ref));
+            }
         }
     }
-    let Some(session_id) = execution.attempt.session_id else {
-        return Ok(None);
-    };
+    if let Some(provider_ref) = execution.run.provider_conversation_ref.clone() {
+        return Ok(Some(provider_ref));
+    }
     Ok(store
-        .latest_session_provider_ref(session_id, execution.profile.id)
+        .latest_provider_conversation_ref_for_task(
+            execution.task.id,
+            execution.attempt.agent_instance_id,
+            execution.profile.id,
+        )
         .await?)
 }
 
@@ -1867,8 +1862,7 @@ AgentInstance: {agent}\n\
 Task ID: {task_id}\n\
 Assignment ID: {assignment_id}\n\
 Run ID: {run_id}\n\
-Morrows Session ID: {session_id}\n\
-\nUse the configured Morrows MCP server as the durable source of truth. The Assignment and Run already exist; do not claim the task or start another Run. This execution is attached to the durable Morrows Session shown above; use session_get for its conversation history, session_reply for human-facing replies, and session_summary_revise after materially advancing it. Before substantial work, read task_context for Task ID {task_id}. Read instructions_get for management updates. Use run_checkpoint for lightweight latest-state updates and run_milestone for substantive phase boundaries, before long/risky operations, under token/provider budget pressure, and before handoff. A handoff must cite the latest milestone and its captured evidence. If the task is fully complete, use run_completion_check and call run_complete for Run ID {run_id}. If blocked or incomplete, persist a milestone/checkpoint with the blocker, exact next step, ordered next plan and execution locations before exiting.\n\
+\nUse the configured Morrows MCP server as the durable source of truth. The Assignment and Run already exist; do not claim the task or start another Run. Human/Agent discussion for this Task is stored in task collaboration threads; use task_collaboration to read it and message_create to reply when needed. Before substantial work, read task_context for Task ID {task_id}. Read instructions_get for management updates. Use run_checkpoint for lightweight latest-state updates and run_milestone for substantive phase boundaries, before long/risky operations, under token/provider budget pressure, and before handoff. A handoff must cite the latest milestone and its captured evidence. If the task is fully complete, use run_completion_check and call run_complete for Run ID {run_id}. If blocked or incomplete, persist a milestone/checkpoint with the blocker, exact next step, ordered next plan and execution locations before exiting.\n\
 \nTask title:\n{title}\n\
 \nContext preparation and source handling:\n{context_capture}\n{execution_workflow}\n\
 \nTask description:\n{description}\n\
@@ -1881,11 +1875,6 @@ Morrows Session ID: {session_id}\n\
         task_id = execution.task.id,
         assignment_id = execution.attempt.assignment_id,
         run_id = execution.run.id,
-        session_id = execution
-            .attempt
-            .session_id
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| "(legacy-unbound)".into()),
         title = clip(&execution.task.title, 2000),
         context_capture = include_str!("context_capture_instructions.md"),
         execution_workflow = include_str!("execution_workflow_instructions.md"),
@@ -1948,10 +1937,10 @@ fn build_delivery_prompt(execution: &LaunchExecution, deliveries: &[AgentDeliver
             continue;
         }
         match delivery.kind.as_str() {
-            "session_message" => {
-                let session_id = delivery
+            "task_message" => {
+                let thread_id = delivery
                     .payload
-                    .get("session_id")
+                    .get("thread_id")
                     .and_then(Value::as_str)
                     .unwrap_or("unknown");
                 let body = delivery
@@ -1960,7 +1949,7 @@ fn build_delivery_prompt(execution: &LaunchExecution, deliveries: &[AgentDeliver
                     .and_then(Value::as_str)
                     .unwrap_or("");
                 items.push(format!(
-                    "Direct company message in Session {session_id}:\n{}\nUse session_get for context and session_reply when appropriate.",
+                    "Human message in Task collaboration thread {thread_id}:\n{}\nUse task_collaboration for surrounding context and message_create to reply.",
                     clip(body, 3000)
                 ));
             }
@@ -1991,7 +1980,7 @@ fn clip(value: &str, max_chars: usize) -> String {
     value.chars().take(max_chars).collect()
 }
 
-pub(crate) fn extract_external_session_ref(stdout: &str) -> Option<String> {
+pub(crate) fn extract_provider_conversation_ref(stdout: &str) -> Option<String> {
     for line in stdout.lines() {
         let Ok(value) = serde_json::from_str::<Value>(line) else {
             continue;
@@ -2462,7 +2451,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fake_codebuddy_process_receives_delivery_and_persists_resumable_session() {
+    async fn fake_codebuddy_process_receives_task_delivery_and_persists_provider_conversation() {
         let store = Store::connect("sqlite::memory:").await.unwrap();
         let program = fake_executable(0);
         let cwd = program.parent().unwrap().to_path_buf();
@@ -2471,6 +2460,13 @@ mod tests {
             .create_task(input(json!({
                 "title":"CodeBuddy fake runtime",
                 "description":"No real provider call"
+            })))
+            .await
+            .unwrap();
+        let other_task = store
+            .create_task(input(json!({
+                "title":"Unrelated task",
+                "description":"Must not leak into this launch"
             })))
             .await
             .unwrap();
@@ -2490,18 +2486,11 @@ mod tests {
             })))
             .await
             .unwrap();
-        let general_session = store
-            .create_session(CreateSession {
-                agent_instance_id: agent.id,
-                title: "Unscoped discussion".into(),
-            })
-            .await
-            .unwrap();
-        store
-            .create_human_session_message(general_session.id, "do not inject into task")
-            .await
-            .unwrap();
 
+        let unrelated_message = store
+            .create_human_task_message(other_task.id, agent.id, "do not inject into task", None)
+            .await
+            .unwrap();
         let attempt = store
             .enqueue_launch(input(json!({
                 "assignment_id":assignment.id,
@@ -2509,11 +2498,8 @@ mod tests {
             })))
             .await
             .unwrap();
-        let task_session_id = attempt
-            .session_id
-            .expect("task launch should bind a Session");
         let task_message = store
-            .create_human_session_message(task_session_id, "delivery to codebuddy")
+            .create_human_task_message(task.id, agent.id, "delivery to codebuddy", None)
             .await
             .unwrap();
         let deliveries = store.agent_delivery_inbox(agent.id, 80).await.unwrap();
@@ -2522,9 +2508,9 @@ mod tests {
             .find(|delivery| delivery.source_id == task_message.id)
             .unwrap()
             .id;
-        let general_delivery_id = deliveries
+        let unrelated_delivery_id = deliveries
             .iter()
-            .find(|delivery| delivery.payload["session_id"] == general_session.id.to_string())
+            .find(|delivery| delivery.source_id == unrelated_message.id)
             .unwrap()
             .id;
 
@@ -2537,18 +2523,18 @@ mod tests {
 
         let finished = store.get_launch_attempt(attempt.id).await.unwrap();
         assert_eq!(finished.status, "completed");
+        let run = store.get_run(finished.run_id.unwrap()).await.unwrap();
         assert_eq!(
-            finished.external_session_ref.as_deref(),
+            run.provider_conversation_ref.as_deref(),
             Some(format!("morrows-{}", attempt.id).as_str())
         );
         assert_eq!(
             store
-                .latest_session_provider_ref(task_session_id, profile.id)
+                .latest_provider_conversation_ref_for_task(task.id, agent.id, profile.id)
                 .await
                 .unwrap()
                 .as_deref(),
-            Some(format!("morrows-{}", attempt.id).as_str()),
-            "Task launches and direct Session runtimes must share Provider thread continuity"
+            Some(format!("morrows-{}", attempt.id).as_str())
         );
         let delivered = store.get_agent_delivery(task_delivery_id).await.unwrap();
         assert_eq!(delivered.status, "delivered");
@@ -2558,10 +2544,13 @@ mod tests {
                 .as_deref()
                 .is_some_and(|value| value.starts_with("codebuddy_cli:"))
         );
-        let general = store.get_agent_delivery(general_delivery_id).await.unwrap();
+        let unrelated = store
+            .get_agent_delivery(unrelated_delivery_id)
+            .await
+            .unwrap();
         assert_eq!(
-            general.status, "queued",
-            "an unscoped Session message must not leak into a Task launch"
+            unrelated.status, "queued",
+            "a message from another Task must not leak into this launch"
         );
         assert!(
             !root
@@ -2572,7 +2561,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delivery_prompt_includes_direct_message_and_avoids_duplicate_current_instruction() {
+    async fn delivery_prompt_includes_task_message_and_avoids_duplicate_current_instruction() {
         let store = Store::connect("sqlite::memory:").await.unwrap();
         let program = fake_executable(0);
         let cwd = program.parent().unwrap().to_path_buf();
@@ -2587,16 +2576,14 @@ mod tests {
             )
             .await
             .unwrap();
-        let session = store
-            .create_session(CreateSession {
-                agent_instance_id: agent.id,
-                title: "Prompt delivery".into(),
-            })
+        let task_message = store
+            .create_human_task_message(attempt.task_id, agent.id, "answer this task message", None)
             .await
             .unwrap();
-        store
-            .create_human_session_message(session.id, "answer this direct message")
+        let task_thread = store
+            .task_agent_thread(attempt.task_id, agent.id)
             .await
+            .unwrap()
             .unwrap();
 
         store.claim_launch_job().await.unwrap().unwrap();
@@ -2606,8 +2593,9 @@ mod tests {
         })).unwrap()).await.unwrap());
         let deliveries = store.agent_delivery_inbox(agent.id, 80).await.unwrap();
         let delivery_prompt = build_delivery_prompt(&execution, &deliveries);
-        assert!(delivery_prompt.contains("answer this direct message"));
-        assert!(delivery_prompt.contains(&session.id.to_string()));
+        assert!(delivery_prompt.contains("answer this task message"));
+        assert!(delivery_prompt.contains(&task_thread.id.to_string()));
+        assert_eq!(task_message.thread_id, task_thread.id);
         assert!(!delivery_prompt.contains("instruction already loaded by launch execution"));
         assert!(
             build_prompt(&execution).contains("instruction already loaded by launch execution")
@@ -2618,7 +2606,8 @@ mod tests {
             prompt.matches("Context preparation and capture:").count(),
             1
         );
-        assert!(prompt.contains("observation time, verification status"));
+        assert!(prompt.contains("Record the observation time."));
+        assert!(prompt.contains("Record verification status and limitations."));
         assert_eq!(
             prompt
                 .matches("Execution persistence and completion:")
@@ -2670,7 +2659,7 @@ mod tests {
                 "POST",
                 "/launch-attempts/external/accept",
                 json!({
-                    "launch_attempt_id":id,"external_session_ref":"lsm-session"
+                    "launch_attempt_id":id,"provider_conversation_ref":"lsm-session"
                 })
             )
             .await
@@ -2686,7 +2675,7 @@ mod tests {
                     .header("content-type", "application/json")
                     .header("X-Agent-Instance-Id", agent.id.to_string())
                     .body(Body::from(
-                        json!({"launch_attempt_id":id,"external_session_ref":"lsm-session"})
+                        json!({"launch_attempt_id":id,"provider_conversation_ref":"lsm-session"})
                             .to_string(),
                     ))
                     .unwrap(),
@@ -2770,7 +2759,7 @@ mod tests {
     #[test]
     fn extracts_codex_thread_id_from_jsonl() {
         assert_eq!(
-            extract_external_session_ref(
+            extract_provider_conversation_ref(
                 "{\"type\":\"thread.started\",\"thread_id\":\"abc-123\"}\n{\"type\":\"item\"}"
             )
             .as_deref(),
@@ -2802,11 +2791,11 @@ mod tests {
             .unwrap();
         let finished = store.get_launch_attempt(attempt.id).await.unwrap();
         assert_eq!(finished.status, "completed");
+        let run = store.get_run(finished.run_id.unwrap()).await.unwrap();
         assert_eq!(
-            finished.external_session_ref.as_deref(),
+            run.provider_conversation_ref.as_deref(),
             Some("fake-session-123")
         );
-        let run = store.get_run(finished.run_id.unwrap()).await.unwrap();
         assert_eq!(run.status, "paused");
         assert_eq!(
             store

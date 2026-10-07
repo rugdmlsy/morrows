@@ -4,10 +4,7 @@ use crate::{
     morrow_runtime::MorrowRuntimeControl,
 };
 use axum::http::request::Parts;
-use morrows_core::{
-    CreateArtifact, CreateDecision, CreateHandoff, CreateMessage, CreateSessionSummaryRevision,
-    CreateThread, SessionHistoryRequest, SessionReply,
-};
+use morrows_core::{CreateArtifact, CreateDecision, CreateHandoff, CreateMessage, CreateThread};
 use morrows_core::{
     CreateTask, Id, RegisterRunJobWait, ReportAgentIdentity, TaskQuery, TaskState,
     UpdateContextRevision,
@@ -237,7 +234,7 @@ Current summary: {}",
             "missing_context": missing, "persisted_package": package_ref, "execution": execution,
             "acceptance_criteria_paths": acceptance_paths,
             "assignment_requests": requests,
-            "workflow": {"claim_open_task":"task_claim", "request_approval":"task_request_assignment", "request_status":"assignment_request_list", "recover_expired_assignment":"assignment_recover", "mandatory_executor_intake":["task_intake_until_project_memory_complete","task_interview_start","multi_turn_task_session_dialog","task_interview_finalize"], "intake_read":"task_intake", "interview_start":"task_interview_start", "interview_dialog":"session_reply", "interview_finalize":"task_interview_finalize", "direct_execution_start":"task_begin_execution", "implementation_authorized_only_when_assignment_phase":"implementing", "persist_milestone":"run_milestone", "handoff_requires_latest_milestone":true, "publish_project_knowledge":"project_memory_publish", "completion_preflight":"run_completion_check", "structured_completion_required_for_executor":context.as_ref().is_some_and(|c| !morrows_core::completion_criteria(&c.constraints).is_empty()), "project_memory_disposition_required_for_executor":task.project_id.is_some()},
+            "workflow": {"claim_open_task":"task_claim", "request_approval":"task_request_assignment", "request_status":"assignment_request_list", "recover_expired_assignment":"assignment_recover", "mandatory_executor_intake":["task_intake_until_project_memory_complete","task_interview_start","multi_turn_task_collaboration_dialog","task_interview_finalize"], "intake_read":"task_intake", "interview_start":"task_interview_start", "interview_dialog":"message_create", "interview_finalize":"task_interview_finalize", "direct_execution_start":"task_begin_execution", "implementation_authorized_only_when_assignment_phase":"implementing", "persist_milestone":"run_milestone", "handoff_requires_latest_milestone":true, "publish_project_knowledge":"project_memory_publish", "completion_preflight":"run_completion_check", "structured_completion_required_for_executor":context.as_ref().is_some_and(|c| !morrows_core::completion_criteria(&c.constraints).is_empty()), "project_memory_disposition_required_for_executor":task.project_id.is_some()},
             "read_more": {"memory": "memory_get", "memory_search": "memory_search", "instructions": "instructions_get", "collaboration": "task_collaboration", "events": "task_events", "execution": "task_get"},
         }).to_string())
     }
@@ -662,11 +659,6 @@ pub struct HandoffIdRequest {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct SessionSummaryRequest {
-    pub session_id: String,
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
 pub struct DeliveryInboxRequest {
     pub limit: Option<i64>,
 }
@@ -676,31 +668,10 @@ pub struct DeliveryAckRequest {
     pub delivery_id: String,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct ReviseSessionSummaryRequest {
-    pub session_id: String,
-    #[serde(default)]
-    pub goal: String,
-    #[serde(default)]
-    pub current_state: String,
-    #[serde(default)]
-    pub important_findings: Vec<String>,
-    #[serde(default)]
-    pub decisions: Vec<String>,
-    #[serde(default)]
-    pub blockers: Vec<String>,
-    #[serde(default)]
-    pub unresolved_questions: Vec<String>,
-    #[serde(default)]
-    pub next_steps: Vec<String>,
-    #[serde(default)]
-    pub deterministic_facts: std::collections::BTreeMap<String, String>,
-}
-
 #[tool_router(router = tool_router)]
 impl MorrowsMcp {
     #[tool(
-        description = "Read a task's prerequisite gate: eligible, waiting, or excluded; includes predecessor conditions and reasons and successor IDs. Conditions use only completed executor Run results."
+        description = "Read a task prerequisite gate. Return eligibility, predecessor conditions, reasons, and successor IDs. Morrows derives conditions only from completed executor Run results."
     )]
     async fn task_gate(
         &self,
@@ -713,7 +684,7 @@ impl MorrowsMcp {
         Ok(json!(self.store.task_gate(id).await.map_err(|e| e.to_string())?).to_string())
     }
     #[tool(
-        description = "List Task Chain metadata, or read one chain's members, DAG edges and prerequisite gates. all/any joins apply to chain edges; legacy dependencies remain unconditional-all."
+        description = "List Task Chain metadata or read one chain. Return members, DAG edges, and prerequisite gates. Chain edges support all and any joins. Legacy dependencies remain unconditional."
     )]
     async fn task_chain_get(
         &self,
@@ -738,7 +709,7 @@ impl MorrowsMcp {
         }
     }
     #[tool(
-        description = "List Task Group metadata, or read one group's independent member tasks and gates. Groups are collections only and create no dependencies or shared Runs."
+        description = "List Task Group metadata or read one group. Return independent member tasks and gates. Groups do not create dependencies or shared Runs."
     )]
     async fn task_group_get(
         &self,
@@ -763,7 +734,7 @@ impl MorrowsMcp {
         }
     }
     #[tool(
-        description = "Add an unconditional legacy prerequisite to a writable task. Rejects cycles; prerequisites must finish before execution."
+        description = "Add an unconditional legacy prerequisite to a writable task. Morrows rejects cycles. The prerequisite must finish before execution."
     )]
     async fn dependency_add(
         &self,
@@ -783,9 +754,7 @@ impl MorrowsMcp {
         )
         .to_string())
     }
-    #[tool(
-        description = "Remove a prerequisite from a writable task using the existing dependency removal semantics."
-    )]
+    #[tool(description = "Remove an unconditional legacy prerequisite from a writable task.")]
     async fn dependency_remove(
         &self,
         Parameters(req): Parameters<DependencyRequest>,
@@ -802,7 +771,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Read or provision a runtime scope owned by the authenticated Agent. For formal Task execution pass run_id only; this requires the active implementing executor and returns the existing Run-owned RuntimeScope. For no-Task temporary work pass adhoc=true plus machine and omit run_id; Morrows reuses the long-lived AgentInstance+Machine ad-hoc RuntimeScope. Ad-hoc access is rejected while this Agent has any active implementing Task Run. No runtime capability or control credential is exposed."
+        description = "Read or provision a RuntimeScope for the authenticated Agent. For Task execution, pass run_id only. Morrows requires the active implementing executor and reuses that Run scope. For temporary work, pass adhoc=true and machine without run_id. Morrows reuses the AgentInstance and Machine ad-hoc scope. Morrows rejects ad-hoc access while the Agent has an implementing Task Run. The result never exposes runtime credentials."
     )]
     async fn runtime_scope_get(
         &self,
@@ -873,7 +842,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Call a shell/job/file execution tool through Morrows -> morrow-runtime. Formal Task mode: pass run_id only and Morrows requires the active implementing executor, reusing that Run-owned RuntimeScope. No-Task temporary mode: omit run_id and pass adhoc=true plus machine; Morrows uses the caller's persistent AgentInstance+Machine ad-hoc RuntimeScope and hard-binds the nested runtime tool to that worker. Ad-hoc mode is rejected while this Agent has an active implementing Task Run. Runtime capabilities/control credentials are never exposed."
+        description = "Call one shell, job, or file tool through morrow-runtime. For Task execution, pass run_id only. Morrows requires the active implementing executor and reuses that Run scope. For temporary work, pass adhoc=true and machine without run_id. Morrows binds the nested tool to that worker. Morrows rejects ad-hoc access while the Agent has an implementing Task Run. The result never exposes runtime credentials."
     )]
     async fn runtime_call(
         &self,
@@ -982,7 +951,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Reset the authenticated Agent's long-lived ad-hoc RuntimeScope for one Machine. The old scope is cleaned/cancelled before Morrows advances the persistent binding generation and provisions a fresh scope. Rejected while this Agent has an active implementing Task Run. The binding remains owned by the caller; no runtime secret is returned."
+        description = "Reset the authenticated Agent ad-hoc RuntimeScope for one Machine. Morrows cleans the old scope before it advances the binding generation. Morrows then provisions a fresh scope. Morrows rejects reset while the Agent has an implementing Task Run. The result never exposes runtime credentials."
     )]
     async fn runtime_scope_reset(
         &self,
@@ -1023,7 +992,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Identify the authenticated technical AgentInstance, trusted authentication provenance, and latest self-reported identity. Self-reported fields are descriptive only and never grant authorization."
+        description = "Return the authenticated AgentInstance, trusted authentication provenance, and latest self-reported identity. Self-reported fields are descriptive. They never grant authorization."
     )]
     async fn whoami(&self, Extension(parts): Extension<Parts>) -> Result<String, String> {
         let agent_id = authenticated_agent(&parts)?;
@@ -1052,7 +1021,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Report your own descriptive identity after querying it from your runtime: agent_name (for example codex-1), account_email, platform (for example codex), and device (for example node-01). Use null when you cannot verify a field. The server binds the report to the authenticated AgentInstance; these values never affect authorization."
+        description = "Report descriptive identity from the current runtime. Report agent_name, account_email, platform, and device. Use null for any value you cannot verify. Morrows binds the report to the authenticated AgentInstance. Reported values never affect authorization."
     )]
     async fn agent_identity_report(
         &self,
@@ -1068,7 +1037,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "List compact task summaries. Defaults to unfinished tasks assigned to the caller, including expired leases. Use scope=all for all tasks, or agent_instance_id for another agent. Filter by project_id/state and follow next_offset."
+        description = "List compact task summaries. By default, return unfinished tasks assigned to the caller, including expired leases. Use scope=all to list all readable tasks. Use agent_instance_id, project_id, or state to filter results. Follow next_offset for more results."
     )]
     async fn task_list(
         &self,
@@ -1126,7 +1095,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "List all project summaries, with description_preview capped at 240 characters and an explicit description_truncated flag. Follow next_offset; project_get returns full background and shared memory."
+        description = "List compact project summaries. Morrows limits description_preview to 240 characters. description_truncated reports whether the preview is incomplete. Follow next_offset for more results. Use project_get for full background and shared memory."
     )]
     async fn project_list(
         &self,
@@ -1146,7 +1115,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Read any project's full background and a page of shared organization/project memory. Defaults to current memory; include_superseded exposes history with provenance. Use task_list(scope=all, project_id=...) to discover its work."
+        description = "Read a Project full background and one page of shared memory. By default, return current memory. Set include_superseded to read retained history with provenance. Use task_list with scope=all and project_id to discover Project tasks."
     )]
     async fn project_get(
         &self,
@@ -1188,7 +1157,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Read fresh task/project background, current context and memory, latest handoff, decisions, artifacts, dependencies and instructions. This is read-only background and does NOT authorize implementation. After taking an executor Assignment, use task_intake to record the mandatory Project Memory + ContextPackage review before the human interview."
+        description = "Read fresh Task and Project background, current context, memory, collaboration, instructions, and execution metadata. This tool only reads data. It does not authorize implementation. After taking an executor Assignment, use task_intake before the Human Interview."
     )]
     async fn task_context(
         &self,
@@ -1202,146 +1171,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "List direct company sessions with queued human messages addressed to the authenticated employee. Returns summaries only; use session_get to load one history."
-    )]
-    async fn session_inbox(&self, Extension(parts): Extension<Parts>) -> Result<String, String> {
-        let value = self
-            .store
-            .agent_session_inbox(authenticated_agent(&parts)?)
-            .await
-            .map_err(|e| e.to_string())?;
-        serde_json::to_string(&value).map_err(|e| e.to_string())
-    }
-
-    #[tool(
-        description = "Read one direct company session addressed to the authenticated employee. History is paged; before_message_id loads older messages and after_message_id loads newer messages."
-    )]
-    async fn session_get(
-        &self,
-        Parameters(req): Parameters<SessionHistoryRequest>,
-        Extension(parts): Extension<Parts>,
-    ) -> Result<String, String> {
-        let before = req.before_message_id.as_deref().map(parse_id).transpose()?;
-        let after = req.after_message_id.as_deref().map(parse_id).transpose()?;
-        let session_id = parse_id(&req.session_id)?;
-        let agent_id = authenticated_agent(&parts)?;
-        let value = self
-            .store
-            .agent_session_history(session_id, agent_id, before, after, req.limit.unwrap_or(80))
-            .await
-            .map_err(|e| e.to_string())?;
-        self.store
-            .acknowledge_session_deliveries(
-                session_id,
-                agent_id,
-                &format!("session_get:{agent_id}"),
-            )
-            .await
-            .map_err(|e| e.to_string())?;
-        serde_json::to_string(&value).map_err(|e| e.to_string())
-    }
-
-    #[tool(
-        description = "Reply to a direct company session addressed to the authenticated employee. The reply marks queued human messages in that session delivered."
-    )]
-    async fn session_reply(
-        &self,
-        Parameters(req): Parameters<SessionReply>,
-        Extension(parts): Extension<Parts>,
-    ) -> Result<String, String> {
-        let value = self
-            .store
-            .agent_reply_session(
-                parse_id(&req.session_id)?,
-                authenticated_agent(&parts)?,
-                &req.body,
-            )
-            .await
-            .map_err(|e| e.to_string())?;
-        serde_json::to_string(&value).map_err(|e| e.to_string())
-    }
-
-    #[tool(
-        description = "Read the latest structured summary revision for a direct company session addressed to the authenticated employee."
-    )]
-    async fn session_summary_get(
-        &self,
-        Parameters(req): Parameters<SessionSummaryRequest>,
-        Extension(parts): Extension<Parts>,
-    ) -> Result<String, String> {
-        let session_id = parse_id(&req.session_id)?;
-        let agent_id = authenticated_agent(&parts)?;
-        let session = self
-            .store
-            .get_session(session_id)
-            .await
-            .map_err(|e| e.to_string())?;
-        if session.agent_instance_id != agent_id {
-            return Err("session belongs to another agent instance".into());
-        }
-        let summary = self
-            .store
-            .get_latest_session_summary_revision(session_id)
-            .await
-            .map_err(|e| e.to_string())?;
-        serde_json::to_string(&summary).map_err(|e| e.to_string())
-    }
-
-    #[tool(
-        description = "Create a new structured summary revision for a direct company session addressed to the authenticated employee. Morrows automatically links the previous summary revision and covers the latest message currently in the session."
-    )]
-    async fn session_summary_revise(
-        &self,
-        Parameters(req): Parameters<ReviseSessionSummaryRequest>,
-        Extension(parts): Extension<Parts>,
-    ) -> Result<String, String> {
-        let session_id = parse_id(&req.session_id)?;
-        let agent_id = authenticated_agent(&parts)?;
-        let session = self
-            .store
-            .get_session(session_id)
-            .await
-            .map_err(|e| e.to_string())?;
-        if session.agent_instance_id != agent_id {
-            return Err("session belongs to another agent instance".into());
-        }
-
-        let previous_revision_id = self
-            .store
-            .get_latest_session_summary_revision(session_id)
-            .await
-            .map_err(|e| e.to_string())?
-            .map(|summary| summary.id);
-        let history = self
-            .store
-            .session_history(session_id, None, None, 1)
-            .await
-            .map_err(|e| e.to_string())?;
-        let covers_until_message_id = history.messages.last().map(|message| message.id);
-
-        let summary = self
-            .store
-            .create_session_summary_revision(CreateSessionSummaryRevision {
-                session_id,
-                previous_revision_id,
-                covers_until_message_id,
-                goal: req.goal,
-                current_state: req.current_state,
-                important_findings: json!(req.important_findings),
-                decisions: json!(req.decisions),
-                blockers: json!(req.blockers),
-                unresolved_questions: json!(req.unresolved_questions),
-                next_steps: json!(req.next_steps),
-                deterministic_facts: json!(req.deterministic_facts),
-                created_by: format!("agent:{agent_id}"),
-            })
-            .await
-            .map_err(|e| e.to_string())?;
-        serde_json::to_string(&summary).map_err(|e| e.to_string())
-    }
-
-    #[tool(
-        description = "List durable Morrows deliveries queued for the authenticated employee. A delivery references an existing session message or launch instruction; process the referenced source and then call delivery_ack."
+        description = "List durable Morrows deliveries queued for the authenticated employee. Each delivery references a Task message or launch instruction. Process that source before delivery_ack."
     )]
     async fn delivery_inbox(
         &self,
@@ -1358,7 +1188,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Acknowledge one durable Morrows delivery after the authenticated employee or its provider bridge has received it. A delivery can only be acknowledged by its target AgentInstance."
+        description = "Acknowledge one durable delivery after the target AgentInstance or provider bridge receives it. Only the target AgentInstance can acknowledge the delivery."
     )]
     async fn delivery_ack(
         &self,
@@ -1379,7 +1209,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Read management instructions for any task. Only the caller's deliveries are acknowledged."
+        description = "Read management instructions for any task. This tool acknowledges only returned deliveries addressed to the caller."
     )]
     async fn instructions_get(
         &self,
@@ -1410,7 +1240,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Atomically accept a pending handoff with a live same-task target run owned by the caller."
+        description = "Accept a pending handoff atomically. The caller must own a live target Run for the same Task."
     )]
     async fn handoff_accept(
         &self,
@@ -1461,7 +1291,7 @@ impl MorrowsMcp {
             .map_err(|e| e.to_string())?;
         serde_json::to_string(&value).map_err(|e| e.to_string())
     }
-    #[tool(description = "Create a durable thread.")]
+    #[tool(description = "Create a durable Task collaboration thread.")]
     async fn thread_create(
         &self,
         Parameters(req): Parameters<CreateThreadRequest>,
@@ -1477,7 +1307,9 @@ impl MorrowsMcp {
             .map_err(|e| e.to_string())?;
         serde_json::to_string(&value).map_err(|e| e.to_string())
     }
-    #[tool(description = "Create a durable message.")]
+    #[tool(
+        description = "Create a durable Task collaboration message. Human and Agent interview replies use the same Task thread."
+    )]
     async fn message_create(
         &self,
         Parameters(req): Parameters<CreateMessageRequest>,
@@ -1503,7 +1335,7 @@ impl MorrowsMcp {
         serde_json::to_string(&value).map_err(|e| e.to_string())
     }
     #[tool(
-        description = "Create a durable handoff. Atomically ends source runs and releases assignment. New handoffs must cite the source Run's latest milestone; that milestone must pin the current task context and already contain every referenced artifact/decision."
+        description = "Create a durable handoff. Morrows ends source Runs and releases the Assignment atomically. Cite the source Run latest milestone. That milestone must pin current Task context. It must already contain every referenced artifact and decision."
     )]
     async fn handoff_create(
         &self,
@@ -1522,7 +1354,7 @@ impl MorrowsMcp {
         serde_json::to_string(&value).map_err(|e| e.to_string())
     }
     #[tool(
-        description = "Read bounded collaboration pages for any task, newest first. Select a section and follow its next_offset to load more."
+        description = "Read bounded collaboration data for any Task, newest first. Select one section. Follow that section next_offset to read more."
     )]
     async fn task_collaboration(
         &self,
@@ -1545,7 +1377,7 @@ impl MorrowsMcp {
         serde_json::to_string(&value).map_err(|e| e.to_string())
     }
     #[tool(
-        description = "Read a handoff with its pinned context revision and referenced artifacts/decisions for continuation without shared chat history."
+        description = "Read a handoff for continuation without provider chat history. The result includes its pinned ContextRevision and referenced artifacts and decisions."
     )]
     async fn handoff_get(
         &self,
@@ -1564,7 +1396,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Read any task by ID with paged assignment metadata, task-wide immutable milestones, and the caller's private Run/checkpoint details. Milestones are visible immediately as task execution history and do not require project-memory publication. Successor recovery includes the predecessor's latest milestone when available. Use task_context for project background and working context."
+        description = "Read any Task by ID. Return paged Assignment metadata and task-wide immutable milestones. Also return caller-private Run and checkpoint details. Milestones are Task execution history, not Project Memory. Successor recovery includes the predecessor latest milestone when available. Use task_context for Project background and working context."
     )]
     async fn task_get(
         &self,
@@ -1596,7 +1428,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Submit a work request to Morrows for company scheduling. Describe goals, constraints, acceptance criteria, evidence requirements, and known uncertainties; do NOT predefine Human Interview questions or turn the task description into a fixed interview checklist. Clarification belongs to the executor after it has read Project Memory, ContextPackage, task evidence, and relevant repo/runtime state; it should ask only material questions that remain unresolved and must not repeat facts already established by context. Optionally bind the task atomically to an existing visible Project with project_id; omit project_id to create an explicitly unbound task. Invalid or unavailable Project IDs are rejected and never fall back to unbound. The caller becomes the request owner; employees cannot set dispatch priority or choose an assignee/launcher."
+        description = "Submit a work request for company scheduling. Describe goals, constraints, acceptance criteria, evidence requirements, and known uncertainties. Do NOT predefine Human Interview questions. The executor derives material questions after reading current context and runtime evidence. Supply project_id to bind an existing visible Project. Omit project_id to create an unbound Task. Morrows rejects unavailable Project IDs. The caller becomes the request owner. Employees cannot choose priority, assignee, or launcher."
     )]
     async fn work_request_submit(
         &self,
@@ -1634,7 +1466,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Create a new first-class rework task for a completed task you own, were assigned to, or can write through an open Task Session. The source task remains done. The new task inherits the source Project, assignment mode and priority (including the dispatch policy when dispatch-managed), records a rework_of relationship/rework round, and its ContextPackage will include the source completion Run/result, latest milestone, artifacts and decisions. Use this for genuine rework; mistaken completion reversal is an operator-only reopen action."
+        description = "Create a first-class rework Task for completed work that you own or previously executed. The source Task remains done. The new Task inherits Project, assignment mode, and priority. Dispatch-managed Tasks also inherit dispatch policy. Morrows records the rework relationship and round. The new ContextPackage includes source completion evidence. Use operator reopen only for mistaken completion."
     )]
     async fn task_rework_create(
         &self,
@@ -1662,7 +1494,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Assign, change, or clear the Project of an existing task published by the authenticated agent. Changing Project invalidates any pre-implementation intake/interview receipts tied to the old Project. Reassignment is refused during active implementation or after project memory has been published from the task."
+        description = "Assign, change, or clear the Project for a Task published by the authenticated Agent. A Project change invalidates pre-implementation intake receipts for the old Project. Morrows rejects reassignment during implementation. Morrows also rejects reassignment after this Task publishes Project Memory."
     )]
     async fn task_project_set(
         &self,
@@ -1683,7 +1515,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Withdraw a task previously published by the authenticated agent. Default behavior is durable cancellation. Set delete=true only for a pristine, unstarted task; hard delete is refused once assignments, Task Sessions, context, or dependent records exist."
+        description = "Withdraw a Task published by the authenticated Agent. By default, Morrows records durable cancellation. Request permanent erasure only for a pristine unstarted Task. Morrows rejects permanent erasure after assignments, message threads, context, or dependent records exist."
     )]
     async fn task_withdraw(
         &self,
@@ -1704,7 +1536,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Fallback for stale MCP client tool lists. Call any currently registered Morrows employee tool by its live backend name without waiting for the client to refresh tools/list. Use tool_name=__list_tools__ with empty arguments to retrieve the backend's current tool names and schemas. The fallback cannot invoke itself."
+        description = "Call a currently registered employee tool when the client tool list is stale. Supply the live backend tool name and arguments. Use tool_name=__list_tools__ with empty arguments to read current names and schemas. This fallback cannot call itself."
     )]
     async fn arbitrary_tool_call(
         &self,
@@ -1744,7 +1576,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Renew an active assignment lease owned by the authenticated agent instance."
+        description = "Renew an active Assignment lease owned by the authenticated AgentInstance."
     )]
     async fn assignment_renew(
         &self,
@@ -1761,7 +1593,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Atomically recover the authenticated agent's own expired executor Assignment and its existing non-terminal Run without creating a new Run. Requires the original assignment_id and run_id plus an audit reason. The Task must still be in_progress, the Run must still be running or paused, the lease must actually be expired, and no other active executor Assignment may exist. Concurrent recovery has one winner; use assignment_renew instead when the lease is still live."
+        description = "Recover the authenticated Agent own expired executor Assignment and existing non-terminal Run atomically. Supply the original assignment_id, run_id, lease duration, and audit reason. The Task must remain in_progress. The Run must remain running or paused. The lease must already be expired. Morrows rejects recovery when another active executor exists. Concurrent recovery has one winner. Use assignment_renew for a live lease."
     )]
     async fn assignment_recover(
         &self,
@@ -1783,7 +1615,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Persist an immutable Run milestone and atomically refresh the Run's latest checkpoint. Use after a substantive subgoal, before a long/risky operation, when provider/token budget is under pressure, and immediately before handoff. Include exact next_step, ordered next_plan, execution_locations, and relevant same-task evidence IDs."
+        description = "Persist an immutable Run milestone and refresh the Run latest checkpoint atomically. Use it after a substantive subgoal or verification batch. Also use it before risky operations, under provider budget pressure, and before handoff. Include next_step, ordered next_plan, execution_locations, and relevant same-Task evidence IDs."
     )]
     async fn run_milestone(
         &self,
@@ -1803,7 +1635,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Persist a durable checkpoint for a run owned by the authenticated agent instance."
+        description = "Persist a durable checkpoint for a Run owned by the authenticated AgentInstance."
     )]
     async fn run_checkpoint(
         &self,
@@ -1820,7 +1652,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Put the authenticated caller's current managed-runtime Run into a durable wait for one tracked runtime job. This records the machine, job ID, internal RuntimeBinding scope, reason, and exact resume plan. The RuntimeBinding is an implementation detail; Task/Assignment/Run remain the work lifecycle. After registration, persist any final checkpoint/milestone needed and end this Agent turn without calling run_complete; Morrows will resume the same Run and provider thread when the terminal event arrives. lost resumes in reconciliation mode and is never treated as success."
+        description = "Put the caller current managed-runtime Run into a durable wait for one tracked runtime job. Record machine, job ID, RuntimeScope, reason, and exact resume plan. Task, Assignment, and Run remain the work lifecycle. Persist final continuation state before ending the Agent turn. Morrows resumes the same Run and provider conversation after the terminal event. A lost job resumes in reconciliation mode and never implies success."
     )]
     async fn task_wait_for_job(
         &self,
@@ -1840,7 +1672,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Complete an owned run. Project-backed executor tasks must explicitly supply memory_disposition: published/updated with same-task project MemoryEntry IDs, or not_applicable with a rationale. Executor tasks with acceptance_criteria/freeze_requires also require a current-context completion report with every criterion passed, rationale and same-task artifact references. If the run produced a human-readable experiment/research/final report, optionally supply report_path with its actual path or URI; this is recorded for discovery but is not a completion requirement or acceptance evidence by itself. Use run_completion_check first. Validation is atomic; failure leaves state unchanged."
+        description = "Complete an owned Run. Project-backed executor Tasks require an explicit memory_disposition. Use published or updated with same-Task MemoryEntry IDs. Otherwise use not_applicable with a rationale. Structured acceptance Tasks also require one passed result per original criterion. Each result needs rationale and same-Task artifact references. You can supply report_path for an existing human-readable report. report_path is optional metadata, not acceptance evidence. Call run_completion_check first. Morrows applies completion atomically."
     )]
     async fn run_complete(
         &self,
@@ -1858,7 +1690,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Read-only completion preflight for an owned run. Omit result/completion/memory_disposition/report_path to discover exact saved criteria, completion_template, memory_disposition_template and blockers. Project-backed executor tasks must explicitly publish/update durable project knowledge or justify not_applicable. Supply a proposed report/disposition to validate it. If the run produced a human-readable experiment/research/final report, report_path may optionally record its actual path or URI; it is not required and does not satisfy acceptance criteria by itself. Does not complete, claim, acknowledge or verify content truth; run_complete repeats validation atomically."
+        description = "Run a read-only completion preflight for an owned Run. Omit proposed completion fields to read saved criteria, templates, and blockers. Project-backed executor Tasks must publish durable Project knowledge or justify not_applicable. Supply a proposed completion report and disposition for preflight evaluation. report_path can record an existing report path or URI. It does not satisfy acceptance criteria by itself. This tool never completes the Run or proves content truth. run_complete repeats the preflight requirements atomically."
     )]
     async fn run_completion_check(
         &self,
@@ -1881,7 +1713,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Lexically search current shared project memory for any readable task using ripgrep over a derived read-only projection, then return authoritative current Morrows MemoryEntry records. Ranking prefers exact phrase matches, then number of matched query terms, match count and recency. Milestones are task execution history and are read through task_get/task_context, not this memory search."
+        description = "Search current shared Project Memory for a readable Task with ripgrep over the derived projection. Return authoritative current MemoryEntry records. Ranking prefers exact phrases, matched query terms, match count, and recency. Read milestones through task_get or task_context instead."
     )]
     async fn memory_search(
         &self,
@@ -1909,7 +1741,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Publish durable knowledge directly to the source task's project. Requires task ownership, assignment history or an open Task Session. Project/author are server-bound; context revision and evidence references are checked. Preserve verification limits in basis/content. Revisions retain the old entry; stale supersession is rejected. Retry with the same idempotency_key and payload."
+        description = "Publish durable knowledge to the source Task Project. The caller needs Task ownership or assignment history. Morrows binds the Project and author. Morrows enforces ContextRevision and evidence-reference requirements. Preserve uncertainty and verification limits in basis and content. Revisions retain the old entry. Morrows rejects stale supersession. Retry one publication with the same idempotency_key and payload."
     )]
     async fn project_memory_publish(
         &self,
@@ -1927,7 +1759,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Atomically claim an open task for the authenticated AgentInstance and start an intake Run. Executor claims begin in phase=context_review: the Run may read Morrows context and conduct a multi-turn Human Interview, but it does NOT authorize implementation or managed-runtime execution. Next call task_intake until Project Memory is fully read, then task_interview_start and use session_reply in the returned Task Session until the conversation converges. Only tasks with assignment_mode=open can be self-claimed; approval tasks use task_request_assignment and dispatch tasks are control-plane managed."
+        description = "Claim an open Task atomically and create an intake Run. Executor claims enter phase=context_review. This phase permits context review and the Human Interview only. It does not authorize implementation or managed-runtime execution. Call task_intake until Project Memory is complete. Then call task_interview_start and use Task collaboration for persisted interview messages. Finalize the interview before implementation. Only open Tasks support self-claim. Use task_request_assignment for approval Tasks. The control plane manages dispatch Tasks."
     )]
     async fn task_claim(
         &self,
@@ -1950,7 +1782,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Mandatory executor intake read. Returns the task's Project background, a bounded page of current Project/organization memory, and a fresh current ContextPackage, and records server-side read receipts pinned to the Project memory head and task context revision. Follow project_memory.next_offset with the same task until it is null. This does not authorize implementation."
+        description = "Perform the mandatory executor intake read. Return Project background, one bounded Project Memory page, and a fresh ContextPackage. Record read receipts pinned to the Project Memory head and Task ContextRevision. Follow project_memory.next_offset with the same Task until it is null. This tool does not authorize implementation."
     )]
     async fn task_intake(
         &self,
@@ -1971,7 +1803,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Start or resume the mandatory Human Interview after task_intake has fully read current Project Memory and ContextPackage. Morrows binds the Assignment to its durable Task Session and moves it to human_interview, but the actual discussion may continue either in that Session or in the Agent's current provider conversation. The executor must derive questions from the current context; publisher-authored uncertainties are requirements to resolve, not a preset questionnaire. Ask only material unresolved details and do not repeat facts already established. When the executor judges the interview converged, use task_interview_finalize; Session message evidence is optional. There is no separate operator approval step."
+        description = "Enter or resume the mandatory Human Interview after intake reads current Project Memory and ContextPackage. Morrows binds the Assignment to its Task collaboration thread. Morrows moves the Assignment to human_interview. The discussion can continue in Task collaboration or the current provider conversation. Derive questions from current context. Treat publisher uncertainties as requirements to resolve, not a preset questionnaire. Ask only material unresolved questions. Use task_interview_finalize when the interview converges. Task message IDs are optional audit evidence. There is no separate operator approval step."
     )]
     async fn task_interview_start(
         &self,
@@ -1987,7 +1819,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Declare the Human Interview converged after you have reconciled the task with the Human and have no unresolved material questions. Morrows revalidates current Project Memory/ContextPackage receipts, requires a non-empty understanding and implementation plan plus unresolved_questions=[], then marks the Assignment ready. final_summary_message_id and confirmation_message_id are optional audit metadata only; they are not required and the discussion may have happened in the current provider chat rather than the Morrows Task Session. Managed Morrows launches automatically switch runtimes after the intake process exits."
+        description = "Declare the Human Interview converged when no material questions remain. Morrows re-enforces current Project Memory and ContextPackage receipts. Supply a nonempty understanding and implementation plan. Supply unresolved_questions as an empty list. final_summary_message_id and confirmation_message_id are optional audit metadata. Provider-only discussion remains valid without those IDs. Managed launches switch to implementation after the intake process exits."
     )]
     async fn task_interview_finalize(
         &self,
@@ -2022,7 +1854,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Explicitly transition a converged ready Assignment to implementing for a direct/external Agent that is not managed by the Morrows launcher. Managed Morrows launches perform this transition automatically when they start the implementation runtime. Calls before conversational convergence or after stale context/memory are rejected."
+        description = "Transition a converged ready Assignment to implementing for a direct external Agent. Managed Morrows launches perform this transition when they create the implementation runtime. Morrows rejects calls before convergence. Morrows also rejects calls after relevant context or memory changes."
     )]
     async fn task_begin_execution(
         &self,
@@ -2040,7 +1872,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Request a role on an approval-mode task without creating a duplicate task or claiming it. Persists a pending request visible in the control-plane queue; approval creates/reuses an assignment but does not start a Run. Open tasks should use task_claim; dispatch tasks do not accept employee requests. Exact pending retries reuse the request."
+        description = "Request a role on an approval Task without creating a duplicate Task or claiming it immediately. Morrows records a pending control-plane request. Approval creates or reuses an Assignment. Open Tasks use task_claim. Dispatch Tasks reject employee assignment requests. An identical pending retry reuses the request."
     )]
     async fn task_request_assignment(
         &self,
@@ -2063,7 +1895,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Page the caller's assignment requests, optionally filtered by task. Defaults to pending; include_resolved returns approvals, rejection reasons, withdrawn history and assignment IDs. Read-only; no automatic dispatch or acknowledgement."
+        description = "List the caller assignment requests. You can filter by Task. By default, return pending requests. Set include_resolved to include approvals, rejection reasons, withdrawals, and Assignment IDs. This tool only reads data. It does not dispatch work."
     )]
     async fn assignment_request_list(
         &self,
@@ -2087,7 +1919,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Withdraw the caller's own pending assignment request with a reason. Preserves history, does not release assignments, and cannot undo an approval or withdraw another Agent's request."
+        description = "Withdraw the caller own pending assignment request and record a reason. Morrows preserves request history. This does not release an Assignment. It cannot undo approval or withdraw another AgentInstance request."
     )]
     async fn assignment_request_withdraw(
         &self,
@@ -2111,7 +1943,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Read a task's current context and visible long-term memory. include_superseded retrieves replaced memory; include_context_history pages full context revisions; context_revision_id selects one revision. Each history keeps its provenance. Message history is available through task_collaboration."
+        description = "Read a Task current context and visible long-term memory. Set include_superseded to read replaced memory. Set include_context_history to page full ContextRevisions. Set context_revision_id to select one revision. Returned history includes provenance. Use task_collaboration for message history."
     )]
     async fn memory_get(
         &self,
@@ -2179,7 +2011,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Patch shared task working memory with a new immutable revision. Omitted fields are preserved; constraint objects merge recursively. Supply expected_context_revision_id to reject stale updates. Requires task ownership, assignment history, or an open Task Session; this does not update project memory."
+        description = "Patch shared Task working memory with a new immutable ContextRevision. Omitted fields stay unchanged. Constraint objects merge recursively. Supply expected_context_revision_id to reject stale updates. The caller needs Task ownership or assignment history. This tool does not update Project Memory."
     )]
     async fn memory_revise(
         &self,
@@ -2212,7 +2044,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Read a page of task events, newest first. Optionally filter by event_type; follow next_offset."
+        description = "Read Task events newest first. You can filter by event_type. Follow next_offset to read more."
     )]
     async fn task_events(
         &self,
@@ -2236,7 +2068,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Read the latest persisted context package for any task; may be stale. If absent, returns null without writing. Start with task_context for fresh background."
+        description = "Read the latest persisted ContextPackage for any Task. The package can be stale. Return null when no package exists. This tool does not write. Read task_context first for fresh background."
     )]
     async fn context_package_get(
         &self,
@@ -2255,7 +2087,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Assemble and persist a fresh ContextPackage snapshot from current task state, decisions, artifacts, and handoffs."
+        description = "Assemble and persist a fresh ContextPackage from current Task state, decisions, artifacts, and handoffs."
     )]
     async fn context_package_assemble(
         &self,
@@ -2448,62 +2280,6 @@ mod tests {
         assert!(empty.result_with_completion().is_err());
     }
 
-    #[tokio::test]
-    async fn task_scoped_session_grants_explicit_task_access() {
-        let store = Store::connect("sqlite::memory:").await.unwrap();
-        let agent = store.register_agent("session-reader", &[]).await.unwrap();
-        let task = store
-            .create_task(
-                serde_json::from_value(json!({
-                    "title": "Scoped task",
-                    "description": "Share through a Session"
-                }))
-                .unwrap(),
-            )
-            .await
-            .unwrap();
-        let mcp = MorrowsMcp::new(store.clone());
-
-        assert!(
-            mcp.ensure_task_write_access(task.id, agent.id)
-                .await
-                .is_err()
-        );
-
-        let session = store
-            .create_scoped_session(
-                morrows_core::CreateSession {
-                    agent_instance_id: agent.id,
-                    title: "Task discussion".into(),
-                },
-                None,
-                Some(task.id),
-            )
-            .await
-            .unwrap();
-        assert!(
-            mcp.ensure_task_write_access(task.id, agent.id)
-                .await
-                .is_ok()
-        );
-
-        store
-            .update_session_scope(
-                session.id,
-                morrows_core::UpdateSessionScope {
-                    project_id: None,
-                    task_id: None,
-                },
-            )
-            .await
-            .unwrap();
-        assert!(
-            mcp.ensure_task_write_access(task.id, agent.id)
-                .await
-                .is_err()
-        );
-    }
-
     #[test]
     fn eager_tool_list_refresh_skips_codex_but_keeps_connector_compatibility() {
         assert!(!should_eager_tool_list_refresh("codex-mcp-client"));
@@ -2535,9 +2311,6 @@ mod tests {
         let store = Store::connect("sqlite::memory:").await.unwrap();
         let mcp = MorrowsMcp::new(store);
         for name in [
-            "session_inbox",
-            "session_get",
-            "session_reply",
             "work_request_submit",
             "task_rework_create",
             "task_project_set",
@@ -2583,8 +2356,6 @@ mod tests {
             "assignment_request_list",
             "assignment_request_withdraw",
             "task_events",
-            "session_summary_get",
-            "session_summary_revise",
             "delivery_inbox",
             "delivery_ack",
             "context_package_get",
@@ -2596,6 +2367,11 @@ mod tests {
             );
         }
         for name in [
+            "session_inbox",
+            "session_get",
+            "session_reply",
+            "session_summary_get",
+            "session_summary_revise",
             "conversation_inbox",
             "conversation_get",
             "conversation_reply",
@@ -2628,199 +2404,6 @@ mod tests {
                 "control-plane tool leaked into employee MCP: {name}"
             );
         }
-    }
-
-    #[tokio::test]
-    async fn direct_sessions_are_scoped_to_the_addressed_employee() {
-        let store = Store::connect("sqlite::memory:").await.unwrap();
-        let a = store.register_agent("chat-a", &[]).await.unwrap();
-        let b = store.register_agent("chat-b", &[]).await.unwrap();
-        let session = store
-            .create_session(morrows_core::CreateSession {
-                agent_instance_id: a.id,
-                title: "Direct".into(),
-            })
-            .await
-            .unwrap();
-        store
-            .create_human_session_message(session.id, "hello")
-            .await
-            .unwrap();
-        let mcp = MorrowsMcp::new(store.clone());
-
-        let inbox: Value = serde_json::from_str(
-            &mcp.session_inbox(Extension(parts(Some(a.id))))
-                .await
-                .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(inbox.as_array().unwrap().len(), 1);
-
-        let deliveries: Value = serde_json::from_str(
-            &mcp.delivery_inbox(
-                Parameters(DeliveryInboxRequest { limit: Some(20) }),
-                Extension(parts(Some(a.id))),
-            )
-            .await
-            .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(deliveries.as_array().unwrap().len(), 1);
-        let delivery_id = deliveries[0]["id"].as_str().unwrap().to_owned();
-        assert!(
-            mcp.delivery_ack(
-                Parameters(DeliveryAckRequest {
-                    delivery_id: delivery_id.clone(),
-                }),
-                Extension(parts(Some(b.id))),
-            )
-            .await
-            .is_err()
-        );
-        let delivered: Value = serde_json::from_str(
-            &mcp.delivery_ack(
-                Parameters(DeliveryAckRequest { delivery_id }),
-                Extension(parts(Some(a.id))),
-            )
-            .await
-            .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(delivered["status"], "delivered");
-
-        store
-            .create_human_session_message(session.id, "follow-up")
-            .await
-            .unwrap();
-        assert_eq!(store.agent_delivery_inbox(a.id, 20).await.unwrap().len(), 1);
-
-        assert!(
-            mcp.session_get(
-                Parameters(SessionHistoryRequest {
-                    session_id: session.id.to_string(),
-                    before_message_id: None,
-                    after_message_id: None,
-                    limit: Some(20),
-                }),
-                Extension(parts(Some(b.id))),
-            )
-            .await
-            .is_err()
-        );
-        mcp.session_get(
-            Parameters(SessionHistoryRequest {
-                session_id: session.id.to_string(),
-                before_message_id: None,
-                after_message_id: None,
-                limit: Some(20),
-            }),
-            Extension(parts(Some(a.id))),
-        )
-        .await
-        .unwrap();
-        assert!(
-            store
-                .agent_delivery_inbox(a.id, 20)
-                .await
-                .unwrap()
-                .is_empty()
-        );
-
-        mcp.session_reply(
-            Parameters(SessionReply {
-                session_id: session.id.to_string(),
-                body: "hi".into(),
-            }),
-            Extension(parts(Some(a.id))),
-        )
-        .await
-        .unwrap();
-        assert!(store.agent_session_inbox(a.id).await.unwrap().is_empty());
-
-        // session_summary_get: other agent cannot access
-        assert!(
-            mcp.session_summary_get(
-                Parameters(SessionSummaryRequest {
-                    session_id: session.id.to_string(),
-                }),
-                Extension(parts(Some(b.id))),
-            )
-            .await
-            .is_err()
-        );
-
-        // session_summary_get: owner agent gets null when none exists
-        let none_summary = mcp
-            .session_summary_get(
-                Parameters(SessionSummaryRequest {
-                    session_id: session.id.to_string(),
-                }),
-                Extension(parts(Some(a.id))),
-            )
-            .await
-            .unwrap();
-        assert_eq!(none_summary, "null");
-
-        // Other agents cannot revise this session summary.
-        assert!(
-            mcp.session_summary_revise(
-                Parameters(ReviseSessionSummaryRequest {
-                    session_id: session.id.to_string(),
-                    goal: "Wrong owner".into(),
-                    current_state: "Should fail".into(),
-                    important_findings: vec![],
-                    decisions: vec![],
-                    blockers: vec![],
-                    unresolved_questions: vec![],
-                    next_steps: vec![],
-                    deterministic_facts: Default::default(),
-                }),
-                Extension(parts(Some(b.id))),
-            )
-            .await
-            .is_err()
-        );
-
-        // The addressed agent can create a summary; Morrows pins it to the latest message.
-        let rev: Value = serde_json::from_str(
-            &mcp.session_summary_revise(
-                Parameters(ReviseSessionSummaryRequest {
-                    session_id: session.id.to_string(),
-                    goal: "Resolve support inquiry".into(),
-                    current_state: "Assisted".into(),
-                    important_findings: vec!["Human asked for help".into()],
-                    decisions: vec!["Responded directly".into()],
-                    blockers: vec![],
-                    unresolved_questions: vec![],
-                    next_steps: vec!["Wait for follow-up".into()],
-                    deterministic_facts: std::collections::BTreeMap::from([(
-                        "reply_sent".into(),
-                        "true".into(),
-                    )]),
-                }),
-                Extension(parts(Some(a.id))),
-            )
-            .await
-            .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(rev["goal"], "Resolve support inquiry");
-        assert_eq!(rev["created_by"], format!("agent:{}", a.id));
-        assert!(rev["covers_until_message_id"].is_string());
-
-        let got_summary: Value = serde_json::from_str(
-            &mcp.session_summary_get(
-                Parameters(SessionSummaryRequest {
-                    session_id: session.id.to_string(),
-                }),
-                Extension(parts(Some(a.id))),
-            )
-            .await
-            .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(got_summary["id"], rev["id"]);
-        assert_eq!(got_summary["goal"], "Resolve support inquiry");
     }
 
     #[tokio::test]
@@ -3448,9 +3031,15 @@ mod tests {
         assert_eq!(continued["next_step"], recovered_next);
         assert_eq!(continued["next_plan"], json!(recovered_plan));
 
-        // No Session was used: cross-agent continuation came from milestone/project memory,
-        // not copied conversation history.
-        assert!(store.list_sessions(None).await.unwrap().is_empty());
+        // Cross-agent continuation came from milestone/project memory, not copied
+        // provider conversation history or a Morrows-owned Session aggregate.
+        assert!(
+            store
+                .task_agent_thread(task_b.id, agent_b.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -3523,7 +3112,7 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(denied.contains("not owned by, assigned to, or shared"));
+        assert!(denied.contains("not owned by or assigned to"));
 
         let created: Value = serde_json::from_str(
             &mcp.task_rework_create(
@@ -3554,7 +3143,7 @@ mod tests {
 
         let tools = serde_json::to_string(&mcp.tool_router.list_all()).unwrap();
         assert!(
-            tools.contains("do NOT predefine Human Interview questions"),
+            tools.contains("Do NOT predefine Human Interview questions"),
             "work_request_submit must tell publishers not to script the interview"
         );
         assert!(

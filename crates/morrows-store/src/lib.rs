@@ -300,18 +300,18 @@ impl Store {
                     .fetch_one(&mut *tx)
                     .await
                     .map_err(storage)?;
-            let session_count: i64 =
-                sqlx::query_scalar("SELECT COUNT(*) FROM sessions WHERE task_id=?")
+            let thread_count: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM message_threads WHERE task_id=?")
                     .bind(task_id.to_string())
                     .fetch_one(&mut *tx)
                     .await
                     .map_err(storage)?;
             if assignment_count != 0
-                || session_count != 0
+                || thread_count != 0
                 || task.current_context_revision_id.is_some()
             {
                 return Err(DomainError::Conflict(
-                    "hard delete is only allowed for an unstarted published task with no assignment, Task Session, or context history; use withdraw instead".into(),
+                    "hard delete is only allowed for an unstarted published task with no assignment, message thread, or context history; use withdraw instead".into(),
                 ));
             }
             let deleted = sqlx::query("DELETE FROM tasks WHERE id=?")
@@ -403,7 +403,6 @@ impl Store {
         )?;
         let has_history: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM assignments WHERE task_id=?)
-                OR EXISTS(SELECT 1 FROM sessions WHERE task_id=?)
                 OR EXISTS(SELECT 1 FROM context_revisions WHERE task_id=?)
                 OR EXISTS(SELECT 1 FROM assignment_requests WHERE task_id=?)
                 OR EXISTS(SELECT 1 FROM artifacts WHERE task_id=?)
@@ -414,7 +413,6 @@ impl Store {
                 OR EXISTS(SELECT 1 FROM task_relationships WHERE source_task_id=? OR target_task_id=?)
                 OR EXISTS(SELECT 1 FROM run_milestones WHERE task_id=?)",
         )
-        .bind(task_id.to_string())
         .bind(task_id.to_string())
         .bind(task_id.to_string())
         .bind(task_id.to_string())
@@ -1065,7 +1063,7 @@ impl Store {
         &self,
         assignment_id: Id,
         actor_agent_id: Id,
-        external_session_ref: Option<String>,
+        provider_conversation_ref: Option<String>,
     ) -> Result<Run, DomainError> {
         let mut tx = self
             .pool
@@ -1077,7 +1075,7 @@ impl Store {
             &mut tx,
             assignment_id,
             actor_agent_id,
-            external_session_ref,
+            provider_conversation_ref,
             true,
         )
         .await?;
@@ -1583,7 +1581,7 @@ fn row_to_run(row: sqlx::sqlite::SqliteRow) -> Result<Run, DomainError> {
         task_id: parse_id(row.try_get("task_id").map_err(storage)?)?,
         assignment_id: parse_id(row.try_get("assignment_id").map_err(storage)?)?,
         agent_instance_id: parse_id(row.try_get("agent_instance_id").map_err(storage)?)?,
-        external_session_ref: row.try_get("external_session_ref").map_err(storage)?,
+        provider_conversation_ref: row.try_get("provider_conversation_ref").map_err(storage)?,
         failure_reason: if status == "failed" {
             stop_reason.clone()
         } else {
@@ -1662,8 +1660,7 @@ mod dispatch;
 
 mod launch;
 
-mod session;
-mod session_runtime;
+mod task_message;
 
 mod context_package;
 
@@ -1681,7 +1678,7 @@ async fn start_run_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     assignment_id: Id,
     actor_agent_id: Id,
-    external_session_ref: Option<String>,
+    provider_conversation_ref: Option<String>,
     enforce_intake: bool,
 ) -> Result<Run, DomainError> {
     let row = sqlx::query(
@@ -1743,14 +1740,14 @@ async fn start_run_tx(
             .flatten();
 
     sqlx::query(
-        "INSERT INTO runs(id,task_id,assignment_id,agent_instance_id,external_session_ref,status,started_at)
+        "INSERT INTO runs(id,task_id,assignment_id,agent_instance_id,provider_conversation_ref,status,started_at)
          VALUES(?,?,?,?,?,'running',?)",
     )
     .bind(id.to_string())
     .bind(task_id.to_string())
     .bind(assignment_id.to_string())
     .bind(agent_id.to_string())
-    .bind(&external_session_ref)
+    .bind(&provider_conversation_ref)
     .bind(now.to_rfc3339())
     .execute(&mut **tx)
     .await
@@ -1789,7 +1786,7 @@ async fn start_run_tx(
         task_id,
         assignment_id,
         agent_instance_id: agent_id,
-        external_session_ref,
+        provider_conversation_ref,
         status: "running".into(),
         stop_reason: None,
         failure_reason: None,

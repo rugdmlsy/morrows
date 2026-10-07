@@ -73,7 +73,7 @@ fn finalize_attested() -> InterviewFinalize {
 }
 
 #[tokio::test]
-async fn executor_can_attest_convergence_without_morrows_session_messages() {
+async fn executor_can_attest_convergence_without_persisted_interview_messages() {
     let (store, _project, agent, task) = fixture().await;
     let claim = store
         .claim_task_for_execution(task.id, agent.id, "executor", 300)
@@ -87,12 +87,9 @@ async fn executor_can_attest_convergence_without_morrows_session_messages() {
         .start_intake_interview(task.id, agent.id)
         .await
         .unwrap();
-    let session_id = started.interview_session_id.unwrap();
-    let history = store
-        .agent_session_history(session_id, agent.id, None, None, 20)
-        .await
-        .unwrap();
-    assert!(history.messages.is_empty());
+    let thread_id = started.interview_thread_id.unwrap();
+    let history = store.thread_messages(thread_id).await.unwrap();
+    assert!(history.is_empty());
 
     let converged = store
         .finalize_intake_interview(task.id, agent.id, finalize_attested())
@@ -101,7 +98,15 @@ async fn executor_can_attest_convergence_without_morrows_session_messages() {
     assert_eq!(converged.conversation_state, INTERVIEW_STATE_CONVERGED);
     assert_eq!(converged.final_summary_message_id, None);
     assert_eq!(converged.confirmation_message_id, None);
-    assert_eq!(store.get_session(session_id).await.unwrap().status, "open");
+    assert_eq!(
+        store
+            .task_agent_thread(task.id, agent.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        thread_id
+    );
     assert_eq!(
         store
             .get_assignment(claim.assignment.id)
@@ -113,8 +118,14 @@ async fn executor_can_attest_convergence_without_morrows_session_messages() {
     let implementing = store.begin_task_execution(task.id, agent.id).await.unwrap();
     assert_eq!(implementing.phase, INTAKE_PHASE_IMPLEMENTING);
     assert_eq!(
-        store.get_session(session_id).await.unwrap().status,
-        "archived"
+        store
+            .task_agent_thread(task.id, agent.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        thread_id,
+        "the Task collaboration transcript remains durable after implementation starts"
     );
 }
 
@@ -148,7 +159,7 @@ async fn open_claim_requires_multi_turn_human_interview_before_implementation() 
         .start_intake_interview(task.id, agent.id)
         .await
         .unwrap();
-    let session_id = started.interview_session_id.unwrap();
+    let thread_id = started.interview_thread_id.unwrap();
     assert_eq!(
         started.conversation_state,
         INTERVIEW_STATE_WAITING_FOR_AGENT
@@ -163,8 +174,8 @@ async fn open_claim_requires_multi_turn_human_interview_before_implementation() 
     );
 
     store
-        .agent_reply_session(
-            session_id,
+        .agent_reply_task_thread(
+            thread_id,
             agent.id,
             "I need one detail before implementation: which compatibility behavior must be preserved?",
         )
@@ -180,7 +191,12 @@ async fn open_claim_requires_multi_turn_human_interview_before_implementation() 
     );
 
     store
-        .create_human_session_message(session_id, "Preserve existing operator recovery behavior.")
+        .create_human_task_message(
+            task.id,
+            agent.id,
+            "Preserve existing operator recovery behavior.",
+            None,
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -193,8 +209,8 @@ async fn open_claim_requires_multi_turn_human_interview_before_implementation() 
     );
 
     store
-        .agent_reply_session(
-            session_id,
+        .agent_reply_task_thread(
+            thread_id,
             agent.id,
             "Final synthesis: preserve operator recovery behavior; inspect, implement, then run the acceptance tests.",
         )
@@ -224,7 +240,7 @@ async fn open_claim_requires_multi_turn_human_interview_before_implementation() 
     // A new Human message before implementation reopens the interview instead of
     // letting an already-converged plan race into execution.
     store
-        .create_human_session_message(session_id, "再补充一点：保留旧日志格式。")
+        .create_human_task_message(task.id, agent.id, "再补充一点：保留旧日志格式。", None)
         .await
         .unwrap();
     let reopened = store
@@ -246,8 +262,8 @@ async fn open_claim_requires_multi_turn_human_interview_before_implementation() 
     );
 
     store
-        .agent_reply_session(
-            session_id,
+        .agent_reply_task_thread(
+            thread_id,
             agent.id,
             "Revised synthesis: preserve operator recovery and the existing log format; then implement and test.",
         )
@@ -277,17 +293,17 @@ async fn context_change_invalidates_conversational_convergence() {
         .start_intake_interview(task.id, agent.id)
         .await
         .unwrap();
-    let session_id = intake.interview_session_id.unwrap();
+    let thread_id = intake.interview_thread_id.unwrap();
     let final_summary = store
-        .agent_reply_session(
-            session_id,
+        .agent_reply_task_thread(
+            thread_id,
             agent.id,
             "Final plan: implement the current acceptance criteria.",
         )
         .await
         .unwrap();
     let confirmation = store
-        .create_human_session_message(session_id, "Proceed with that plan.")
+        .create_human_task_message(task.id, agent.id, "Proceed with that plan.", None)
         .await
         .unwrap();
     store
@@ -330,8 +346,8 @@ async fn context_change_invalidates_conversational_convergence() {
     );
     assert!(refreshed.intake.converged_at.is_none());
     assert_eq!(
-        refreshed.intake.interview_session_id,
-        Some(session_id),
+        refreshed.intake.interview_thread_id,
+        Some(thread_id),
         "transcript remains durable even though convergence is invalidated"
     );
     assert_eq!(
@@ -422,7 +438,7 @@ async fn human_messages_resume_read_only_intake_then_convergence_queues_implemen
         .start_intake_interview(task.id, agent.id)
         .await
         .unwrap();
-    let session_id = intake.interview_session_id.unwrap();
+    let thread_id = intake.interview_thread_id.unwrap();
 
     let program = std::env::current_exe().unwrap();
     let cwd = std::env::current_dir().unwrap();
@@ -466,8 +482,8 @@ async fn human_messages_resume_read_only_intake_then_convergence_queues_implemen
         .await
         .unwrap();
     store
-        .agent_reply_session(
-            session_id,
+        .agent_reply_task_thread(
+            thread_id,
             agent.id,
             "Which compatibility behavior should I preserve?",
         )
@@ -484,7 +500,12 @@ async fn human_messages_resume_read_only_intake_then_convergence_queues_implemen
     );
 
     store
-        .create_human_session_message(session_id, "Preserve operator recovery behavior.")
+        .create_human_task_message(
+            task.id,
+            agent.id,
+            "Preserve operator recovery behavior.",
+            None,
+        )
         .await
         .unwrap();
     assert!(
@@ -515,8 +536,8 @@ async fn human_messages_resume_read_only_intake_then_convergence_queues_implemen
         .await
         .unwrap();
     let final_summary = store
-        .agent_reply_session(
-            session_id,
+        .agent_reply_task_thread(
+            thread_id,
             agent.id,
             "Final synthesis: preserve operator recovery behavior; inspect, implement, and run acceptance tests.",
         )
@@ -528,7 +549,7 @@ async fn human_messages_resume_read_only_intake_then_convergence_queues_implemen
         .unwrap();
 
     let confirmation = store
-        .create_human_session_message(session_id, "没问题，按这个做。")
+        .create_human_task_message(task.id, agent.id, "没问题，按这个做。", None)
         .await
         .unwrap();
     let third = store
@@ -580,6 +601,11 @@ async fn human_messages_resume_read_only_intake_then_convergence_queues_implemen
         .enqueue_intake_continuation(assignment_id)
         .await
         .unwrap();
+    assert_eq!(
+        implementation.resume_from_attempt_id,
+        Some(third.id),
+        "implementation must resume the latest Provider conversation without a Morrows Session identity"
+    );
     let implementation_execution = store
         .begin_launch_attempt_with_local_compat(implementation.id, Some("test-lsm-subject"))
         .await
@@ -596,5 +622,85 @@ async fn human_messages_resume_read_only_intake_then_convergence_queues_implemen
             .as_deref(),
         Some("test-lsm-subject"),
         "only the implementation launch may create LSM provisioning intent"
+    );
+
+    store
+        .mark_launch_running(
+            implementation.id,
+            Some(104),
+            "stdout-implementation".into(),
+            "stderr-implementation".into(),
+        )
+        .await
+        .unwrap();
+    let artifact = store
+        .create_artifact(
+            task.id,
+            agent.id,
+            input(json!({
+                "title":"E2E acceptance evidence",
+                "uri":"simulation://session-dedup-e2e"
+            })),
+        )
+        .await
+        .unwrap();
+    let preview = store
+        .run_completion_check(implementation_execution.run.id, agent.id, &json!({}))
+        .await
+        .unwrap();
+    let mut completion = preview.completion_template;
+    for check in completion["checks"].as_array_mut().unwrap() {
+        check["status"] = json!("passed");
+        check["rationale"] = json!("The no-Session lifecycle E2E completed successfully.");
+        check["artifact_ids"] = json!([artifact.id]);
+    }
+    store
+        .complete_run(
+            implementation_execution.run.id,
+            agent.id,
+            json!({
+                "completion":completion,
+                "memory_disposition":{
+                    "status":"not_applicable",
+                    "rationale":"This fixture validates lifecycle plumbing only; it creates no reusable Project Memory.",
+                    "memory_entry_ids":[]
+                },
+                "simulation_only":true
+            }),
+        )
+        .await
+        .unwrap();
+    store
+        .finish_launch_attempt(
+            implementation.id,
+            Some(0),
+            Some("provider-session".into()),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let completed_run = store
+        .get_run(implementation_execution.run.id)
+        .await
+        .unwrap();
+    assert_eq!(completed_run.status, "completed");
+    assert_eq!(
+        completed_run.provider_conversation_ref.as_deref(),
+        Some("provider-session")
+    );
+    assert_eq!(
+        store.get_task(task.id).await.unwrap().state,
+        TaskState::Done
+    );
+    assert_eq!(
+        store
+            .task_agent_thread(task.id, agent.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        thread_id,
+        "Human/Agent transcript remains Task collaboration after completion"
     );
 }

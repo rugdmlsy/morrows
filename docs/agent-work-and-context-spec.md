@@ -25,7 +25,7 @@
 │ 1. Morrows Control Plane (控制平面)                                      │
 │    工作语义与持久知识的 Source of Truth                                    │
 │    负责：工作项、工作分配、工作执行生命周期、上下文快照、记忆、成果物托管、           │
-│          决策记录、工作交接、工作会话、摘要聚合、执行证据关联等                │
+│          决策记录、工作交接、Task collaboration、执行证据关联等                │
 └────────────────────────────────────┬────────────────────────────────────┘
                                      │
                      /api/control    │ (受控 loopback)
@@ -73,27 +73,26 @@
 | **持久终端 / 终端** | `PersistentShell` | `shell session` | 运行空间内维持环境与状态的常驻命令行交互终端 |
 | **浏览器实例** | `BrowserInstance` | `browser session` | 运行空间内受控的有状态浏览器实例 |
 | **模型会话** | `ProviderThread` | `Provider Session` | Codex / Claude / Gemini 模型自身的连续私有对话流 |
-| **会话** | `Session` | `Conversation` | 人类与特定 Agent 实例之间的一对一持久化工作会话；始终属于一个 AgentInstance，可为通用/项目/任务作用域，并跨多次运行时与工作执行持续存在 |
 | **上下文快照** | `ContextSnapshot` | `ContextRevision` | 某次工作执行初始化时冻结的完整工作背景、目标与记忆视图 |
-| **记忆** | `Memory` | `Memory` / `Context` | 长期持久化知识（跨越任务与会话），分组织/项目/员工/工作等作用域 |
+| **记忆** | `Memory` | `Memory` / `Context` | 长期持久化知识（跨越任务），分组织/项目/员工/工作等作用域 |
 | **成果物** | `Artifact` | `Artifact` | 被正式归档、持久托管并可全局引用的工作交付物证据 |
 | **决策记录** | `Decision` | `Decision` | 经确认的、对后续工作产生约束与指导的技术或业务决断 |
 | **工作交接** | `Handoff` | `Handoff` | 工作责任从一个执行转交至另一个执行的结构化交接协议 |
 | **执行证据** | `WorkExecutionEvidence` | `RunExecutionEvidence`| 将工作语义状态与底层 LSM Audit、Job Logs 关联的追溯证据 |
 
-### 3.2 会话作用域与工作执行关系
+### 3.2 Task collaboration 与 Provider conversation
 
-`Session` 不是 `WorkExecution` 的别名，也不以一次 Run 的开始/结束为生命周期边界。
+Morrows 不定义独立的 Conversation/Session 聚合。持久的人机对话直接挂在 Task collaboration 上：
 
-- **通用会话**：仅绑定 AgentInstance，用于尚未正式归档到某个项目或工作项的讨论。
-- **项目会话**：绑定 Project + AgentInstance，用于项目级讨论；不自动创建 Task。
-- **任务会话**：绑定 Task + AgentInstance；Project 由 Task 自动推导，不能出现与 Task 不一致的 Project。
-- 一个 Task 可以有多个 Session，例如不同 Agent 的实现、review、测试会话；一个 Session 最多绑定一个 Task。
-- 本地 Task launch 必须绑定该 Task + AgentInstance 的开放 Session；若不存在，由 Morrows 自动创建。Run 重启继续使用同一个 Session。
-- Task launch 与显式 Session runtime 共享该 Session + LaunchProfile 下最新的 ProviderThread 引用，因此二者是同一长期对话的不同执行入口，而不是两套隐藏会话。
-- 通用或仅项目作用域的消息不得被 Task launch 消费，也不得触发无关中断 Run 的自动恢复。
+- `MessageThread(kind=human_agent)` 表示某个 Task 与某个 AgentInstance 的持久 Human↔Agent 对话线程；
+- `Message` 保存 Human、Agent 或 system 消息；
+- 消息线程只负责协作与投递，不提供 Task 写权限；
+- 一个 Task 可以有不同 AgentInstance 的多个 Human/Agent thread；
+- Provider 的 session/thread/conversation ID 只记录在 `Run.provider_conversation_ref`，用于 Provider 私有上下文续接；
+- RuntimeScope 只负责 morrow-runtime 的机器执行隔离与权限；
+- `Task`、`Run`、`provider_conversation_ref`、`RuntimeScope` 四者不得互相替代。
 
-因此正式关系是：`WorkItem → WorkAssignment → WorkExecution/AgentLaunch` 表示责任与执行生命周期；`Session → ProviderThread` 表示长期交互连续性。两者在任务执行时通过 Session binding 相交，但不互相取代。
+因此正式关系是：`WorkItem → WorkAssignment → WorkExecution/AgentLaunch` 表示工作责任和执行生命周期；Task collaboration 保存可共享的人机消息；Provider conversation 保存模型私有上下文；RuntimeScope 保存机器执行作用域。
 
 ### 3.3 Agent 会话与指令规范
 

@@ -1,13 +1,86 @@
 Context preparation and capture:
 
-When creating, importing or materially updating task context, preserve the execution inputs a successor needs, not only a narrative conclusion or an opaque external Session ID. For operational/code work, record the machine, absolute workspace, source branch/revision, report and receipt locations, reproduction entry points and known parameters, and unresolved inputs in the task background. Preserve the existing background when adding these facts. Register resolvable evidence references as artifacts where authorized; never replace original evidence with an unsupported summary.
+Preserve execution inputs:
+- Preserve the inputs that a successor needs.
+- Do not preserve only a narrative conclusion.
+- Record the machine and absolute workspace for operational work.
+- Record the source branch or revision.
+- Record report and receipt locations.
+- Record reproduction entry points and known parameters.
+- Record unresolved inputs.
+- Preserve useful existing background.
+- Register resolvable evidence references as artifacts when authorized.
+- Do not replace original evidence with an unsupported summary.
 
-Attach the source reference, observation time, verification status and limitations to imported facts. A path seen in a historical command is a historical reference, not proof the file still exists or that the command's intended result was achieved. Commands may be truncated. Compare a source summary's timestamp/coverage with newer activity before treating it as the latest state; do not overwrite newer evidence with an older summary. Keep unknowns and conflicting observations explicit.
+Record provenance:
+- Attach a source reference to imported facts.
+- Record the observation time.
+- Record verification status and limitations.
+- A historical path does not prove that a file still exists.
+- A historical command does not prove that its intended result succeeded.
+- Command output can be truncated.
+- Compare old summaries with newer activity before treating them as current.
+- Do not overwrite newer evidence with an older summary.
+- Keep unknowns and conflicting observations explicit.
 
-Use only authorized sources. An external Session ID is not authorization to read private history; do not automatically follow such references or copy credentials/private conversations into shared task knowledge. Capture the authorized, task-relevant facts with provenance. If access or essential inputs are missing, record the gap and the next retrieval step rather than inventing paths, commands or verification results.
+Use authorized sources:
+- An external Provider Session ID is not authorization to read private provider history.
+- Do not automatically follow private provider references.
+- Do not copy credentials or private provider conversations into shared Task knowledge.
+- Capture only authorized facts relevant to the Task.
+- Preserve provenance for those facts.
+- Record missing access or missing inputs as gaps.
+- Record the next retrieval step.
+- Do not invent paths, commands, or verification results.
 
-Before substantive work, read task_context for a scoped Task, or project_get for a project-only Session, and follow the relevant detail/paging tools. For an executor Assignment still in intake, task_context is background only: complete task_intake over all Project Memory pages so Morrows records current read receipts, then complete the multi-turn Task Session Human Interview before implementation. Start with current project/organization knowledge applicable to the goal, constraints and method; the first page is not all available knowledge. Do not invent a Task or Project for an unscoped Session. Launch excerpts and persisted packages are not complete live verification. Resolve and check the recorded inputs in the current environment before executing historical commands. After an authorized context update, re-read task_context to confirm goals, constraints, execution references and next steps remain available. When an immutable package is needed, explicitly assemble one and check its pinned context and shared-memory/evidence references. Context assembly does not automatically recover information that was never persisted in Morrows. For continuation, prefer the predecessor Run's latest immutable milestone when execution.recovery provides one, then reconcile its pinned ContextRevision, evidence and execution locations against the live environment before repeating effects.
+Prepare before substantive work:
+- Read task_context for a scoped Task.
+- Read project_get when you only need Project knowledge.
+- Follow the relevant paging tools.
+- For executor intake, complete every required task_intake page.
+- Then complete the multi-turn Human Interview.
+- Use Task collaboration for persisted Human and Agent messages.
+- The provider conversation is private runtime state unless you persist facts to Morrows.
+- Read current Project or organization knowledge relevant to the goal.
+- Do not assume that the first page contains all relevant knowledge.
+- Resolve recorded inputs in the current environment.
+- Check inputs before you repeat historical commands.
+- After a context update, read task_context again.
+- Ensure goals, constraints, execution references, and next steps remain available.
+- Use context_package_assemble when you need an immutable package.
+- Context assembly cannot recover information Morrows never persisted.
 
-Retrieve historical long-term memory proactively when observations conflict, an old decision or constraint needs explaining, a previously attempted approach is being repeated, or new evidence may invalidate an earlier conclusion. Use memory_get/project_get with include_superseded=true and follow next_offset until the relevant history is found or the available pages are exhausted. Preserve source, time and verification limits when reconciling versions; an old observation need not be false merely because it was superseded. Task context revisions (include_context_history/context_revision_id) and raw Session history are separate from long-term memory history. Selecting an old task revision does not reconstruct historical project knowledge. Record a retrieval gap if relevant evidence is unavailable. These instructions specify retrieval triggers; they do not inject all historical memory into the prompt or require reading every unrelated entry.
+Continue interrupted work:
+- Prefer the predecessor Run's latest immutable milestone when available.
+- Reconcile its ContextRevision with the current Task.
+- Reconcile its evidence with the live environment.
+- Reconcile its execution locations with the live environment.
+- Do not repeat effects until this reconciliation is complete.
 
-For broad text search or file editing, when Git, the Morrows CLI and an issued Agent credential are available (managed runtimes expose its executable as MORROWS_MEMORY_CLI), use morrows memory checkout --project PROJECT_ID --root DIRECTORY (add --history to materialize old bodies). This creates native Git worktrees under projects/PROJECT_ID, sharing one object store but independent project histories. Full bodies and provenance remain in files; the SQL bridge reads retained lineage to keep document paths stable. Use rg/grep for search and sed or an editor for current content.md/content.json and title.txt; read surrounding context before changing a claim. Use native git status/diff/log/add/commit, then morrows memory publish for one committed document with its source Task, the context revision actually read, basis, verification status, evidence and a stable retry key. Pin the reported commit when retrying. For a newly published draft, record the returned receipt metadata (excluding content) in metadata.json and commit it before refresh, preserving the server-provided provenance. A local Git commit does not publish to Morrows. Metadata/history retain source records; deleting local files does not delete shared knowledge. Refresh with memory checkout --refresh after committing or stashing local edits: it uses native git merge and preserves conflicts for resolution. The paged SQL read is not an atomic project snapshot; full server-side Git versioning is a separate design. Without the CLI, use paged MCP reads and project_memory_publish; do not assume a remote server path is available on your machine.
+Retrieve long-term memory when needed:
+- Retrieve history when observations conflict.
+- Retrieve history when an old decision needs explanation.
+- Retrieve history before repeating a previously attempted approach.
+- Retrieve history when new evidence can invalidate an old conclusion.
+- Use include_superseded for retained long-term memory history.
+- Follow next_offset until you find relevant history or exhaust the pages.
+- Preserve source, time, and verification limits when reconciling versions.
+- Task context history is separate from long-term Project Memory.
+- Task collaboration history is separate from long-term Project Memory.
+- Record a retrieval gap when relevant evidence is unavailable.
+
+Use the Git memory workflow when available:
+- Use the Morrows memory CLI when Git and an Agent credential are available.
+- Managed runtimes expose the CLI through MORROWS_MEMORY_CLI.
+- Use morrows memory checkout for Project memory worktrees.
+- Add --history when you need old document bodies.
+- Use rg or grep for search.
+- Read surrounding context before changing a claim.
+- Use native Git for status, diff, log, add, and commit.
+- Then use morrows memory publish for one committed document.
+- Supply the source Task and ContextRevision you actually read.
+- Supply basis, verification status, evidence, and a stable retry key.
+- A local Git commit does not publish to Morrows.
+- Commit or stash local edits before refresh.
+- Refresh preserves merge conflicts for resolution.
+- Without the CLI, use paged MCP reads and project_memory_publish.

@@ -480,7 +480,20 @@ async fn repeated_restart_uses_the_latest_known_codex_conversation() {
         .unwrap();
 
     let restart_two = store.enqueue_run_restart(execution.run.id).await.unwrap();
-    assert_eq!(restart_two.resume_from_attempt_id, Some(first.id));
+    assert_eq!(
+        restart_two.resume_from_attempt_id,
+        Some(restart_one.id),
+        "restart follows the latest LaunchAttempt while provider continuity remains owned by the Run"
+    );
+    assert_eq!(
+        store
+            .get_run(execution.run.id)
+            .await
+            .unwrap()
+            .provider_conversation_ref
+            .as_deref(),
+        Some("codex-conversation")
+    );
 }
 
 #[tokio::test]
@@ -581,25 +594,31 @@ async fn queued_delivery_makes_interrupted_codex_run_eligible_for_automatic_resu
     assert_eq!(store.get_run(run_id).await.unwrap().status, "interrupted");
     assert!(store.delivery_resume_candidates().await.unwrap().is_empty());
 
-    let general_session = store
-        .create_session(CreateSession {
-            agent_instance_id: assignment.agent_instance_id,
-            title: "Unrelated discussion".into(),
-        })
+    let unrelated_task = store
+        .create_task(input(json!({"title":"unrelated delivery task"})))
         .await
         .unwrap();
     store
-        .create_human_session_message(general_session.id, "do not wake task run")
+        .create_human_task_message(
+            unrelated_task.id,
+            assignment.agent_instance_id,
+            "do not wake task run",
+            None,
+        )
         .await
         .unwrap();
     assert!(
         store.delivery_resume_candidates().await.unwrap().is_empty(),
-        "an unscoped Session must not wake an interrupted Task Run"
+        "a message for another Task must not wake an interrupted Task Run"
     );
 
-    let task_session_id = first.session_id.expect("task launch should bind a Session");
     store
-        .create_human_session_message(task_session_id, "continue this turn")
+        .create_human_task_message(
+            assignment.task_id,
+            assignment.agent_instance_id,
+            "continue this turn",
+            None,
+        )
         .await
         .unwrap();
 

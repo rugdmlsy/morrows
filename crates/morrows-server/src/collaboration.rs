@@ -1,5 +1,5 @@
 use super::*;
-use axum::http::HeaderMap;
+use axum::{http::HeaderMap, routing::delete};
 use morrows_core::*;
 
 pub(crate) fn actor(headers: &HeaderMap) -> Result<Id, ApiError> {
@@ -25,7 +25,18 @@ pub fn routes() -> Router<AppState> {
         .route("/tasks/{id}/artifacts", post(artifact_create))
         .route("/tasks/{id}/decisions", post(decision_create))
         .route("/tasks/{id}/threads", post(thread_create))
-        .route("/threads/{id}/messages", post(message_create))
+        .route(
+            "/threads/{id}/messages",
+            get(thread_messages).post(message_create),
+        )
+        .route(
+            "/tasks/{task_id}/agents/{agent_id}/messages",
+            get(task_agent_messages).post(human_task_message),
+        )
+        .route(
+            "/tasks/{task_id}/agents/{agent_id}/messages/{message_id}",
+            delete(recall_human_task_message),
+        )
         .route("/runs/{id}/handoffs", post(handoff_create))
         .route("/tasks/{id}/dependencies", post(dependency_add))
         .route(
@@ -130,6 +141,60 @@ async fn message_create(
 ) -> Result<Json<Value>, ApiError> {
     Ok(Json(json!(
         s.store.create_message(id, actor(&headers)?, input).await?
+    )))
+}
+
+async fn thread_messages(
+    State(s): State<AppState>,
+    Path(id): Path<Id>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(json!(s.store.thread_messages(id).await?)))
+}
+
+async fn task_agent_messages(
+    State(s): State<AppState>,
+    Path((task_id, agent_id)): Path<(Id, Id)>,
+) -> Result<Json<Value>, ApiError> {
+    let thread = s.store.task_agent_thread(task_id, agent_id).await?;
+    let messages = match &thread {
+        Some(thread) => s.store.thread_messages(thread.id).await?,
+        None => Vec::new(),
+    };
+    Ok(Json(json!({"thread":thread,"messages":messages})))
+}
+
+#[derive(Debug, Deserialize)]
+struct HumanTaskMessageBody {
+    body: String,
+    #[serde(default)]
+    client_message_id: Option<String>,
+}
+
+async fn human_task_message(
+    State(s): State<AppState>,
+    Path((task_id, agent_id)): Path<(Id, Id)>,
+    Json(input): Json<HumanTaskMessageBody>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(json!(
+        s.store
+            .create_human_task_message(
+                task_id,
+                agent_id,
+                &input.body,
+                input.client_message_id.as_deref(),
+            )
+            .await?
+    )))
+}
+
+async fn recall_human_task_message(
+    State(s): State<AppState>,
+    Path((task_id, agent_id, message_id)): Path<(Id, Id, Id)>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(json!(
+        s.store
+            .recall_human_task_message(task_id, agent_id, message_id)
+            .await?
     )))
 }
 async fn handoff_create(

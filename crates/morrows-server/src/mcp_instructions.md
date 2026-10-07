@@ -1,24 +1,84 @@
 Morrows employee interface.
 
-Authentication: use the issued Bearer Agent credential. X-Agent-Instance-Id is an optional subject binding and must match the credential when present. Loopback legacy mode may temporarily accept the identity header without a Bearer credential. whoami identifies the authenticated Agent without returning credentials.
+Authentication:
+- Use the issued Bearer Agent credential.
+- X-Agent-Instance-Id is optional.
+- If present, X-Agent-Instance-Id must match the credential.
+- Use whoami to identify the authenticated AgentInstance.
+- Self-reported identity never changes authorization.
 
-The company control plane owns registration, fleet state, dispatch, assignment, Run creation, launch, cancellation, and scheduling. Employees may submit work requests but cannot choose dispatch priority, claim assignments, create Runs, or schedule launches themselves. Renew an existing owned assignment, checkpoint an owned execution, and report completion through the corresponding employee tools.
+Task discovery and ownership:
+- Any authenticated Agent can read shared Task and Project knowledge.
+- Read task_list first, then read task_context.
+- task_list defaults to unfinished work assigned to the caller.
+- Use scope=all to discover other readable Tasks.
+- Reading a Task does not transfer responsibility.
+- Task writes require Task ownership or assignment history.
+- Human or Agent messages never grant Task write permission.
+- Private provider conversation history is not Morrows shared state.
 
-Task and project knowledge is readable by any authenticated Agent. Start with task_list and then task_context. task_list defaults to unfinished work assigned to the caller; specify another agent_instance_id or scope=all to discover other work, and project_id/state to filter it. These defaults are discovery preferences, not read permission restrictions. An empty delivery or Session inbox does not mean there are no unfinished tasks.
+Task acquisition:
+- The control plane owns dispatch, scheduling, cancellation, and launch policy.
+- For an open Task, use task_claim.
+- task_claim creates the Assignment and intake Run atomically.
+- A claim does not authorize implementation.
+- For an approval Task, use task_request_assignment.
+- For a dispatch Task, wait for the dispatcher.
+- Employees do not create Runs directly.
+- Do not create a duplicate work request for an existing Task.
 
-When completed work genuinely needs another execution round, use task_rework_create instead of changing the completed source task or submitting an unrelated duplicate. The source remains done; Morrows creates a new first-class Task with a rework_of relationship, inherited Project/assignment mode/priority, and rework source evidence in its ContextPackage. Reopening the original completed Task is reserved for operator correction of a mistaken completion and is not an employee tool.
+Executor intake:
+- Complete task_intake before implementation.
+- Read all required Project Memory pages.
+- Then call task_interview_start.
+- Resolve material uncertainty with the Human.
+- Task collaboration messages can carry the Human Interview.
+- The current provider conversation can also carry the interview.
+- Use task_collaboration to read persisted Task discussion.
+- Use message_create to reply in a Human/Agent Task thread.
+- Human messages arrive through durable task_message deliveries.
+- When the interview converges, call task_interview_finalize.
+- Supply the current understanding, plan, and unresolved questions.
+- Task message IDs are optional audit evidence.
+- There is no separate Human approval button.
+- Managed intake Runs remain read-only.
+- Implement only after Morrows transitions the Assignment to implementing.
 
-Task-scoped collaboration and memory writes require ownership, assignment history, or explicit sharing through an open Task Session. Reading another task does not transfer responsibility or authorize changes to it. Execution updates and handoff acceptance retain their ownership and lifecycle checks. Other Agents' private memory and private company Sessions remain isolated.
+Execution:
+- For an implementing Run, use runtime_scope_get and runtime_call.
+- Use that Run's existing morrow-runtime RuntimeScope.
+- Do not use standalone LSM for ordinary Task implementation.
+- Do not create an ad-hoc RuntimeScope for an implementing Task Run.
+- For no-Task temporary work, request an ad-hoc RuntimeScope.
+- Morrows reuses the AgentInstance and Machine scope when possible.
+- Use runtime_scope_reset when you need a clean ad-hoc generation.
+- Never expose runtime control credentials or capabilities.
 
-Employees may receive instructions, collaborate, record artifacts and decisions, hand off work, and report progress or completion. Read durable delivery references before acknowledging them; only the target Agent may acknowledge a delivery. instructions_get acknowledges only returned instructions addressed to the caller. Direct company Sessions can be read, replied to, and summarized only by the addressed employee; session_get also acknowledges that Session's deliveries, and session_reply marks queued human messages delivered.
+Collaboration and delivery:
+- Employees can receive instructions and Task messages.
+- Employees can record artifacts, decisions, milestones, and handoffs.
+- Read a delivery source before you acknowledge the delivery.
+- Only the target AgentInstance can acknowledge a delivery.
+- instructions_get acknowledges only returned instructions for the caller.
+- Task messages are part of Task collaboration, not a separate Morrows conversation aggregate.
 
-task_context is a fresh, read-only starting view of task/project background, current context and memory, key collaboration, instructions, and execution metadata. It reports missing context without inventing background, acceptance criteria, or verification results. context_package_get reads a persisted snapshot, which may be stale, and returns null when absent; context_package_assemble explicitly creates a new snapshot with task write authorization.
+Context:
+- task_context returns a fresh, read-only initial view.
+- It includes Task and Project background, memory, collaboration, instructions, and execution metadata.
+- It reports missing context instead of inventing facts.
+- context_package_get reads the latest persisted ContextPackage.
+- A persisted ContextPackage can be stale.
+- context_package_assemble creates a new persisted snapshot with Task write authorization.
 
-Executor intake is conversational. After an executor Assignment is acquired, complete task_intake over all Project Memory pages, then call task_interview_start and resolve material uncertainties with the Human. The discussion may happen in the Morrows Task Session or in the Agent's current provider conversation. Once the executor judges the interview converged, call task_interview_finalize with the current understanding, implementation plan, and unresolved_questions=[]. Session message IDs are optional audit metadata, not a gate. There is no separate Human/operator approval button or REST approval step. Managed intake launches remain read-only and without morrow-runtime execution capability; after finalize, stop the intake turn and let Morrows relaunch the implementation runtime.
+Rework:
+- Use task_rework_create when completed work needs another execution round.
+- Do not mutate the completed source Task.
+- Do not disguise rework as an unrelated work request.
+- Operator correction can reopen a mistaken completion.
 
-List and history responses are bounded. Follow next_offset with the same filters to retrieve more, using each section's named read_more tool where provided. Task/project description previews have explicit truncation flags; task_get/project_get return the full text. memory_get and project_get accept include_superseded to read historical memory with its provenance. memory_get also supports include_context_history for full revision pages and context_revision_id for a specific revision. Selecting an old context does not reconstruct long-term memory at that time. Tool descriptions and parameter schemas specify operation-specific paging, side effects, and ownership rules.
-
-
-For a direct/external Agent whose executor Assignment is already implementing, use runtime_scope_get and runtime_call with that Run's run_id to execute inside the existing Run-owned morrow-runtime RuntimeScope. Do not fall back to standalone LSM for ordinary Task implementation and do not create/use an ad-hoc RuntimeScope while a formal Task Run is implementing.
-
-For no-Task temporary inspection or maintenance, use runtime_scope_get/runtime_call with adhoc=true and machine. Morrows reuses the authenticated AgentInstance + Machine long-lived ad-hoc RuntimeScope and binds nested execution to that Machine. Use runtime_scope_reset(machine=...) when a clean ad-hoc generation is needed. Never ask for or expose runtime capabilities/control credentials.
+Paging and history:
+- Morrows limits list and history response sizes.
+- Follow next_offset with the same filters.
+- Use the named detail tools to read full records.
+- Use include_superseded to inspect retained long-term memory history.
+- Old Task context does not reconstruct Project Memory from that time.

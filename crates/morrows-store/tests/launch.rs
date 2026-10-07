@@ -156,8 +156,11 @@ async fn clean_process_exit_without_semantic_completion_pauses_run_and_requeues_
         .await
         .unwrap();
     assert_eq!(done.status, "completed");
-    assert_eq!(done.external_session_ref.as_deref(), Some("session-123"));
     let run = store.get_run(execution.run.id).await.unwrap();
+    assert_eq!(
+        run.provider_conversation_ref.as_deref(),
+        Some("session-123")
+    );
     assert_eq!(run.status, "paused");
     assert_eq!(
         run.stop_reason.as_deref(),
@@ -216,7 +219,7 @@ async fn agent_semantic_completion_wins_over_launcher_process_exit() {
     let run = store.get_run(execution.run.id).await.unwrap();
     assert_eq!(run.status, "completed");
     assert_eq!(
-        run.external_session_ref.as_deref(),
+        run.provider_conversation_ref.as_deref(),
         Some("session-complete")
     );
     assert_eq!(
@@ -380,7 +383,7 @@ async fn external_agent_accepts_only_its_own_assignment_and_completes_durably() 
         store
             .accept_external_launch(
                 input(json!({
-                    "launch_attempt_id":attempt.id, "external_session_ref":"lsm-session"
+                    "launch_attempt_id":attempt.id, "provider_conversation_ref":"lsm-session"
                 })),
                 other.id
             )
@@ -404,7 +407,7 @@ async fn external_agent_accepts_only_its_own_assignment_and_completes_durably() 
     let accepted = store
         .accept_external_launch(
             input(json!({
-                "launch_attempt_id":attempt.id, "external_session_ref":"lsm-session"
+                "launch_attempt_id":attempt.id, "provider_conversation_ref":"lsm-session"
             })),
             worker.id,
         )
@@ -416,7 +419,7 @@ async fn external_agent_accepts_only_its_own_assignment_and_completes_durably() 
         store
             .accept_external_launch(
                 input(json!({
-                    "launch_attempt_id":attempt.id, "external_session_ref":"second-session"
+                    "launch_attempt_id":attempt.id, "provider_conversation_ref":"second-session"
                 })),
                 worker.id
             )

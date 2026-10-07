@@ -34,11 +34,11 @@ old statement that no jobs were running.
 
 The shared capture instructions in
 `crates/morrows-server/src/context_capture_instructions.md` are reused by MCP
-initialization, executor launch prompts and direct Session prompts. They require
+initialization and executor launch prompts. They require
 authorized imports to retain execution locations, source/evidence references,
 observation times and unresolved inputs. A source summary can be older than its
 latest activity; historical command metadata alone does not verify output content
-or current filesystem state. An external Session ID does not grant access.
+or current filesystem state. An external Provider Session ID does not grant access to private provider history.
 
 The launch prompt includes a bounded background excerpt and points to the full
 `task_context`. A persisted ContextPackage retains the pinned full task context,
@@ -54,15 +54,13 @@ Before substantive work, read applicable current project/organization knowledge;
 a first page is not the entire collection. Proactively retrieve superseded history
 when resolving conflicting observations, understanding an earlier decision or
 constraint, revisiting a failed approach, or correcting a conclusion. Task context
-history and Session history are different records. Shared prompts specify these
+history and Task collaboration history are different records. Shared prompts specify these
 triggers, rather than injecting every historical body at startup.
 
 At meaningful milestones and before handoff/completion, publish reusable facts,
 decisions, failure lessons and corrections with provenance and uncertainty. Check
 current entries first to avoid duplicates. Preserve useful unknowns as hypotheses;
-do not promote them to verified facts. Project-only Sessions still need an
-authorized source Task for project publication and can retain candidates in their
-Session summary meanwhile. For broad search and native text editing, use the
+do not promote them to verified facts. Project-only analysis still needs an authorized source Task for project publication. Keep candidate findings outside shared Project Memory until such a Task exists. For broad search and native text editing, use the
 [memory file CLI](memory-files.md); [multi-project Git management](memory-versioning.md)
 is a separate, not-yet-migrated storage design.
 
@@ -83,7 +81,7 @@ server-enforced. Completion additionally validates structured acceptance reports
 as described below. Use checkpoint/context/handoff to stop incomplete work.
 
 Project knowledge can be published directly by the task owner, any previously
-assigned Agent, or the employee of an open Task Session. `project_memory_publish`
+assigned Agent. `project_memory_publish`
 derives the destination project and author from the source task/authentication;
 it cannot target another project or organization scope. Supply the current
 `context_revision_id`, `verification_status` (reported, verified, hypothesis or
@@ -127,7 +125,7 @@ scientific validity. Do not weaken constraints or label unknown checks passed.
 Ungated tasks retain legacy completion behavior except explicit failure rejection.
 These execution/persistence instructions are stored once in
 `crates/morrows-server/src/execution_workflow_instructions.md` and reused by MCP
-initialization, executor startup and direct Session prompts.
+initialization and executor startup prompts.
 
 ## Safe task-memory updates
 

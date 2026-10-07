@@ -51,7 +51,6 @@ To prevent severe ambiguity caused by bare usages of common words like `session`
 | **持久终端 / 终端** | `PersistentShell` | `shell session` | 运行空间内维持环境与状态的常驻命令行交互终端 |
 | **浏览器实例** | `BrowserInstance` | `browser session` | 运行空间内受控的有状态浏览器实例 |
 | **模型会话** | `ProviderThread` | `Provider Session` | Codex / Claude / Gemini 模型自身的连续私有对话流 |
-| **会话** | `Session` | `Conversation` | 人类与特定 Agent 实例之间的一对一持久化工作会话；始终属于一个 AgentInstance，可选绑定 Project 或 Task，并可跨多次 Runtime/Run 持续存在 |
 | **上下文快照** | `ContextSnapshot` | `ContextRevision` | 某次工作执行初始化时冻结的完整工作背景、目标与记忆视图 |
 | **记忆** | `Memory` | `Memory` / `Context` | 长期持久化知识（跨越任务与会话），分组织/项目/员工/工作等作用域 |
 | **成果物** | `Artifact` | `Artifact` | 被正式归档、持久托管并可全局引用的工作交付物证据（Managed Store） |
@@ -87,7 +86,7 @@ The UI must distinguish **human display names** from **canonical internal identi
   backend/path metadata; provider secrets remain outside the Morrows database. This is an
   implementation boundary, not the long-term credential model.
 - A future provider-credential layer should replace the per-home backend behind Account with a
-  centralized encrypted Credential Store / broker. AgentInstance, Account, Session and
+  centralized encrypted Credential Store / broker. AgentInstance, Account and
   LaunchProfile identities must remain stable during that migration so historical work does not
   depend on where authentication material is physically stored.
 - Provider names are normalized for display (`openai → OpenAI`, `tencent → Tencent`,
@@ -96,7 +95,7 @@ The UI must distinguish **human display names** from **canonical internal identi
   section for debugging and control-plane operations.
 - Archived Agents remain durable identities for historical Tasks/Runs/messages but are omitted
   from the default Agent Fleet. Archiving also closes their open Sessions; it never
-  deletes historical Session/messages.
+  deletes historical Task messages.
 
 ## Knowledge, Memory & Summary Hierarchy (知识与记忆层级)
 
@@ -149,7 +148,7 @@ Control-plane REST uses a separate `mrw_operator_*` credential class. Durable cr
 carry one of three roles:
 
 - `viewer`: read-only control-plane access;
-- `operator`: ordinary work, dispatch, launch, cancellation, context and Session
+- `operator`: ordinary work, dispatch, launch, cancellation, context and Task collaboration
   mutations;
 - `admin`: operator privileges plus identity registration and Agent/Operator credential
   management.
@@ -189,7 +188,6 @@ Task
  ├── TaskDependency*
  └── Event*
 
-Session
  └── SessionMessage*
 
 Organization / AgentInstance
@@ -217,89 +215,34 @@ AgentInstance remains the worker identity referenced by M1/M2 work. M3 links eac
 7. Important actions append Events in the same transaction as state changes.
 8. A successful `executor` Run may mark its Task done; non-executor roles do not.
 9. Daemon restart does not erase Tasks, Runs, checkpoints, or pending durable jobs.
-10. Session list reads return summary metadata only; message history is a separate paged read.
-11. Session MCP access is scoped to the addressed AgentInstance.
-12. A Session may be general, Project-scoped, or Task-scoped. If `task_id` is present, `project_id` is derived from that Task and cannot contradict it.
-13. Every new local Task launch binds to an open Task-scoped Session for the same AgentInstance, creating one if necessary; Run restart preserves that binding.
-14. Task launches consume only task-scoped messages from their bound Session. General/project-only messages cannot leak into a Task Run or wake an interrupted Task Run.
+10. Human↔Agent durable messages belong to Task collaboration threads.
+11. Message threads do not grant Task write authorization.
+12. `Run.provider_conversation_ref` is the only authoritative Provider conversation handle.
+13. `LaunchAttempt` does not own Provider conversation identity.
+14. Task launches consume only their own Task deliveries; messages from another Task cannot leak into or wake that Run.
 15. **Ultimate Recovery Invariant (终极恢复原则)**: Even if the original Agent process, Provider Session, execution machine, and temporary workspace directories disappear completely, a new Agent can reconstruct full state and proceed solely from Morrows canonical records (WorkItem, ContextSnapshot, Memory, Decision, Artifact, Summary, Handoff, Evidence).
 
-## Agent Sessions
+## Task collaboration and provider continuity
 
-A `Session` is the durable human↔Agent conversation container. It always belongs
-to one AgentInstance and may additionally be **general** (no work scope),
-**Project-scoped**, or **Task-scoped**. Task scope implies the Task's Project; callers may
-not attach a Session to a Task while supplying a different Project. `SessionMessage`
-rows are paged independently. This keeps the WebUI startup path lightweight and prevents
-opening the application from materializing every chat history.
+Morrows does not own a separate conversation/session aggregate. Durable Human↔Agent discussion is task-scoped collaboration.
 
-Session scope is not execution ownership. A Task-scoped Session may outlive individual
-Runs and launch attempts. Assignment/Run still answer who owns the work and the state of
-one logical execution; Session answers which durable human↔Agent conversation and
-Provider-thread continuity belong to that work.
+- `MessageThread(kind=human_agent)` is the durable Human↔Agent thread for one Task + AgentInstance.
+- `Message` stores Human, Agent, or system turns.
+- `AgentDelivery(kind=task_message)` provides reliable delivery for queued Human messages.
+- A queued Human message can be recalled before runtime claim.
+- Message threads never grant Task write authorization.
+- Task write authorization comes only from Task ownership or Assignment history.
+- Provider-private continuation is stored only in `Run.provider_conversation_ref`.
+- Runtime execution isolation is stored only in `RunRuntimeBinding.runtime_scope_id`.
 
-Control-plane REST:
+The four identities have distinct responsibilities:
 
-| Method | Path | Purpose |
-| --- | --- | --- |
-| GET | `/sessions` | Summary list only; optional `agent_instance_id`, `project_id`, or `task_id` filters |
-| POST | `/sessions` | Create a general, Project-scoped, or Task-scoped Session for an AgentInstance |
-| GET | `/sessions/{id}` | Session metadata including optional Project/Task scope |
-| POST | `/sessions/{id}/scope` | Reassign the Session to general, Project, or Task scope |
-| GET | `/sessions/{id}/messages?limit=&before=&after=` | Lazy/paged history; before loads older, after loads newer |
-| POST | `/sessions/{id}/messages` | Queue a human message |
-| POST | `/sessions/{id}/messages/{message_id}/recall` | Recall a human message while its delivery is still queued |
-| GET | `/sessions/{id}/runtime` | Read the latest explicit Session runtime attempt |
-| POST | `/sessions/{id}/runtime/start` | Explicitly start/resume the Session's local Agent CLI |
+1. `Task`: what work exists.
+2. `Run`: one logical execution of the work.
+3. `provider_conversation_ref`: the external Provider's private conversation/thread/session handle.
+4. `RuntimeScope`: the morrow-runtime execution and authorization scope.
 
-The WebUI keeps an in-memory cache keyed by Session ID. Initial navigation fetches
-only summaries. Selecting a Session fetches the latest page (currently 80 messages);
-switching away and back reuses the cache, the selected Session alone polls with an
-`after` anchor, and earlier history is loaded only when requested with `before`.
-
-Employee MCP exposes `session_inbox`, `session_get`, and
-`session_reply`. Inbox returns only Sessions that still have queued human
-messages for the authenticated AgentInstance. `session_get` enforces the target
-Agent identity and supports the same paging anchors. A reply atomically marks queued
-human messages in that Session delivered and appends the Agent reply.
-
-Session messaging is durable but does not require an always-running Agent. A human
-message first enters the durable delivery outbox. The user-facing delivery states are
-only **等待投递 / awaiting delivery** and **已投递 / delivered**. Internal claim
-state is deliberately not a third user-facing state. A message becomes delivered only
-after Morrows has successfully written the Session prompt containing that message to
-the target Agent CLI/runtime. While the delivery is still truly queued, the human may
-recall it; once an Agent runtime has claimed it, recall is fenced even though the UI
-continues to show awaiting delivery until the prompt write succeeds.
-
-The WebUI can explicitly start the Agent for a Session without creating a fake Task,
-Assignment, or Run. A `SessionRuntimeAttempt` binds the Morrows Session, AgentInstance,
-the Agent's configured Account, and one enabled local CLI LaunchProfile. Each attempt can
-also override `model` and `reasoning_effort` without mutating the LaunchProfile. The WebUI
-loads these choices from the installed CLI: Codex uses its bundled machine-readable model
-catalog, while CodeBuddy uses the model/effort values declared by its current CLI help. If a
-later runtime omits either override, Morrows inherits the previous Session runtime setting. Morrows exports
-the Agent, Account, and Session identifiers to the child environment, issues a short-lived
-Session-scoped Agent credential, and claims only queued messages belonging to that
-Session. For Codex/CodeBuddy local CLI adapters, the first successful start creates a
-provider thread/session; later starts for the same Morrows Session and LaunchProfile
-resume the latest persisted provider session reference. Task `LaunchAttempt` records
-bound to the same Session participate in that same Provider-reference history, so moving
-between direct Session runtime and formal Task execution does not create a second hidden
-conversation identity. The runtime attempt records PID, logs, exit status, and provider
-session reference.
-
-When a local Task launch is enqueued, Morrows reuses the most recently updated open
-Task-scoped Session for that Task + AgentInstance, or creates one automatically. The
-LaunchAttempt stores the Session ID and Run restart copies it forward. A task launcher
-claims management instructions for its Task and Session messages belonging to that
-bound Task Session only. General/project-only Session messages remain in their own
-delivery path and do not make interrupted Task Runs eligible for automatic resume.
-
-If no explicit Session runtime is started, queued messages can still be consumed by a
-later direct Session runtime or by the matching Task execution path. Daemon restart marks
-orphaned Session runtimes failed, revokes their Session credentials, and releases
-unfinished delivery claims back to the queue.
+A Provider Session ID is a locator owned by the external Provider. It is not Morrows authorization and does not grant access to private provider history. Historical Morrows Session tables are migration/audit compatibility only and are not active product entities.
 
 ## Collaboration continuation
 
@@ -355,7 +298,7 @@ The employee MCP exposes collaboration tools such as `artifact_create`, `decisio
 `thread_create`, `message_create`, `handoff_create`, `handoff_get`, `handoff_accept`,
 and `task_collaboration`. It does not expose dependency graph administration, claiming,
 or Run creation. Authenticated agents may read any Task or Project. Task-scoped writes
-still require ownership, assignment history, or an open Task Session. `task_list` defaults
+require Task ownership or assignment history. `task_list` defaults
 to the caller's assigned unfinished work; `scope=all` broadens discovery. `task_context`
 provides a live bounded starting view; persisted context packages remain separate snapshots.
 See [employee discovery](employee-discovery.md).
@@ -622,7 +565,7 @@ process launch remain deployment milestones.
 
 - 具体 Task 存在时，执行只能进入该 Run 的 RunRuntimeBinding -> RuntimeScope。
 - Morrows 启动的 managed Agent 可以持有 Run-scoped runtime capability；网页版/外部 Agent 不持有 capability，而通过 Morrows MCP runtime_call 由控制面代理到同一个 Run-owned RuntimeScope。
-- 非 Task 的持续 Session 使用 Session-owned RuntimeScope；纯临时操作使用持久化的 AgentInstance + Machine ad-hoc RuntimeScope。相同 AgentInstance + Machine 长期复用，reset/底层 scope 丢失时通过 generation 重建。
+- 非 Task 临时操作使用持久化的 AgentInstance + Machine ad-hoc RuntimeScope。相同 AgentInstance + Machine 长期复用，reset/底层 scope 丢失时通过 generation 重建。
 - ad-hoc RuntimeScope 不能替代正式 Task 的 Run-owned RuntimeScope。
 - standalone LSM 仅用于 Morrows/morrow-runtime 故障后的救援与诊断，不参与正常 Task execution。
 

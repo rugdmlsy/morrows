@@ -93,7 +93,7 @@ git -C "./knowledge/projects/$PROJECT_A" diff HEAD~1 HEAD
 表示何时导入/编辑，不等于远端事实的原始发生时间；原始时间与来源保存在 metadata 中。
 当前所有分支共用一个可读对象库，不能把分支/namespace 当成不同用户的安全隔离。
 
-共享提示词在 MCP initialize、Task launch、Session runtime 三处复用，明确主动查询历史、
+共享提示词在 MCP initialize、Task launch 两处复用，明确主动查询历史、
 主动沉淀知识及此文件工作流；不会把全部历史正文注入每次启动。
 
 ## 服务端 Git 权威存储（逐项目显式切换）

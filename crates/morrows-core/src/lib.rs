@@ -185,7 +185,8 @@ pub struct Run {
     pub task_id: Id,
     pub assignment_id: Id,
     pub agent_instance_id: Id,
-    pub external_session_ref: Option<String>,
+    #[serde(alias = "external_session_ref")]
+    pub provider_conversation_ref: Option<String>,
     pub status: String,
     pub stop_reason: Option<String>,
     pub failure_reason: Option<String>,
@@ -278,9 +279,6 @@ pub use dispatch::*;
 
 mod launch;
 pub use launch::*;
-
-mod session;
-pub use session::*;
 
 mod context_package;
 pub use context_package::*;

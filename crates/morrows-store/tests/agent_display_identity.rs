@@ -1,6 +1,4 @@
-use morrows_core::{
-    CreateSession, RegisterAccount, RegisterAgentInstance, RegisterMachine, RegisterProfile,
-};
+use morrows_core::{RegisterAccount, RegisterAgentInstance, RegisterMachine, RegisterProfile};
 use morrows_store::Store;
 use serde_json::json;
 
@@ -112,22 +110,22 @@ async fn archived_agents_leave_fleet_without_losing_identity() {
         .unwrap();
     assert_eq!(agent.display_name, "codebuddy-0");
     assert_eq!(store.agent_fleet().await.unwrap().len(), 1);
-    let session = store
-        .create_session(CreateSession {
-            agent_instance_id: agent.id,
-            title: "active chat".into(),
-        })
+    let task = store
+        .create_task(serde_json::from_value(json!({"title":"identity task"})).unwrap())
         .await
         .unwrap();
-    assert_eq!(store.get_session(session.id).await.unwrap().status, "open");
+    let message = store
+        .create_human_task_message(task.id, agent.id, "identity survives archive", None)
+        .await
+        .unwrap();
 
     let archived = store.archive_agent(agent.id).await.unwrap();
     assert_eq!(archived.status, "archived");
     assert!(archived.archived_at.is_some());
     assert!(store.agent_fleet().await.unwrap().is_empty());
     assert_eq!(
-        store.get_session(session.id).await.unwrap().status,
-        "archived"
+        store.get_task_message(message.id).await.unwrap().body,
+        "identity survives archive"
     );
 
     let still_there = store.get_agent(agent.id).await.unwrap();

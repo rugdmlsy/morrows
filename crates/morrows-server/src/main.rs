@@ -14,7 +14,6 @@ mod oauth;
 mod operator_auth;
 mod runtime_executor;
 mod runtime_proxy;
-mod session;
 mod task_graph;
 
 use anyhow::Context;
@@ -172,7 +171,7 @@ fn default_lease() -> i64 {
 struct StartRunBody {
     assignment_id: Id,
     agent_instance_id: Id,
-    external_session_ref: Option<String>,
+    provider_conversation_ref: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -242,28 +241,11 @@ async fn main() -> anyhow::Result<()> {
     if recovered > 0 {
         tracing::warn!(recovered, "reconciled interrupted launch jobs");
     }
-    let recovered_session_runtimes = store
-        .recover_session_runtime_attempts_after_restart()
-        .await?;
-    if recovered_session_runtimes > 0 {
-        tracing::warn!(
-            recovered_session_runtimes,
-            "marked interrupted Session runtimes failed after restart"
-        );
-    }
     let recovered_deliveries = store.recover_agent_delivery_claims().await?;
     if recovered_deliveries > 0 {
         tracing::warn!(
             recovered_deliveries,
             "returned abandoned Agent delivery claims to the queue"
-        );
-    }
-    let recovered_remote_session_runtimes =
-        session::recover_remote_session_runtime_monitors(store.clone()).await?;
-    if recovered_remote_session_runtimes > 0 {
-        tracing::warn!(
-            recovered = recovered_remote_session_runtimes,
-            "restored morrow-runtime direct Session runtimes after server restart"
         );
     }
     let managed_memory_search = MemorySearch::managed();
@@ -306,7 +288,6 @@ async fn main() -> anyhow::Result<()> {
         .merge(assignment_request::routes())
         .merge(operator_auth::routes())
         .merge(collaboration::routes())
-        .merge(session::routes())
         .merge(dispatch::routes())
         .merge(task_graph::routes())
         .merge(delivery::routes())
@@ -690,7 +671,7 @@ async fn start_run(
                 .start_run(
                     body.assignment_id,
                     body.agent_instance_id,
-                    body.external_session_ref,
+                    body.provider_conversation_ref,
                 )
                 .await?,
         )

@@ -202,60 +202,27 @@ impl Store {
                     .map_err(storage)?
                     .ok_or_else(|| DomainError::NotFound(format!("launch attempt {resume_id}")))?,
             )?;
+            let previous_provider_ref: Option<String> = match previous.run_id {
+                Some(run_id) => {
+                    sqlx::query_scalar("SELECT provider_conversation_ref FROM runs WHERE id=?")
+                        .bind(run_id.to_string())
+                        .fetch_optional(&mut *tx)
+                        .await
+                        .map_err(storage)?
+                        .flatten()
+                }
+                None => None,
+            };
             if previous.task_id != assignment.task_id
                 || previous.agent_instance_id != assignment.agent_instance_id
                 || previous.launch_profile_id != profile.id
                 || !matches!(previous.status.as_str(), "completed" | "failed")
-                || previous.external_session_ref.is_none()
+                || previous_provider_ref.is_none()
             {
                 return Err(DomainError::Conflict(
-                    "resume requires a finished attempt for this task, agent and profile with a session reference".into(),
+                    "resume requires a finished attempt for this task, Agent, and profile whose Run has a provider conversation reference".into(),
                 ));
             }
-        }
-        let session_id = if let Some(resume_id) = input.resume_from_attempt_id {
-            let previous = row_to_launch_attempt(
-                sqlx::query("SELECT * FROM launch_attempts WHERE id=?")
-                    .bind(resume_id.to_string())
-                    .fetch_optional(&mut *tx)
-                    .await
-                    .map_err(storage)?
-                    .ok_or_else(|| DomainError::NotFound(format!("launch attempt {resume_id}")))?,
-            )?;
-            match previous.session_id {
-                Some(session_id) => session_id,
-                None => {
-                    self.ensure_task_session_for_agent_tx(
-                        &mut tx,
-                        assignment.task_id,
-                        assignment.agent_instance_id,
-                    )
-                    .await?
-                }
-            }
-        } else {
-            self.ensure_task_session_for_agent_tx(
-                &mut tx,
-                assignment.task_id,
-                assignment.agent_instance_id,
-            )
-            .await?
-        };
-
-        let session_runtime_active: bool = sqlx::query_scalar(
-            "SELECT EXISTS(
-                SELECT 1 FROM session_runtime_attempts
-                WHERE session_id=? AND status IN ('queued','running')
-            )",
-        )
-        .bind(session_id.to_string())
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(storage)?;
-        if session_runtime_active {
-            return Err(DomainError::Conflict(
-                "Session already has an active direct Agent runtime".into(),
-            ));
         }
 
         let already_active: bool = sqlx::query_scalar(
@@ -287,15 +254,14 @@ impl Store {
             .map_err(storage)?;
         }
         sqlx::query(
-            "INSERT INTO launch_attempts(id,assignment_id,task_id,agent_instance_id,launch_profile_id,session_id,job_id,resume_from_attempt_id,status,cwd,created_at)
-             VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO launch_attempts(id,assignment_id,task_id,agent_instance_id,launch_profile_id,job_id,resume_from_attempt_id,status,cwd,created_at)
+             VALUES(?,?,?,?,?,?,?,?,?,?)",
         )
         .bind(attempt_id.to_string())
         .bind(assignment.id.to_string())
         .bind(assignment.task_id.to_string())
         .bind(assignment.agent_instance_id.to_string())
         .bind(profile.id.to_string())
-        .bind(session_id.to_string())
         .bind(job_id.map(|value| value.to_string()))
         .bind(input.resume_from_attempt_id.map(|value| value.to_string()))
         .bind(if external { "awaiting_agent" } else { "queued" })
@@ -311,7 +277,7 @@ impl Store {
             "task",
             assignment.task_id,
             if external { "launch.awaiting_agent" } else { "launch.queued" },
-            json!({"launch_attempt_id":attempt_id,"assignment_id":assignment.id,"launch_profile_id":profile.id,"session_id":session_id,"job_id":job_id,"resume_from_attempt_id":input.resume_from_attempt_id}),
+            json!({"launch_attempt_id":attempt_id,"assignment_id":assignment.id,"launch_profile_id":profile.id,"job_id":job_id,"resume_from_attempt_id":input.resume_from_attempt_id}),
             None,
         )
         .await?;
@@ -327,6 +293,33 @@ impl Store {
             .map_err(storage)?
             .ok_or_else(|| DomainError::NotFound(format!("launch attempt {id}")))?;
         row_to_launch_attempt(row)
+    }
+
+    pub async fn latest_provider_conversation_ref_for_task(
+        &self,
+        task_id: Id,
+        agent_id: Id,
+        launch_profile_id: Id,
+    ) -> Result<Option<String>, DomainError> {
+        self.get_task(task_id).await?;
+        self.get_agent(agent_id).await?;
+        let value = sqlx::query_scalar(
+            "SELECT r.provider_conversation_ref
+             FROM launch_attempts a
+             JOIN runs r ON r.id=a.run_id
+             WHERE a.task_id=? AND a.agent_instance_id=? AND a.launch_profile_id=?
+               AND r.provider_conversation_ref IS NOT NULL
+             ORDER BY COALESCE(a.ended_at,a.started_at,a.created_at) DESC,a.id DESC
+             LIMIT 1",
+        )
+        .bind(task_id.to_string())
+        .bind(agent_id.to_string())
+        .bind(launch_profile_id.to_string())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage)?
+        .flatten();
+        Ok(value)
     }
 
     pub async fn task_launch_attempts(
@@ -353,7 +346,7 @@ impl Store {
              WHERE ass.role='executor'
                AND ass.status='active'
                AND ass.expires_at>?
-               AND ai.interview_session_id IS NOT NULL
+               AND ai.interview_thread_id IS NOT NULL
                AND (
                  (
                    ass.phase='human_interview'
@@ -362,7 +355,7 @@ impl Store {
                      SELECT 1 FROM agent_deliveries d
                      WHERE d.agent_instance_id=ass.agent_instance_id
                        AND d.task_id=ass.task_id
-                       AND d.kind='session_message'
+                       AND d.kind='task_message'
                        AND d.status='queued'
                    )
                  )
@@ -375,9 +368,10 @@ impl Store {
                  SELECT 1
                  FROM launch_attempts a
                  JOIN launch_profiles p ON p.id=a.launch_profile_id
+                 JOIN runs r ON r.id=a.run_id
                  WHERE a.assignment_id=ass.id
                    AND a.status IN ('completed','failed')
-                   AND a.external_session_ref IS NOT NULL
+                   AND r.provider_conversation_ref IS NOT NULL
                    AND p.adapter IN ('codex_cli','codebuddy_cli')
                )
                AND NOT EXISTS (
@@ -416,9 +410,10 @@ impl Store {
             "SELECT a.*
              FROM launch_attempts a
              JOIN launch_profiles p ON p.id=a.launch_profile_id
+             JOIN runs r ON r.id=a.run_id
              WHERE a.assignment_id=?
                AND a.status IN ('completed','failed')
-               AND a.external_session_ref IS NOT NULL
+               AND r.provider_conversation_ref IS NOT NULL
                AND p.adapter IN ('codex_cli','codebuddy_cli')
              ORDER BY COALESCE(a.ended_at,a.created_at) DESC,a.id DESC
              LIMIT 1",
@@ -429,7 +424,7 @@ impl Store {
         .map_err(storage)?
         .ok_or_else(|| {
             DomainError::Conflict(
-                "intake continuation requires a finished local launch with provider session state"
+                "intake continuation requires a finished local launch with provider conversation state"
                     .into(),
             )
         })?;
@@ -503,7 +498,7 @@ impl Store {
             .await
     }
 
-    /// A managed morrow-runtime worker needs a transport Session even for an
+    /// A managed morrow-runtime worker needs a transport RuntimeScope even for an
     /// intake-only provider process. This does not grant the Agent execution
     /// capability; capability issuance remains gated on Assignment phase.
     pub async fn begin_launch_attempt_with_runtime(
@@ -807,7 +802,7 @@ impl Store {
         &self,
         id: Id,
         exit_code: Option<i64>,
-        external_session_ref: Option<String>,
+        provider_conversation_ref: Option<String>,
         error: Option<String>,
     ) -> Result<LaunchAttempt, DomainError> {
         let now = Utc::now();
@@ -833,10 +828,9 @@ impl Store {
         let success = exit_code == Some(0) && error.is_none();
         let terminal_status = if success { "completed" } else { "failed" };
         sqlx::query(
-            "UPDATE launch_attempts SET status=?,external_session_ref=COALESCE(?,external_session_ref),exit_code=?,error=?,ended_at=? WHERE id=?",
+            "UPDATE launch_attempts SET status=?,exit_code=?,error=?,ended_at=? WHERE id=?",
         )
         .bind(terminal_status)
-        .bind(&external_session_ref)
         .bind(exit_code)
         .bind(&error)
         .bind(now.to_rfc3339())
@@ -864,9 +858,9 @@ impl Store {
             .execute(&mut *tx)
             .await
             .map_err(storage)?;
-            if external_session_ref.is_some() {
-                sqlx::query("UPDATE runs SET external_session_ref=COALESCE(?,external_session_ref) WHERE id=?")
-                    .bind(&external_session_ref)
+            if provider_conversation_ref.is_some() {
+                sqlx::query("UPDATE runs SET provider_conversation_ref=COALESCE(?,provider_conversation_ref) WHERE id=?")
+                    .bind(&provider_conversation_ref)
                     .bind(run_id.to_string())
                     .execute(&mut *tx)
                     .await
@@ -1066,7 +1060,7 @@ impl Store {
             } else {
                 "launch.failed"
             },
-            json!({"launch_attempt_id":id,"exit_code":exit_code,"external_session_ref":external_session_ref,"error":error}),
+            json!({"launch_attempt_id":id,"exit_code":exit_code,"provider_conversation_ref":provider_conversation_ref,"error":error}),
             None,
         )
         .await?;
@@ -1098,10 +1092,10 @@ impl Store {
         input: AcceptExternalLaunch,
         actor: Id,
     ) -> Result<LaunchAttempt, DomainError> {
-        let session_ref = input.external_session_ref.trim();
+        let session_ref = input.provider_conversation_ref.trim();
         if session_ref.is_empty() || session_ref.len() > 1024 {
             return Err(DomainError::InvalidInput(
-                "external_session_ref must contain 1 to 1024 characters".into(),
+                "provider_conversation_ref must contain 1 to 1024 characters".into(),
             ));
         }
         let now = Utc::now();
@@ -1169,7 +1163,7 @@ impl Store {
                 .flatten();
 
         sqlx::query(
-            "INSERT INTO runs(id,task_id,assignment_id,agent_instance_id,external_session_ref,status,started_at)
+            "INSERT INTO runs(id,task_id,assignment_id,agent_instance_id,provider_conversation_ref,status,started_at)
              VALUES(?,?,?,?,?,'running',?)",
         )
         .bind(run_id.to_string())
@@ -1192,9 +1186,8 @@ impl Store {
             .await
             .map_err(storage)?;
         }
-        sqlx::query("UPDATE launch_attempts SET status='running',run_id=?,external_session_ref=?,started_at=? WHERE id=?")
+        sqlx::query("UPDATE launch_attempts SET status='running',run_id=?,started_at=? WHERE id=?")
             .bind(run_id.to_string())
-            .bind(session_ref)
             .bind(now.to_rfc3339())
             .bind(attempt.id.to_string())
             .execute(&mut *tx)
@@ -1712,7 +1705,6 @@ fn row_to_launch_attempt(row: sqlx::sqlite::SqliteRow) -> Result<LaunchAttempt, 
         agent_instance_id: parse_id(row.try_get("agent_instance_id").map_err(storage)?)?,
         launch_profile_id: parse_id(row.try_get("launch_profile_id").map_err(storage)?)?,
         run_id: parse_opt_id(row.try_get("run_id").map_err(storage)?)?,
-        session_id: parse_opt_id(row.try_get("session_id").map_err(storage)?)?,
         job_id: parse_opt_id(row.try_get("job_id").map_err(storage)?)?,
         resume_from_attempt_id: parse_opt_id(
             row.try_get("resume_from_attempt_id").map_err(storage)?,
@@ -1720,7 +1712,6 @@ fn row_to_launch_attempt(row: sqlx::sqlite::SqliteRow) -> Result<LaunchAttempt, 
         restart_run_id: parse_opt_id(row.try_get("restart_run_id").map_err(storage)?)?,
         status: row.try_get("status").map_err(storage)?,
         cwd: row.try_get("cwd").map_err(storage)?,
-        external_session_ref: row.try_get("external_session_ref").map_err(storage)?,
         pid: row.try_get("pid").map_err(storage)?,
         exit_code: row.try_get("exit_code").map_err(storage)?,
         stdout_path: row.try_get("stdout_path").map_err(storage)?,
