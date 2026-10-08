@@ -354,6 +354,20 @@ impl Store {
             sqlx::query("INSERT INTO run_runtime_bindings(run_id,runtime_scope_id,restart_deadline_at,created_at,updated_at) VALUES(?,?,?,?,?)")
                 .bind(run_id.to_string()).bind(runtime_scope_id).bind(deadline).bind(&now).bind(&now)
                 .execute(&mut *tx).await.map_err(storage)?;
+            // A durable binding is only evidence of adopting an execution
+            // scope. It does not claim that a Worker actually ran a command.
+            // Emitted once, in the same transaction as first binding.
+            append_event_tx(
+                &mut tx,
+                "system",
+                "morrow-runtime",
+                "run",
+                run_id,
+                "runtime.scope_bound",
+                json!({"task_id": run.task_id}),
+                None,
+            )
+            .await?;
         }
         tx.commit().await.map_err(storage)?;
         self.run_runtime_binding(run_id)
@@ -712,15 +726,41 @@ impl Store {
     }
 
     pub async fn mark_runtime_scope_terminalized(&self, run_id: Id) -> Result<(), DomainError> {
-        sqlx::query(
-            "UPDATE run_runtime_bindings SET scope_terminalized_at=?,updated_at=? WHERE run_id=?",
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(storage)?;
+        let now = Utc::now().to_rfc3339();
+        let changed = sqlx::query(
+            "UPDATE run_runtime_bindings SET scope_terminalized_at=?,updated_at=?
+             WHERE run_id=? AND scope_terminalized_at IS NULL",
         )
-        .bind(Utc::now().to_rfc3339())
-        .bind(Utc::now().to_rfc3339())
+        .bind(&now)
+        .bind(&now)
         .bind(run_id.to_string())
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(storage)?;
+        if changed.rows_affected() == 1 {
+            let task_id: String = sqlx::query_scalar("SELECT task_id FROM runs WHERE id=?")
+                .bind(run_id.to_string())
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(storage)?;
+            append_event_tx(
+                &mut tx,
+                "system",
+                "morrow-runtime",
+                "run",
+                run_id,
+                "runtime.scope_terminalized",
+                json!({"task_id":task_id}),
+                None,
+            )
+            .await?;
+        }
+        tx.commit().await.map_err(storage)?;
         Ok(())
     }
 
@@ -827,8 +867,9 @@ impl Store {
             .execute(&mut *tx)
             .await
             .map_err(storage)?;
-        sqlx::query(
-            "UPDATE run_runtime_bindings SET scope_terminalized_at=?,updated_at=? WHERE run_id=?",
+        let terminalized = sqlx::query(
+            "UPDATE run_runtime_bindings SET scope_terminalized_at=?,updated_at=?
+             WHERE run_id=? AND scope_terminalized_at IS NULL",
         )
         .bind(now.to_rfc3339())
         .bind(now.to_rfc3339())
@@ -836,6 +877,19 @@ impl Store {
         .execute(&mut *tx)
         .await
         .map_err(storage)?;
+        if terminalized.rows_affected() == 1 {
+            append_event_tx(
+                &mut tx,
+                "system",
+                "morrow-runtime",
+                "run",
+                run_id,
+                "runtime.scope_terminalized",
+                json!({"task_id":run.task_id}),
+                None,
+            )
+            .await?;
+        }
         sqlx::query(
             "UPDATE assignments SET status='released',released_at=?,release_reason=?
                      WHERE id=? AND status='active'",

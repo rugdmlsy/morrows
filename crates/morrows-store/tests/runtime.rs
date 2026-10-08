@@ -126,6 +126,18 @@ async fn cancelling_is_not_cancelled_until_cleanup_confirms() {
         .await
         .unwrap();
     assert_eq!(final_run.status, "cancelled");
+    let events = store
+        .task_events(store.get_assignment(assignment_id).await.unwrap().task_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e.event_type == "runtime.scope_terminalized")
+            .count(),
+        1,
+        "cancelled Run cleanup must report actual scope terminalization"
+    );
     assert_eq!(final_run.failure_reason, None);
     let old_assignment = store.get_assignment(assignment_id).await.unwrap();
     let next_assignment = store
@@ -907,6 +919,19 @@ async fn lsm_job_wait_terminal_event_resumes_same_run_without_new_run() {
             .runtime_scope_id,
         "s_job_wait"
     );
+    let events = store.task_events(assignment.task_id).await.unwrap();
+    for name in ["run.job_wait_registered", "run.job_wait_ready"] {
+        let found: Vec<_> = events
+            .iter()
+            .filter(|event| event.event_type == name)
+            .collect();
+        assert_eq!(
+            found.len(),
+            1,
+            "{name} must appear exactly once in Task events"
+        );
+        assert_eq!(found[0].payload["task_id"], json!(assignment.task_id));
+    }
 }
 
 #[tokio::test]
@@ -1198,5 +1223,69 @@ async fn active_implementing_run_blocks_adhoc_mode() {
             .has_active_implementing_executor_run(other.id)
             .await
             .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn runtime_scope_observability_records_first_bind_and_verified_cleanup_once() {
+    let (store, assignment_id, profile_id) = prepared().await;
+    let assignment = store.get_assignment(assignment_id).await.unwrap();
+    let attempt = store
+        .enqueue_launch(input(json!({
+            "assignment_id": assignment_id, "launch_profile_id":profile_id
+        })))
+        .await
+        .unwrap();
+    store.claim_launch_job().await.unwrap().unwrap();
+    let run = store.begin_launch_attempt(attempt.id).await.unwrap().run;
+
+    store
+        .bind_run_runtime(run.id, "scope_test_only")
+        .await
+        .unwrap();
+    store
+        .bind_run_runtime(run.id, "scope_test_only")
+        .await
+        .unwrap();
+    let prior = store.task_events(assignment.task_id).await.unwrap();
+    let bound: Vec<_> = prior
+        .iter()
+        .filter(|event| event.event_type == "runtime.scope_bound")
+        .collect();
+    assert_eq!(
+        bound.len(),
+        1,
+        "idempotent rebind must not duplicate events"
+    );
+    assert_eq!(bound[0].entity_id, run.id);
+    assert_eq!(
+        bound[0].payload,
+        json!({"task_id":run.task_id}),
+        "scope identifiers and capability tokens must not be emitted"
+    );
+
+    store.mark_runtime_scope_terminalized(run.id).await.unwrap();
+    store.mark_runtime_scope_terminalized(run.id).await.unwrap();
+    let after = store.task_events(assignment.task_id).await.unwrap();
+    let terminal: Vec<_> = after
+        .iter()
+        .filter(|event| event.event_type == "runtime.scope_terminalized")
+        .collect();
+    assert_eq!(
+        terminal.len(),
+        1,
+        "verified terminalization must be recorded exactly once"
+    );
+    assert_eq!(terminal[0].payload, json!({"task_id":run.task_id}));
+    assert_eq!(terminal[0].actor_type, "system");
+    assert_eq!(
+        store
+            .run_runtime_binding(run.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .runtime_scope_id,
+        "scope_test_only",
+        "event instrumentation may not destroy the durable scope"
     );
 }

@@ -814,3 +814,79 @@ async fn incomplete_context_is_explicit_and_events_can_be_paged_and_filtered() {
     assert_eq!(filtered["items"].as_array().unwrap().len(), 1);
     assert_eq!(filtered["items"][0]["event_type"], "task.created");
 }
+
+#[tokio::test]
+async fn task_trace_export_is_authenticated_allowlisted_and_payload_free() {
+    let store = Store::connect("sqlite::memory:").await.unwrap();
+    let agent = store
+        .register_agent("authorized-reader", &[])
+        .await
+        .unwrap();
+    let task = task(&store, "TRACE_PRIVATE_NEVER_EXPORT", None, TaskState::Ready).await;
+    store
+        .create_context_revision(
+            task.id,
+            serde_json::from_value(json!({
+                "goal":"secret test fixture", "background":"private unexported",
+                "constraints":{}, "current_summary":"private",
+                "created_by_actor_id":"human:private"
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let assignment = store
+        .claim_task(task.id, agent.id, "executor", 300)
+        .await
+        .unwrap();
+    let mcp = MorrowsMcp::new(store);
+    assert!(
+        mcp.task_trace_export(request(json!({"task_id":task.id})), caller(None))
+            .await
+            .is_err(),
+        "unauthenticated export must be denied"
+    );
+    let raw = mcp
+        .task_trace_export(
+            request(json!({"task_id":task.id,"limit":2,"offset":0})),
+            caller(Some(agent.id)),
+        )
+        .await
+        .unwrap();
+    assert!(!raw.contains("TRACE_PRIVATE_NEVER_EXPORT"));
+    assert!(!raw.contains(&task.id.to_string()));
+    assert!(!raw.contains(&agent.id.to_string()));
+    assert!(!raw.contains(&assignment.id.to_string()));
+    assert!(!raw.contains("payload"));
+    assert!(!raw.contains("created_at"));
+    let page: Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(page["kind"], "authenticated-sanitized");
+    assert_eq!(page["order"], "newest_first");
+    assert_eq!(page["observedCount"], 2);
+    assert_eq!(page["nextOffset"], 2);
+    assert_eq!(page["events"].as_array().unwrap().len(), 2);
+    for event in page["events"].as_array().unwrap() {
+        let keys: Vec<&str> = event
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(keys, vec!["actorClass", "entity", "type"]);
+    }
+    let next = value(
+        mcp.task_trace_export(
+            request(json!({"task_id":task.id,"limit":2,"offset":2})),
+            caller(Some(agent.id)),
+        )
+        .await,
+    );
+    assert!(next["observedCount"].as_u64().unwrap() >= 1);
+    let missing = mcp
+        .task_trace_export(
+            request(json!({"task_id":uuid::Uuid::new_v4()})),
+            caller(Some(agent.id)),
+        )
+        .await;
+    assert!(missing.is_err());
+}

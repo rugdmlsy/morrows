@@ -105,6 +105,7 @@ impl Store {
             input.run_id,
             "run.job_wait_registered",
             json!({
+                "task_id":run.task_id,
                 "wait_id":wait_id,
                 "source_machine":machine,
                 "job_id":job_id,
@@ -311,6 +312,11 @@ async fn activate_wait_tx(
     .await
     .map_err(storage)?;
     if changed.rows_affected() == 1 {
+        let task_id: String = sqlx::query_scalar("SELECT task_id FROM runs WHERE id=?")
+            .bind(run_id.to_string())
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(storage)?;
         let outbox_id = Uuid::new_v4();
         sqlx::query(
             "INSERT INTO outbox(id,topic,payload_json,status,created_at)
@@ -329,7 +335,7 @@ async fn activate_wait_tx(
             "run",
             run_id,
             if resume_mode == "reconcile" { "run.job_wait_reconciliation_ready" } else { "run.job_wait_ready" },
-            json!({"wait_id":wait_id,"event_id":event_id,"terminal_status":status,"terminal_reason":terminal_reason}),
+            json!({"task_id":task_id,"wait_id":wait_id,"event_id":event_id,"terminal_status":status,"terminal_reason":terminal_reason}),
             None,
         )
         .await?;

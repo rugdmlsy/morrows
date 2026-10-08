@@ -107,3 +107,36 @@ Queries use database `LIMIT/OFFSET`, with one extra row to detect continuation.
 
 Existing callers that assumed full arrays/history must follow these page envelopes.
 The control-plane REST endpoints retain their existing response formats.
+
+## Private Task event trace export
+
+`task_trace_export(task_id,limit?,offset?)` is an explicit authenticated,
+read-only MCP tool for deriving PRIVATE playback metadata from a Task. It
+reuses the Task read authorization and the same bounded newest-first event
+paging as `task_events` (including `nextOffset`). There is no new public
+endpoint and no automatic posting to the company website.
+
+The response is `kind=authenticated-sanitized`, `source=morrows-task-events`,
+`order=newest_first`, with `events` containing ONLY these three categorical
+fields: `type`, `entity`, `actorClass`. A fixed list of generic event types
+is accepted. Arbitrary payloads, timestamps, UUIDs, actor names, auth tokens,
+commands, machine identifiers and results are never copied into the export.
+`observedCount` counts all raw rows in that page and `suppressedCount`
+reports rows not safe to include. A partially redacted page is not a full
+execution trace; follow `nextOffset` to enumerate every page. Paginating
+a live log can race new events; restart if consistency is required.
+
+New task-correlated events:
+- `runtime.scope_bound` is persisted *once* when a Run first records its
+  owned RuntimeScope. This does not prove a Worker started any command.
+- `runtime.scope_terminalized` appears only when a binding is marked
+  terminal after cleanup, including cancellation cleanup. Repeats do not
+  create duplicate terminal events.
+- `run.job_wait_registered` and `run.job_wait_ready` now carry `task_id`,
+  so `task_events` actually finds them. A ready wait only proves receipt
+  of a correlated terminal *notification*, not the contents or correctness
+  of a Worker action.
+
+Do NOT serve a live Task export on a public static page. The public
+xycdev Morrows visualization uses a separately generated, isolated in-memory
+test fixture; it does not call this private tool or copy production data.

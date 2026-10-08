@@ -360,6 +360,13 @@ pub struct EventsRequest {
     pub page: PageRequest,
 }
 
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct TaskTraceExportRequest {
+    pub task_id: String,
+    #[serde(flatten)]
+    pub page: PageRequest,
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ProjectRequest {
     pub project_id: String,
@@ -2068,6 +2075,74 @@ impl MorrowsMcp {
     }
 
     #[tool(
+        description = "Explicit authenticated read-only export of one Task's event TYPES for private replay. Pages are newest-first. Strict allowlist strips actor IDs, task IDs, timestamps, UUIDs, payloads, command/output, machine and runtime secrets. A runtime.scope_bound event proves a Store binding, NOT worker execution; run.job_wait_ready proves receipt of a terminal notification, NOT a captured command. Not for automatic public publishing."
+    )]
+    async fn task_trace_export(
+        &self,
+        Parameters(req): Parameters<TaskTraceExportRequest>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<String, String> {
+        let task_id = parse_id(&req.task_id)?;
+        let agent_id = authenticated_agent(&parts)?;
+        self.ensure_task_read_access(task_id, agent_id).await?;
+        let page = self
+            .store
+            .task_events_page(task_id, None, req.page.limit, req.page.offset)
+            .await
+            .map_err(|e| e.to_string())?;
+        const ALLOWED: &[&str] = &[
+            "task.created",
+            "context.revised",
+            "assignment.claimed",
+            "run.started",
+            "intake.context_read",
+            "intake.interview_started",
+            "intake.interview_converged",
+            "intake.execution_started",
+            "run.checkpointed",
+            "run.completed",
+            "task.state_changed",
+            "runtime.scope_bound",
+            "runtime.scope_terminalized",
+            "run.job_wait_registered",
+            "run.job_wait_ready",
+        ];
+        let count = page.items.len();
+        let events: Vec<Value> = page
+            .items
+            .into_iter()
+            .filter_map(|event| {
+                if !ALLOWED.contains(&event.event_type.as_str())
+                    || !matches!(event.entity_type.as_str(), "task" | "run" | "assignment")
+                    || !matches!(
+                        event.actor_type.as_str(),
+                        "human" | "system" | "agent_instance" | "operator"
+                    )
+                {
+                    return None;
+                }
+                Some(json!({
+                    "type":event.event_type,
+                    "entity":event.entity_type,
+                    "actorClass":event.actor_type
+                }))
+            })
+            .collect();
+        let exported = events.len();
+        Ok(json!({
+            "schemaVersion":1,
+            "kind":"authenticated-sanitized",
+            "source":"morrows-task-events",
+            "order":"newest_first",
+            "observedCount":count,
+            "suppressedCount":count-exported,
+            "nextOffset":page.next_offset,
+            "events":events
+        })
+        .to_string())
+    }
+
+    #[tool(
         description = "Read the latest persisted ContextPackage for any Task. The package can be stale. Return null when no package exists. This tool does not write. Read task_context first for fresh background."
     )]
     async fn context_package_get(
@@ -2301,6 +2376,7 @@ mod tests {
             "dependency_add",
             "dependency_remove",
             "task_wait_for_job",
+            "task_trace_export",
         ] {
             assert!(mcp.tool_router.get(name).is_some(), "missing tool {name}");
         }
