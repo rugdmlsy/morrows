@@ -12,6 +12,15 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Inspect, preview, propose, acknowledge or reject a versioned Task contract through MCP.
+    TaskRevision {
+        task_id: uuid::Uuid,
+        #[arg(value_parser = ["history","preview","propose","ack","reject"])]
+        action: String,
+        /// JSON file for preview/propose (draft), ack (impact and plan), or reject.
+        #[arg(long)]
+        input: Option<std::path::PathBuf>,
+    },
     /// Approve a browser login from the service owner's trusted local/SSH shell.
     OperatorApprove {
         #[arg(long)]
@@ -85,6 +94,42 @@ enum Command {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
+        Command::TaskRevision {
+            task_id,
+            action,
+            input,
+        } => {
+            let tool = match action.as_str() {
+                "history" => "task_revision_history",
+                "preview" => "task_revision_preview",
+                "propose" => "task_revision_propose",
+                "ack" => "task_revision_ack",
+                "reject" => "task_revision_reject",
+                _ => unreachable!("clap limits action values"),
+            };
+            let payload = if action == "history" {
+                serde_json::json!({"task_id": task_id})
+            } else {
+                let path = input.ok_or_else(|| anyhow::anyhow!("--input JSON file is required"))?;
+                let content: serde_json::Value =
+                    serde_json::from_str(&std::fs::read_to_string(path)?)?;
+                anyhow::ensure!(content.is_object(), "revision input must be a JSON object");
+                match action.as_str() {
+                    "preview" | "propose" => serde_json::json!({"task_id":task_id,"draft":content}),
+                    "ack" => serde_json::json!({"task_id":task_id,"ack":content}),
+                    "reject" => {
+                        let mut value = content;
+                        value["task_id"] = serde_json::json!(task_id);
+                        value
+                    }
+                    _ => unreachable!(),
+                }
+            };
+            let client = client::Client::connect().await?;
+            let result = client.call(tool, payload).await?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            Ok(())
+        }
         Command::AgentMerge {
             source_agent_id,
             target_agent_id,

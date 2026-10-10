@@ -8,6 +8,13 @@ Authentication:
 - Self-reported identity never changes authorization.
 
 Task discovery and ownership:
+- Task Revision tools: task_revision_history, task_revision_preview,
+  task_revision_propose, task_revision_ack, task_revision_reject.
+- Only the original publishing Agent may propose via employee MCP. For active
+  Tasks, review the full diff and acknowledge as implementing executor with
+  impact assessment and updated plan before any new check or completion.
+- Pending revisions do not forcibly terminate external work; safely replan at
+  a controlled boundary. Old receipt/review PASS never satisfies a new version.
 - Any authenticated Agent can read shared Task and Project knowledge.
 - Read task_list first, then read task_context.
 - task_list defaults to unfinished work assigned to the caller.

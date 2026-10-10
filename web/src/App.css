@@ -2308,6 +2308,30 @@ button.danger:hover,
 }
 
 .acceptance-editor { grid-column:1 / -1; min-width:0; margin:0; border:1px solid var(--line); border-radius:8px; padding:10px; font-size:calc(10px * var(--font-scale)); }
+.task-revision-panel { min-width:0; display:grid; gap:12px; margin:18px 0; padding:15px 0; border-top:1px solid var(--line-soft); border-bottom:1px solid var(--line-soft); font-size:calc(10px * var(--font-scale)); }
+.task-revision-header { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:8px; }
+.task-revision-header > div { display:grid; gap:3px; }
+.task-revision-header strong { font-size:calc(12px * var(--font-scale)); }
+.task-revision-header small { color:var(--muted); font-size:calc(8px * var(--font-scale)); }
+.revision-pending { padding:12px; border-left:3px solid var(--yellow); background:var(--panel-2); border-radius:6px; }
+.revision-pending p { line-height:1.6; color:var(--ink-2); overflow-wrap:anywhere; }
+.revision-error { color:var(--red); overflow-wrap:anywhere; }
+.revision-editor { display:grid; gap:12px; min-width:0; }
+.revision-editor > label { display:grid; gap:5px; color:var(--ink-2); font-size:calc(9px * var(--font-scale)); }
+.revision-editor input:not([type=checkbox]), .revision-editor textarea { width:100%; min-width:0; padding:8px; border-radius:6px; background:var(--inset); color:var(--ink); border:1px solid var(--line); font-size:calc(10px * var(--font-scale)); }
+.revision-editor textarea { min-height:70px; resize:vertical; }
+.revision-editor .acceptance-editor { width:100%; }
+.revision-actions { display:flex; gap:8px; flex-wrap:wrap; }
+.revision-history { display:grid; gap:8px; min-width:0; }
+.revision-history details, .revision-editor details { border:1px solid var(--line-soft); padding:10px; border-radius:7px; background:var(--panel); min-width:0; }
+.revision-history summary, .revision-editor summary { cursor:pointer; font-size:calc(9px * var(--font-scale)); overflow-wrap:anywhere; }
+.revision-diff { display:grid; gap:10px; min-width:0; padding:8px 0; }
+.revision-diff > div { min-width:0; }
+.revision-diff-columns { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; margin-top:5px; }
+.revision-diff-columns pre { min-width:0; max-height:240px; margin:0; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; font-size:calc(8px * var(--font-scale)); padding:8px; border-radius:5px; background:var(--inset); color:var(--ink-2); }
+.revision-diff-columns pre:first-child { border-left:2px solid var(--red); }
+.revision-diff-columns pre:last-child { border-left:2px solid var(--green); }
+@media (max-width:650px) { .revision-diff-columns { grid-template-columns:minmax(0,1fr); } }
 .criterion-editor {display:flex;flex-wrap:wrap;gap:8px;margin:12px 0;padding:8px;border-bottom:1px solid var(--line);}
 .criterion-editor input:not([type=checkbox]) {min-width:180px;flex:1;}
 .acceptance-detail {overflow:auto;padding:12px 0;}

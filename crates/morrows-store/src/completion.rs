@@ -77,6 +77,16 @@ pub(super) async fn completion_check_conn(
     let required = assignment.role == "executor" && !criteria.is_empty();
     let memory_disposition_required = assignment.role == "executor" && task.project_id.is_some();
     let mut blockers = Vec::new();
+    let pending_revision: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM task_revisions WHERE task_id=? AND status='pending_ack')",
+    )
+    .bind(task.id.to_string())
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(storage)?;
+    if pending_revision {
+        blockers.push("Task revision pending executor acknowledgment; read the revision and submit a new plan".into());
+    }
     if !matches!(run.status.as_str(), "running" | "paused") {
         blockers.push(format!("run is {}", run.status));
     }

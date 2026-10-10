@@ -1,6 +1,6 @@
 # Native Task acceptance contracts
 
-A Task's immutable acceptance_criteria is its completion contract. Work requests,
+A Task's versioned acceptance_criteria is its completion contract. Work requests,
 REST Task creation, and the WebUI can supply criteria. Description text alone
 does not create a gate. Empty contracts keep the existing completion behavior.
 
@@ -8,9 +8,12 @@ Each criterion has a stable id, requirement, verification mode,
 allow_not_applicable, optional required_artifact_kinds and
 requires_independent_review. Mark every criterion requires_independent_review
 to require review of the entire Task, or mark selected criteria. Definitions
-cannot be replaced by context updates. A changed native requirement needs a
-genuine rework Task. Current criteria/version are present in Task reads and
-assembled ContextPackage summaries.
+cannot be replaced by unrelated context updates. Native requirements may change
+through audited Task Revision (see `docs/task-revisions.md`). In-progress
+revisions require executor acknowledgment and replanning before they become
+effective; completed Tasks still require a rework Task. Historical receipts
+remain immutable but cannot satisfy a newer acceptance version. Current
+criteria/version appear in Task reads and assembled ContextPackage summaries.
 
 ## Verification and evidence
 

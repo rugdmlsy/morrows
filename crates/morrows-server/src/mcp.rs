@@ -9,6 +9,7 @@ use morrows_core::{
     CreateTask, Id, RegisterRunJobWait, ReportAgentIdentity, TaskQuery, TaskState,
     UpdateContextRevision,
 };
+use morrows_core::{TaskRevisionAck, TaskRevisionDraft};
 use morrows_store::Store;
 use rmcp::{
     ServerHandler,
@@ -236,6 +237,7 @@ Current summary: {}",
             .map_err(|e| e.to_string())?;
         Ok(json!({
             "task": task, "project": project, "context": context,
+            "task_revision": self.store.task_revision_history(task_id).await.map_err(|e|e.to_string())?,
             "memory": memory, "memory_retrieval": memory_retrieval,
             "instructions": instructions, "collaboration": collaboration,
             "missing_context": missing, "persisted_package": package_ref, "execution": execution,
@@ -278,6 +280,22 @@ pub struct DependencyRequest {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct TaskIdRequest {
     pub task_id: String,
+}
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TaskRevisionInput {
+    pub task_id: String,
+    pub draft: TaskRevisionDraft,
+}
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TaskRevisionAckInput {
+    pub task_id: String,
+    pub ack: TaskRevisionAck,
+}
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TaskRevisionRejectInput {
+    pub task_id: String,
+    pub revision_id: String,
+    pub reason: String,
 }
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct MemorySearchRequest {
@@ -1583,6 +1601,11 @@ impl MorrowsMcp {
             .map_err(|e| e.to_string())?;
         let mut value = serde_json::to_value(&task).map_err(|e| e.to_string())?;
         value["execution"] = execution;
+        value["task_revision"] = self
+            .store
+            .task_revision_history(task_id)
+            .await
+            .map_err(|e| e.to_string())?;
         value["completion_records"] = json!(
             self.store
                 .completion_records(task_id)
@@ -1596,6 +1619,103 @@ impl MorrowsMcp {
                 .map_err(|e| e.to_string())?
         );
         Ok(value.to_string())
+    }
+
+    #[tool(
+        description = "Read all immutable Task Revision versions, before/after contract diffs, pending acknowledgment, executor replan and effective version. Any Agent that can read the Task can inspect history."
+    )]
+    async fn task_revision_history(
+        &self,
+        Parameters(req): Parameters<TaskIdRequest>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<String, String> {
+        let agent = authenticated_agent(&parts)?;
+        let id = parse_id(&req.task_id)?;
+        self.ensure_task_read_access(id, agent).await?;
+        Ok(self
+            .store
+            .task_revision_history(id)
+            .await
+            .map_err(|e| e.to_string())?
+            .to_string())
+    }
+
+    #[tool(
+        description = "Preview a Task contract revision without changing anything. Requires expected_version, a reason, and only the fields to modify. Returns full old/new snapshots and field-level diff."
+    )]
+    async fn task_revision_preview(
+        &self,
+        Parameters(req): Parameters<TaskRevisionInput>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<String, String> {
+        let agent = authenticated_agent(&parts)?;
+        let id = parse_id(&req.task_id)?;
+        self.ensure_task_read_access(id, agent).await?;
+        Ok(self
+            .store
+            .preview_task_revision(id, req.draft)
+            .await
+            .map_err(|e| e.to_string())?
+            .to_string())
+    }
+
+    #[tool(
+        description = "Propose a versioned Task contract edit. Only the original publishing Agent or authorized Human operator may change the spec; being its executor does not grant permission to reduce acceptance. The expected_version must match. For in-progress Tasks the revision is pending_ack and not effective until the executor reads it and explicitly replans; any pending revision blocks completion and new verification."
+    )]
+    async fn task_revision_propose(
+        &self,
+        Parameters(req): Parameters<TaskRevisionInput>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<String, String> {
+        let agent = authenticated_agent(&parts)?;
+        let id = parse_id(&req.task_id)?;
+        Ok(self
+            .store
+            .propose_task_revision(id, &format!("agent:{agent}"), req.draft)
+            .await
+            .map_err(|e| e.to_string())?
+            .to_string())
+    }
+
+    #[tool(
+        description = "Acknowledge a pending Task Revision using the active implementing executor Run. After reading the complete diff, supply an impact assessment and nonempty updated_plan. Applies new authoritative criteria/context atomically and invalidates old receipts for new acceptance while keeping historical evidence."
+    )]
+    async fn task_revision_ack(
+        &self,
+        Parameters(req): Parameters<TaskRevisionAckInput>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<String, String> {
+        let agent = authenticated_agent(&parts)?;
+        let id = parse_id(&req.task_id)?;
+        Ok(self
+            .store
+            .ack_task_revision(id, agent, req.ack)
+            .await
+            .map_err(|e| e.to_string())?
+            .to_string())
+    }
+
+    #[tool(
+        description = "Reject a pending Task Revision with a reason. Only the original publisher or current active executor can reject. The previous effective criteria remain; the refusal and history are audited."
+    )]
+    async fn task_revision_reject(
+        &self,
+        Parameters(req): Parameters<TaskRevisionRejectInput>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<String, String> {
+        let agent = authenticated_agent(&parts)?;
+        let id = parse_id(&req.task_id)?;
+        Ok(self
+            .store
+            .reject_task_revision(
+                id,
+                &format!("agent:{agent}"),
+                parse_id(&req.revision_id)?,
+                &req.reason,
+            )
+            .await
+            .map_err(|e| e.to_string())?
+            .to_string())
     }
 
     #[tool(

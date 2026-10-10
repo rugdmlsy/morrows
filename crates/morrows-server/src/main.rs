@@ -15,6 +15,7 @@ mod operator_auth;
 mod runtime_executor;
 mod runtime_proxy;
 mod task_graph;
+mod task_revision;
 mod verification;
 
 use anyhow::Context;
@@ -299,6 +300,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(collaboration::routes())
         .merge(dispatch::routes())
         .merge(task_graph::routes())
+        .merge(task_revision::routes())
         .merge(delivery::routes())
         .merge(fleet::routes())
         .merge(intake::routes())

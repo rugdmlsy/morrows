@@ -66,6 +66,18 @@ impl Store {
             .map_err(storage)?;
         let run = live_run_conn(&mut tx, run_id, agent, "executor").await?;
         let task = task_conn(&mut tx, run.task_id).await?;
+        let pending_revision: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM task_revisions WHERE task_id=? AND status='pending_ack')",
+        )
+        .bind(task.id.to_string())
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(storage)?;
+        if pending_revision {
+            return Err(DomainError::Conflict(
+                "pending Task revision blocks new verification until acknowledgment".into(),
+            ));
+        }
         let c = task
             .acceptance_criteria
             .iter()
@@ -80,8 +92,8 @@ impl Store {
                 "criterion does not use a runtime check".into(),
             ));
         }
-        let previous: Option<String> = sqlx::query_scalar("SELECT verdict FROM verification_receipts WHERE executor_run_id=? AND criterion_id=? AND kind=? ORDER BY created_at DESC,id DESC LIMIT 1")
-            .bind(run_id.to_string()).bind(criterion_id).bind(mode_name(&c.verification)).fetch_optional(&mut *tx).await.map_err(storage)?;
+        let previous: Option<String> = sqlx::query_scalar("SELECT verdict FROM verification_receipts WHERE executor_run_id=? AND criterion_id=? AND kind=? AND acceptance_version=? AND context_revision_id IS ? ORDER BY created_at DESC,id DESC LIMIT 1")
+            .bind(run_id.to_string()).bind(criterion_id).bind(mode_name(&c.verification)).bind(task.acceptance_version).bind(task.current_context_revision_id.map(|id|id.to_string())).fetch_optional(&mut *tx).await.map_err(storage)?;
         if let Some(verdict) = previous {
             if verdict == "BLOCKED" {
                 return Err(DomainError::Conflict("previous attempt has no reconciled terminal outcome; inspect receipt before retry".into()));
@@ -226,6 +238,18 @@ impl Store {
             ));
         }
         let task = task_conn(&mut tx, reviewer.task_id).await?;
+        let pending_revision: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM task_revisions WHERE task_id=? AND status='pending_ack')",
+        )
+        .bind(task.id.to_string())
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(storage)?;
+        if pending_revision {
+            return Err(DomainError::Conflict(
+                "pending Task revision blocks independent review".into(),
+            ));
+        }
         if task.current_context_revision_id != expected_context_revision_id
             || task.acceptance_version != expected_acceptance_version
         {
@@ -316,6 +340,18 @@ impl Store {
             .await
             .map_err(storage)?;
         let task = task_conn(&mut tx, task_id).await?;
+        let pending_revision: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM task_revisions WHERE task_id=? AND status='pending_ack')",
+        )
+        .bind(task.id.to_string())
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(storage)?;
+        if pending_revision {
+            return Err(DomainError::Conflict(
+                "pending Task revision blocks human review".into(),
+            ));
+        }
         if task.current_context_revision_id != expected_context_revision_id
             || task.acceptance_version != expected_acceptance_version
         {

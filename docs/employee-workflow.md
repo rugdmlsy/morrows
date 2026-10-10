@@ -6,6 +6,15 @@ Read `task_context`, then follow its continuation offsets. Confirm task goal,
 project constraints, acceptance criteria, current context version, instructions,
 handoffs, evidence and `task.assignment_mode`.
 
+If `task_context.task_revision` shows a `pending_ack`, read
+`task_revision_history` and compare the old/new acceptance. Prepare an
+impact assessment and updated plan, then the active implementing executor must
+call `task_revision_ack` before new verification or completion. The publisher
+may use `task_revision_preview`/`task_revision_propose`, but ordinary executor
+ownership does not authorize editing acceptance. Durable task messages notify
+executors, including on resume; queued delivery does not instantly interrupt
+an external running command. See `docs/task-revisions.md`.
+
 For an `open` task, call `task_claim` with the existing task ID and role. Morrows
 acquires the Assignment and creates the Run in one `BEGIN IMMEDIATE` transaction;
 a successful return means execution ownership is live immediately. Competing

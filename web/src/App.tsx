@@ -4,6 +4,7 @@ import "./App.css";
 import {AcceptanceEditor, AcceptanceDetail} from "./Acceptance";
 import type {Criterion} from "./Acceptance";
 import AssignmentRequests from "./AssignmentRequests";
+import { TaskRevisionPanel } from "./TaskRevision";
 import { api } from "./api";
 import OperatorLogin from "./OperatorLogin";
 import {
@@ -2646,6 +2647,7 @@ export default function App() {
                     </div>
                   </div>
                   <p className="description">{selectedTask.description || t("noDescription")}</p>
+                  <TaskRevisionPanel key={selectedTask.id} taskId={selectedTask.id} taskState={selectedTask.state} zh={locale === "zh-CN"} onApplied={() => { void refreshQueueBase(); void refreshDetail(); }} />
                   <AcceptanceDetail taskId={selectedTask.id} criteria={selectedTask.acceptance_criteria || []} contextRevisionId={selectedTask.current_context_revision_id} acceptanceVersion={selectedTask.acceptance_version} data={acceptanceData} zh={locale === "zh-CN"} executorRunId={runs.find(r=>r.status==="running" && assignments.find(a=>a.id===r.assignment_id)?.role==="executor")?.id} refresh={()=>void refreshDetail()} />
 
                   <section className="task-metadata-card">

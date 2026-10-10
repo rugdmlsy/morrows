@@ -20,6 +20,7 @@ mod identity;
 mod job_wait;
 mod milestone;
 mod oauth;
+mod revision;
 mod runtime;
 mod task_graph;
 mod task_rework;
@@ -66,6 +67,7 @@ impl Store {
         };
         store.reconcile_git_memory().await?;
         store.migrate_legacy_acceptance().await?;
+        store.migrate_task_revision_baselines().await?;
         Ok(store)
     }
 
@@ -604,6 +606,7 @@ impl Store {
         .bind(now.to_rfc3339())
         .bind(serde_json::to_string(&input.acceptance_criteria).map_err(storage)?)
         .execute(&mut *tx).await.map_err(storage)?;
+        revision::baseline_tx(&mut tx, id).await?;
         let (actor_type, actor_id) = input
             .owner_actor_id
             .strip_prefix("agent:")
@@ -1910,6 +1913,8 @@ async fn cancel_task_tx(
     .execute(&mut **tx)
     .await
     .map_err(storage)?;
+    sqlx::query("UPDATE task_revisions SET status='rejected',resolved_at=?,ack_impact='Task cancelled' WHERE task_id=? AND status='pending_ack'")
+        .bind(now.to_rfc3339()).bind(&task_id).execute(&mut **tx).await.map_err(storage)?;
     sqlx::query("UPDATE tasks SET state='cancelled',updated_at=? WHERE id=?")
         .bind(now.to_rfc3339())
         .bind(&task_id)

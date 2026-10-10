@@ -8,6 +8,8 @@ pub type Id = Uuid;
 
 mod acceptance;
 pub use acceptance::*;
+mod revision;
+pub use revision::*;
 mod discovery;
 pub use discovery::*;
 

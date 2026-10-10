@@ -160,6 +160,7 @@ impl Store {
         .execute(&mut *tx)
         .await
         .map_err(storage)?;
+        crate::revision::baseline_tx(&mut tx, task_id).await?;
 
         let inherited_dispatch_policy_count = if source.assignment_mode == AssignmentMode::Dispatch
         {

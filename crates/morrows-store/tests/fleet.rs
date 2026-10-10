@@ -625,6 +625,14 @@ async fn migration_preserves_m21_uuids_and_references_and_capacity_is_append_onl
                 .map(|row| row.replace("|external_session_ref:", "|provider_conversation_ref:"))
                 .collect();
         }
+        if table == "tasks" {
+            // Migration 0046 appends the active specification version without
+            // changing any historical Task field or identity.
+            expected = expected
+                .into_iter()
+                .map(|row| format!("{row}|spec_version:Some(1)"))
+                .collect();
+        }
         if table == "message_threads" {
             // Migration 0043 folds Human/Agent transcripts into the existing Task
             // collaboration thread model. Legacy collaboration threads keep their IDs
