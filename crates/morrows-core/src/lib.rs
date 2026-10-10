@@ -6,6 +6,8 @@ use uuid::Uuid;
 
 pub type Id = Uuid;
 
+mod acceptance;
+pub use acceptance::*;
 mod discovery;
 pub use discovery::*;
 
@@ -106,6 +108,8 @@ pub struct CreateProject {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Task {
+    pub acceptance_criteria: Vec<AcceptanceCriterion>,
+    pub acceptance_version: i64,
     pub id: Id,
     pub project_id: Option<Id>,
     pub title: String,
@@ -121,6 +125,8 @@ pub struct Task {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateTask {
+    #[serde(default)]
+    pub acceptance_criteria: Vec<AcceptanceCriterion>,
     pub project_id: Option<Id>,
     pub title: String,
     #[serde(default)]

@@ -4,6 +4,7 @@ use serde_json::json;
 
 fn task_input(title: &str, state: TaskState, project_id: Option<Id>, priority: i32) -> CreateTask {
     CreateTask {
+        acceptance_criteria: vec![],
         project_id,
         title: title.into(),
         description: String::new(),

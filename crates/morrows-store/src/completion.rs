@@ -1,7 +1,7 @@
 use super::*;
 use morrows_core::{
-    CompletionReadiness, CompletionReport, MemoryDisposition, PublishProjectMemory,
-    completion_criteria,
+    CompletionCriterion, CompletionReadiness, CompletionReport, MemoryDisposition,
+    PublishProjectMemory,
 };
 use std::collections::HashSet;
 
@@ -63,10 +63,17 @@ pub(super) async fn completion_check_conn(
         )?),
         None => None,
     };
-    let criteria = context
-        .as_ref()
-        .map(|c| completion_criteria(&c.constraints))
-        .unwrap_or_default();
+    let criteria: Vec<CompletionCriterion> = task
+        .acceptance_criteria
+        .iter()
+        .map(|c| CompletionCriterion {
+            path: c
+                .legacy_path
+                .clone()
+                .unwrap_or_else(|| format!("/acceptance_criteria/{}", c.id)),
+            requirement: serde_json::to_value(c).expect("criterion is serializable"),
+        })
+        .collect();
     let required = assignment.role == "executor" && !criteria.is_empty();
     let memory_disposition_required = assignment.role == "executor" && task.project_id.is_some();
     let mut blockers = Vec::new();
@@ -245,7 +252,7 @@ pub(super) async fn completion_check_conn(
         Some(value) => match serde_json::from_value::<CompletionReport>(value.clone()) {
             Err(error) => blockers.push(format!("invalid result.completion: {error}")),
             Ok(report) => {
-                if Some(report.context_revision_id.as_str())
+                if report.context_revision_id.as_deref()
                     != task
                         .current_context_revision_id
                         .as_ref()
@@ -265,9 +272,17 @@ pub(super) async fn completion_check_conn(
                     if !criteria.iter().any(|c| c.path == check.criterion_path) {
                         blockers.push(format!("unknown criterion {}", check.criterion_path));
                     }
-                    if check.status != "passed"
-                        || check.rationale.trim().is_empty()
-                        || check.artifact_ids.is_empty()
+                    let native = task.acceptance_criteria.iter().find(|c| {
+                        c.legacy_path.as_deref().unwrap_or("") == check.criterion_path
+                            || format!("/acceptance_criteria/{}", c.id) == check.criterion_path
+                    });
+                    let waived = check.status == "NOT_APPLICABLE"
+                        && native.is_some_and(|c| c.allow_not_applicable)
+                        && !check.rationale.trim().is_empty();
+                    if !waived
+                        && (!matches!(check.status.as_str(), "passed" | "PASS")
+                            || check.rationale.trim().is_empty()
+                            || check.artifact_ids.is_empty())
                     {
                         blockers.push(format!(
                             "{} requires passed, rationale and artifact_ids",
@@ -292,12 +307,31 @@ pub(super) async fn completion_check_conn(
         _ => {}
     }
     if required
+        && task
+            .acceptance_criteria
+            .iter()
+            .all(|c| c.legacy_path.is_some())
         && context
             .as_ref()
             .is_none_or(|c| c.current_summary.trim().is_empty())
     {
         blockers
             .push("persist a nonempty current_summary with memory_revise before completion".into());
+    }
+    let criterion_statuses = if assignment.role == "executor" {
+        crate::acceptance::criterion_statuses_conn(conn, &task, run, result).await?
+    } else {
+        vec![]
+    };
+    for status in &criterion_statuses {
+        if !matches!(status.verdict.as_str(), "PASS" | "NOT_APPLICABLE") {
+            blockers.push(format!(
+                "criterion {} {}: {}",
+                status.criterion_id,
+                status.verdict,
+                status.missing_evidence.join(", ")
+            ));
+        }
     }
     let template = json!({"context_revision_id":task.current_context_revision_id,
         "checks":criteria.iter().map(|c| json!({"criterion_path":c.path,"status":"pending","rationale":"","artifact_ids":[]})).collect::<Vec<_>>()});
@@ -308,9 +342,9 @@ pub(super) async fn completion_check_conn(
     };
     Ok(CompletionReadiness {
         run_id:run.id, task_id:task.id, context_revision_id:task.current_context_revision_id,
-        criteria, completion_required:required, memory_disposition_required,
+        criteria, criterion_statuses, acceptance_version:task.acceptance_version, completion_required:required, memory_disposition_required,
         ready:blockers.is_empty(), blockers,
         completion_template:template, memory_disposition_template,
-        verification_limit:"Validates report structure, current context, task evidence references, explicit project-memory disposition and lifecycle; cited project memories must be source-task/project publications; Git-backed projects must have a consistent authoritative projection and any matching Git publication operation must be indexed. It does not execute tests or independently verify artifact or memory contents.".into(),
+        verification_limit:"Validates report structure, current context, task evidence references, explicit project-memory disposition and lifecycle; cited project memories must be source-task/project publications; Git-backed projects must have a consistent authoritative projection and any matching Git publication operation must be indexed. Native verification modes require server-held runtime/reviewer/human receipts. Self-attested and imported legacy criteria still validate declarations and references only.".into(),
     })
 }

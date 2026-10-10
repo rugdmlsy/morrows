@@ -606,7 +606,7 @@ async fn migration_preserves_m21_uuids_and_references_and_capacity_is_append_onl
             // open while every preexisting column remains unchanged.
             expected = expected
                 .into_iter()
-                .map(|row| format!("{row}|assignment_mode:Some(\"open\")"))
+                .map(|row| format!("{row}|assignment_mode:Some(\"open\")|acceptance_criteria_json:Some(\"[]\")|acceptance_version:Some(1)"))
                 .collect();
         }
         if table == "assignments" {

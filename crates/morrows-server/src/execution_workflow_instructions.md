@@ -126,3 +126,6 @@ Completion validation:
 - The server enforces report-structure and reference-ownership requirements.
 - The server does not prove scientific claims.
 - The server does not prove that tests actually passed.
+
+Native acceptance contracts:
+Task.acceptance_criteria is authoritative. Description text alone does not create a completion gate. Use run_completion_check for the current contract and missing evidence. Run criterion_verify for runtime modes. Independent reviewers claim role=reviewer, read review_context and submit criterion_review with the reviewed context/version and artifact IDs. Human review is operator-only. A failed or unknown check cannot complete the Task; preserve receipts and repair. An unknown runtime outcome requires operator reconciliation before retry. Existing context-based imported contracts retain their structural attestation behavior.

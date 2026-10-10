@@ -15,6 +15,7 @@ async fn long_term_memory_scopes_materialize_for_task() {
         .unwrap();
     let task = store
         .create_task(CreateTask {
+            acceptance_criteria: vec![],
             project_id: Some(project.id),
             title: "Use memory".into(),
             description: String::new(),

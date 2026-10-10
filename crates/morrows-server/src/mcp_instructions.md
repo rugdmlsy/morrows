@@ -82,3 +82,6 @@ Paging and history:
 - Use the named detail tools to read full records.
 - Use include_superseded to inspect retained long-term memory history.
 - Old Task context does not reconstruct Project Memory from that time.
+
+Native acceptance contracts:
+Task.acceptance_criteria is authoritative. Description text alone does not create a completion gate. Use run_completion_check for the current contract and missing evidence. Run criterion_verify for runtime modes. Independent reviewers claim role=reviewer, read review_context and submit criterion_review with the reviewed context/version and artifact IDs. Human review is operator-only. A failed or unknown check cannot complete the Task; preserve receipts and repair. An unknown runtime outcome requires operator reconciliation before retry. Existing context-based imported contracts retain their structural attestation behavior.

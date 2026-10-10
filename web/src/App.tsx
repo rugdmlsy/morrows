@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { FormEvent, PointerEvent as ReactPointerEvent } from "react";
 import "./App.css";
+import {AcceptanceEditor, AcceptanceDetail} from "./Acceptance";
+import type {Criterion} from "./Acceptance";
 import AssignmentRequests from "./AssignmentRequests";
 import { api } from "./api";
 import OperatorLogin from "./OperatorLogin";
@@ -43,6 +45,8 @@ type MemoryEntry = {
 };
 
 type Task = {
+  acceptance_criteria: Criterion[];
+  acceptance_version: number;
   id: string;
   project_id?: string | null;
   title: string;
@@ -689,6 +693,8 @@ export default function App() {
   const [dispatchBusy, setDispatchBusy] = useState(false);
   const [title, setTitle] = useState("");
   const [priority, setPriority] = useState(0);
+  const [newCriteria, setNewCriteria] = useState<Criterion[]>([]);
+  const [acceptanceData, setAcceptanceData] = useState<Parameters<typeof AcceptanceDetail>[0]["data"]>(null);
   const [newTaskProjectId, setNewTaskProjectId] = useState("");
   const [projectName, setProjectName] = useState("");
   const [projectSort, setProjectSort] = useState<"updated_desc" | "created_desc" | "name_asc" | "task_count_desc">(() => {
@@ -977,6 +983,7 @@ export default function App() {
         api<LaunchAttempt[]>(`/api/tasks/${selectedId}/launch-attempts`),
         api<LaunchInstruction[]>(`/api/tasks/${selectedId}/launch-instructions`),        api<TaskGate>(`/api/tasks/${selectedId}/gate`),
       ]);
+      setAcceptanceData(await api<Parameters<typeof AcceptanceDetail>[0]["data"]>(`/api/tasks/${selectedId}/verification`));
       setAssignments(nextAssignments);
       setRuns(nextRuns);
       setEvents(nextEvents);
@@ -1391,11 +1398,13 @@ export default function App() {
         body: JSON.stringify({
           project_id: newTaskProjectId || null,
           title: title.trim(),
+          acceptance_criteria: newCriteria,
           description: "",
           priority,
         }),
       });
       setTitle("");
+      setNewCriteria([]);
       setPriority(0);
       selectTask(created.id);
       await refreshQueueBase();
@@ -2388,6 +2397,7 @@ export default function App() {
                   onChange={(e) => setPriority(Number(e.target.value))}
                   title={t("priority")}
                 />
+                <AcceptanceEditor value={newCriteria} onChange={setNewCriteria} zh={locale === "zh-CN"} />
                 <button type="submit">{t("create")}</button>
               </form>
 
@@ -2636,6 +2646,7 @@ export default function App() {
                     </div>
                   </div>
                   <p className="description">{selectedTask.description || t("noDescription")}</p>
+                  <AcceptanceDetail taskId={selectedTask.id} criteria={selectedTask.acceptance_criteria || []} contextRevisionId={selectedTask.current_context_revision_id} acceptanceVersion={selectedTask.acceptance_version} data={acceptanceData} zh={locale === "zh-CN"} executorRunId={runs.find(r=>r.status==="running" && assignments.find(a=>a.id===r.assignment_id)?.role==="executor")?.id} refresh={()=>void refreshDetail()} />
 
                   <section className="task-metadata-card">
                     <div className="task-metadata-head">

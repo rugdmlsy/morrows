@@ -6,6 +6,7 @@ use uuid::Uuid;
 async fn task(store: &Store, title: &str) -> Task {
     store
         .create_task(CreateTask {
+            acceptance_criteria: vec![],
             project_id: None,
             title: title.into(),
             description: String::new(),

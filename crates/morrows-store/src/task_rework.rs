@@ -143,8 +143,8 @@ impl Store {
         sqlx::query(
             "INSERT INTO tasks(
                 id,project_id,title,description,owner_actor_id,state,assignment_mode,
-                priority,created_at,updated_at
-             ) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                priority,created_at,updated_at,acceptance_criteria_json
+             ) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
         )
         .bind(task_id.to_string())
         .bind(source.project_id.map(|id| id.to_string()))
@@ -156,6 +156,7 @@ impl Store {
         .bind(source.priority)
         .bind(now.to_rfc3339())
         .bind(now.to_rfc3339())
+        .bind(serde_json::to_string(&source.acceptance_criteria).map_err(storage)?)
         .execute(&mut *tx)
         .await
         .map_err(storage)?;

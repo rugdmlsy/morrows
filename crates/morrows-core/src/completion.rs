@@ -33,12 +33,14 @@ pub struct MemoryDisposition {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct CompletionReport {
-    pub context_revision_id: String,
+    pub context_revision_id: Option<String>,
     pub checks: Vec<CompletionEvidence>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompletionReadiness {
+    pub criterion_statuses: Vec<crate::CriterionStatus>,
+    pub acceptance_version: i64,
     pub run_id: Id,
     pub task_id: Id,
     pub context_revision_id: Option<Id>,

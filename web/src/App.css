@@ -2275,3 +2275,12 @@ button.danger:hover,
     grid-template-columns: 1fr;
   }
 }
+
+.acceptance-editor { flex-basis:100%; width:100%; border:1px solid var(--border); border-radius:8px; padding:12px; }
+.new-task { flex-wrap:wrap; }
+.criterion-editor {display:flex;flex-wrap:wrap;gap:8px;margin:12px 0;padding:8px;border-bottom:1px solid var(--border);}
+.criterion-editor input:not([type=checkbox]) {min-width:180px;flex:1;}
+.acceptance-detail {overflow:auto;padding:12px 0;}
+.acceptance-detail table {width:100%;border-collapse:collapse;}
+.acceptance-detail td,.acceptance-detail th {padding:8px;text-align:left;vertical-align:top;}
+.acceptance-detail pre {max-height:420px;overflow:auto;white-space:pre-wrap;word-break:break-word;}

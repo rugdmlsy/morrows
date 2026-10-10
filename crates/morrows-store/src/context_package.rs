@@ -203,6 +203,8 @@ impl Store {
             work_item_id,
             objective,
             summary: Some(json!({
+                "acceptance_criteria":task.acceptance_criteria,
+                "acceptance_version":task.acceptance_version,
                 "context":context,
                 "project":project,
                 "relationships":relationships,

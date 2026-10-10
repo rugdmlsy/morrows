@@ -158,7 +158,7 @@ impl MorrowsMcp {
         // Imported research tasks also name explicit acceptance gates
         // `freeze_requires`. Point to the original fields without rewriting or
         // duplicating criteria, and do not interpret them as passed checks.
-        let acceptance_paths: Vec<_> = ["acceptance_criteria", "freeze_requires"]
+        let mut acceptance_paths: Vec<_> = ["acceptance_criteria", "freeze_requires"]
             .into_iter()
             .filter(|key| {
                 context
@@ -173,6 +173,13 @@ impl MorrowsMcp {
             })
             .map(|key| format!("context.constraints.{key}"))
             .collect();
+        if task
+            .acceptance_criteria
+            .iter()
+            .any(|c| c.legacy_path.is_none())
+        {
+            acceptance_paths = vec!["task.acceptance_criteria".into()];
+        }
         if acceptance_paths.is_empty() {
             missing.push("structured_acceptance_criteria");
         }
@@ -391,6 +398,8 @@ pub struct ProjectRequest {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct WorkRequestSubmitRequest {
+    #[serde(default)]
+    pub acceptance_criteria: Vec<morrows_core::AcceptanceCriterion>,
     pub title: String,
     /// Describe the work goal, constraints, acceptance criteria, evidence requirements, and known
     /// uncertainties. Do not prewrite a Human Interview questionnaire or instruct the future
@@ -852,6 +861,80 @@ impl MorrowsMcp {
         Ok(json!({"removed":true}).to_string())
     }
 
+    #[tool(
+        description = "Execute the immutable criterion check through the owned Run runtime. Saves a server receipt. A retry requires a repair or environment-change reason. Unknown outcomes require reconciliation before retry."
+    )]
+    async fn criterion_verify(
+        &self,
+        Parameters(req): Parameters<crate::verification::VerifyRequest>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<String, String> {
+        let agent = authenticated_agent(&parts)?;
+        let control = self
+            .runtime_control
+            .as_ref()
+            .ok_or("morrow-runtime integration is not configured")?;
+        crate::verification::verify(&self.store, control, agent, req)
+            .await
+            .map(|v| v.to_string())
+            .map_err(|e| e.to_string())
+    }
+    #[tool(
+        description = "Read shared Task spec, criteria, artifacts and receipts for an owned reviewer Run. Excludes private executor conversation and checkpoints."
+    )]
+    async fn review_context(
+        &self,
+        Parameters(req): Parameters<crate::verification::ReviewContextRequest>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<String, String> {
+        self.store
+            .review_context(parse_id(&req.run_id)?, authenticated_agent(&parts)?)
+            .await
+            .map(|v| v.to_string())
+            .map_err(|e| e.to_string())
+    }
+    #[tool(
+        description = "Submit one criterion verdict from a live independent reviewer Run. PASS, FAIL or BLOCKED requires findings and same-task artifact IDs. FAIL blocks Task completion until repair and a fresh PASS review."
+    )]
+    async fn criterion_review(
+        &self,
+        Parameters(req): Parameters<crate::verification::ReviewRequest>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<String, String> {
+        self.store
+            .submit_review(
+                parse_id(&req.reviewer_run_id)?,
+                authenticated_agent(&parts)?,
+                parse_id(&req.executor_run_id)?,
+                &req.criterion_id,
+                &req.verdict,
+                &req.rationale,
+                &req.artifact_ids,
+                req.context_revision_id,
+                req.acceptance_version,
+                None,
+            )
+            .await
+            .map(|v| v.to_string())
+            .map_err(|e| e.to_string())
+    }
+    #[tool(
+        description = "Read persisted criterion verification receipts for a Task. These are server records, not executor-supplied verdicts."
+    )]
+    async fn verification_receipts(
+        &self,
+        Parameters(req): Parameters<TaskIdRequest>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<String, String> {
+        let agent = authenticated_agent(&parts)?;
+        let id = parse_id(&req.task_id)?;
+        self.ensure_task_read_access(id, agent).await?;
+        self.store
+            .verification_receipts(id)
+            .await
+            .map(|v| json!(v).to_string())
+            .map_err(|e| e.to_string())
+    }
     #[tool(
         description = "Read or provision a RuntimeScope for the authenticated Agent. For Task execution, pass run_id only. Morrows requires the active implementing executor and reuses that Run scope. For temporary work, pass adhoc=true and machine without run_id. Morrows reuses the AgentInstance and Machine ad-hoc scope. Morrows rejects ad-hoc access while the Agent has an implementing Task Run. The result never exposes runtime credentials."
     )]
@@ -1500,6 +1583,12 @@ impl MorrowsMcp {
             .map_err(|e| e.to_string())?;
         let mut value = serde_json::to_value(&task).map_err(|e| e.to_string())?;
         value["execution"] = execution;
+        value["completion_records"] = json!(
+            self.store
+                .completion_records(task_id)
+                .await
+                .map_err(|e| e.to_string())?
+        );
         value["gate"] = json!(
             self.store
                 .task_gate(task_id)
@@ -1510,7 +1599,7 @@ impl MorrowsMcp {
     }
 
     #[tool(
-        description = "Submit a work request for company scheduling. Describe goals, constraints, acceptance criteria, evidence requirements, and known uncertainties. Do NOT predefine Human Interview questions. The executor derives material questions after reading current context and runtime evidence. Supply project_id to bind an existing visible Project. Omit project_id to create an unbound Task. Morrows rejects unavailable Project IDs. The caller becomes the request owner. Employees cannot choose priority, assignee, or launcher."
+        description = "Submit a work request for company scheduling. Supply acceptance_criteria for an immutable authoritative completion contract. Criteria written only in description do not create a completion gate. Describe goals, constraints, evidence requirements, and known uncertainties. Do NOT predefine Human Interview questions. The executor derives material questions after reading current context and runtime evidence. Supply project_id to bind an existing visible Project. Omit project_id to create an unbound Task. Morrows rejects unavailable Project IDs. The caller becomes the request owner. Employees cannot choose priority, assignee, or launcher."
     )]
     async fn work_request_submit(
         &self,
@@ -1538,6 +1627,7 @@ impl MorrowsMcp {
                 project_id,
                 title: req.title,
                 description: req.description,
+                acceptance_criteria: req.acceptance_criteria,
                 owner_actor_id: format!("agent:{agent_id}"),
                 state: TaskState::Ready,
                 priority: 0,
@@ -2720,6 +2810,7 @@ mod tests {
             .unwrap();
         let task = store
             .create_task(CreateTask {
+                acceptance_criteria: vec![],
                 project_id: Some(project.id),
                 title: "Read project memory".into(),
                 description: String::new(),
@@ -3204,6 +3295,7 @@ mod tests {
         assert!(
             mcp.work_request_submit(
                 Parameters(WorkRequestSubmitRequest {
+                    acceptance_criteria: vec![],
                     title: "Need review".into(),
                     description: "Please review this change".into(),
                     project_id: None,
@@ -3216,6 +3308,7 @@ mod tests {
         let task: Value = serde_json::from_str(
             &mcp.work_request_submit(
                 Parameters(WorkRequestSubmitRequest {
+                    acceptance_criteria: vec![],
                     title: "Need review".into(),
                     description: "Please review this change".into(),
                     project_id: None,
@@ -3243,6 +3336,7 @@ mod tests {
         let other = store.register_agent("rework-other", &[]).await.unwrap();
         let source = store
             .create_task(CreateTask {
+                acceptance_criteria: vec![],
                 project_id: None,
                 title: "Completed source".into(),
                 description: String::new(),
@@ -3334,6 +3428,7 @@ mod tests {
         let bound: Value = serde_json::from_str(
             &mcp.work_request_submit(
                 Parameters(WorkRequestSubmitRequest {
+                    acceptance_criteria: vec![],
                     title: "Bound request".into(),
                     description: "project-aware".into(),
                     project_id: Some(project.id.to_string()),
@@ -3356,6 +3451,7 @@ mod tests {
         let error = mcp
             .work_request_submit(
                 Parameters(WorkRequestSubmitRequest {
+                    acceptance_criteria: vec![],
                     title: "Must not leak".into(),
                     description: String::new(),
                     project_id: Some(missing.to_string()),
@@ -3374,6 +3470,7 @@ mod tests {
         let unbound: Value = serde_json::from_str(
             &mcp.work_request_submit(
                 Parameters(WorkRequestSubmitRequest {
+                    acceptance_criteria: vec![],
                     title: "Legacy unbound".into(),
                     description: String::new(),
                     project_id: None,
@@ -3404,6 +3501,7 @@ mod tests {
         let created: Value = serde_json::from_str(
             &mcp.work_request_submit(
                 Parameters(WorkRequestSubmitRequest {
+                    acceptance_criteria: vec![],
                     title: "Move me".into(),
                     description: String::new(),
                     project_id: Some(alpha.id.to_string()),
@@ -3452,6 +3550,7 @@ mod tests {
         let cancel_task: Value = serde_json::from_str(
             &mcp.work_request_submit(
                 Parameters(WorkRequestSubmitRequest {
+                    acceptance_criteria: vec![],
                     title: "Cancel me".into(),
                     description: String::new(),
                     project_id: None,
@@ -3481,6 +3580,7 @@ mod tests {
         let delete_task: Value = serde_json::from_str(
             &mcp.work_request_submit(
                 Parameters(WorkRequestSubmitRequest {
+                    acceptance_criteria: vec![],
                     title: "Delete me".into(),
                     description: String::new(),
                     project_id: None,
@@ -3524,6 +3624,7 @@ mod tests {
         let created: Value = serde_json::from_str(
             &mcp.work_request_submit(
                 Parameters(WorkRequestSubmitRequest {
+                    acceptance_criteria: vec![],
                     title: "Project lifecycle".into(),
                     description: "exercise project memory completion".into(),
                     project_id: Some(project.id.to_string()),
@@ -3640,6 +3741,7 @@ mod tests {
         let task: Value = serde_json::from_str(
             &mcp.work_request_submit(
                 Parameters(WorkRequestSubmitRequest {
+                    acceptance_criteria: vec![],
                     title: "Project lifecycle".into(),
                     description: "exercise durable memory gate".into(),
                     project_id: Some(project.id.to_string()),

@@ -22,6 +22,7 @@ async fn projects_group_tasks_and_task_can_move_between_projects() {
 
     let task = store
         .create_task(CreateTask {
+            acceptance_criteria: vec![],
             project_id: Some(alpha.id),
             title: "Grouped task".into(),
             description: "metadata".into(),
@@ -70,6 +71,7 @@ async fn task_management_summary_includes_project_executor_and_latest_run() {
         .unwrap();
     let task = store
         .create_task(CreateTask {
+            acceptance_criteria: vec![],
             project_id: Some(project.id),
             title: "Managed task".into(),
             description: "metadata".into(),
@@ -110,6 +112,7 @@ async fn task_rejects_unknown_project() {
     let before = store.list_tasks().await.unwrap().len();
     let err = store
         .create_task(CreateTask {
+            acceptance_criteria: vec![],
             project_id: Some(uuid::Uuid::new_v4()),
             title: "bad project".into(),
             description: String::new(),
@@ -135,6 +138,7 @@ async fn failed_project_repair_is_atomic_and_preserves_existing_binding() {
         .unwrap();
     let task = store
         .create_task(CreateTask {
+            acceptance_criteria: vec![],
             project_id: Some(project.id),
             title: "Keep binding".into(),
             description: String::new(),
@@ -181,6 +185,7 @@ async fn unbound_project_repair_is_atomic_idempotent_and_refuses_reassignment() 
         .unwrap();
     let task = store
         .create_task(CreateTask {
+            acceptance_criteria: vec![],
             project_id: None,
             title: "Legacy unbound".into(),
             description: String::new(),
@@ -231,6 +236,7 @@ async fn pristine_task_can_be_deleted_but_task_with_history_is_preserved() {
     let store = Store::connect("sqlite::memory:").await.unwrap();
     let pristine = store
         .create_task(CreateTask {
+            acceptance_criteria: vec![],
             project_id: None,
             title: "Disposable task".into(),
             description: String::new(),
@@ -245,6 +251,7 @@ async fn pristine_task_can_be_deleted_but_task_with_history_is_preserved() {
 
     let retained = store
         .create_task(CreateTask {
+            acceptance_criteria: vec![],
             project_id: None,
             title: "Task with context".into(),
             description: String::new(),

@@ -15,6 +15,7 @@ mod operator_auth;
 mod runtime_executor;
 mod runtime_proxy;
 mod task_graph;
+mod verification;
 
 use anyhow::Context;
 use axum::{
@@ -262,6 +263,14 @@ async fn main() -> anyhow::Result<()> {
         .route("/projects", get(list_projects).post(create_project))
         .route("/projects/{id}", get(get_project))
         .route("/tasks", get(list_tasks).post(create_task))
+        .route("/tasks/{id}/verification", get(task_verification))
+        .route(
+            "/tasks/{id}/verification/reconcile",
+            post(reconcile_verification),
+        )
+        .route("/tasks/{id}/human-review", post(human_review))
+        .route("/runs/{id}/verify", post(verify_criterion))
+        .route("/runs/{id}/review", post(review_criterion))
         .route("/tasks/management", get(list_task_management))
         .route("/tasks/{id}", get(get_task).delete(delete_task))
         .route("/tasks/{id}/cancel", post(cancel_task))
@@ -532,6 +541,7 @@ async fn get_task(
 ) -> Result<Json<Value>, ApiError> {
     let mut value = json!(state.store.get_task(id).await?);
     value["gate"] = json!(state.store.task_gate(id).await?);
+    value["completion_records"] = json!(state.store.completion_records(id).await?);
     Ok(Json(value))
 }
 
@@ -840,4 +850,127 @@ mod startup_security_tests {
         );
         validate_bind_security(remote, true, true, true, false, true).unwrap();
     }
+}
+
+async fn task_verification(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    let mut statuses = Vec::new();
+    let assignments = state.store.task_assignments(id).await?;
+    for run in state.store.task_runs(id).await? {
+        if matches!(run.status.as_str(), "running" | "paused")
+            && assignments
+                .iter()
+                .any(|a| a.id == run.assignment_id && a.role == "executor")
+        {
+            statuses = state
+                .store
+                .run_completion_check(run.id, run.agent_instance_id, &json!({}))
+                .await?
+                .criterion_statuses;
+            break;
+        }
+    }
+    Ok(Json(
+        json!({"criterion_statuses":statuses,"receipts":state.store.verification_receipts(id).await?,"completion_records":state.store.completion_records(id).await?}),
+    ))
+}
+async fn verify_criterion(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(mut req): Json<verification::VerifyRequest>,
+) -> Result<Json<Value>, ApiError> {
+    req.run_id = id.to_string();
+    let run = state.store.get_run(id).await?;
+    let control = morrow_runtime::MorrowRuntimeControl::from_env()
+        .map_err(|e| DomainError::Conflict(e.to_string()))?
+        .ok_or_else(|| DomainError::Conflict("runtime not configured".into()))?;
+    Ok(Json(
+        verification::verify(&state.store, &control, run.agent_instance_id, req).await?,
+    ))
+}
+async fn review_criterion(
+    State(state): State<AppState>,
+    axum::Extension(identity): axum::Extension<operator_auth::OperatorIdentity>,
+    Path(id): Path<Uuid>,
+    Json(mut req): Json<verification::ReviewRequest>,
+) -> Result<Json<Value>, ApiError> {
+    req.reviewer_run_id = id.to_string();
+    let run = state.store.get_run(id).await?;
+    Ok(Json(
+        state
+            .store
+            .submit_review(
+                id,
+                run.agent_instance_id,
+                Uuid::parse_str(&req.executor_run_id)
+                    .map_err(|_| DomainError::InvalidInput("invalid executor_run_id".into()))?,
+                &req.criterion_id,
+                &req.verdict,
+                &req.rationale,
+                &req.artifact_ids,
+                req.context_revision_id,
+                req.acceptance_version,
+                Some(identity.0),
+            )
+            .await?,
+    ))
+}
+#[derive(Deserialize)]
+struct HumanReviewBody {
+    context_revision_id: Option<Uuid>,
+    acceptance_version: i64,
+    executor_run_id: Uuid,
+    criterion_id: String,
+    verdict: String,
+    rationale: String,
+}
+async fn human_review(
+    State(state): State<AppState>,
+    axum::Extension(identity): axum::Extension<operator_auth::OperatorIdentity>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<HumanReviewBody>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        state
+            .store
+            .submit_human_review(
+                id,
+                req.executor_run_id,
+                &req.criterion_id,
+                &req.verdict,
+                &req.rationale,
+                &identity.0.to_string(),
+                req.context_revision_id,
+                req.acceptance_version,
+            )
+            .await?,
+    ))
+}
+
+#[derive(Deserialize)]
+struct ReconcileBody {
+    receipt_id: String,
+    reason: String,
+    observed_outcome_confirmed: bool,
+}
+async fn reconcile_verification(
+    State(state): State<AppState>,
+    axum::Extension(identity): axum::Extension<operator_auth::OperatorIdentity>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<ReconcileBody>,
+) -> Result<Json<Value>, ApiError> {
+    if !req.observed_outcome_confirmed {
+        return Err(DomainError::InvalidInput(
+            "inspect the first operation outcome before reconciling".into(),
+        )
+        .into());
+    }
+    Ok(Json(
+        state
+            .store
+            .reconcile_verification(id, &req.receipt_id, &req.reason, identity.0)
+            .await?,
+    ))
 }

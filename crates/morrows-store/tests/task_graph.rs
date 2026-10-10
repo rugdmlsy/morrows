@@ -5,6 +5,7 @@ use serde_json::json;
 async fn task(store: &Store, title: &str) -> Task {
     store
         .create_task(CreateTask {
+            acceptance_criteria: vec![],
             project_id: None,
             title: title.into(),
             description: String::new(),
@@ -303,6 +304,7 @@ async fn agent_owned_groups_respect_owner_and_task_write_access() {
     let other = store.register_agent("other-owner", &[]).await.unwrap();
     let own = store
         .create_task(CreateTask {
+            acceptance_criteria: vec![],
             project_id: None,
             title: "own".into(),
             description: String::new(),
@@ -314,6 +316,7 @@ async fn agent_owned_groups_respect_owner_and_task_write_access() {
         .unwrap();
     let foreign = store
         .create_task(CreateTask {
+            acceptance_criteria: vec![],
             project_id: None,
             title: "foreign".into(),
             description: String::new(),

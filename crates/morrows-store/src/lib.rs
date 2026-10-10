@@ -12,6 +12,7 @@ use sqlx::{
 use std::{str::FromStr, time::Duration as StdDuration};
 use uuid::Uuid;
 
+mod acceptance;
 mod continuation;
 mod discovery;
 mod git_memory;
@@ -64,6 +65,7 @@ impl Store {
             fail_after_memory_cas: Default::default(),
         };
         store.reconcile_git_memory().await?;
+        store.migrate_legacy_acceptance().await?;
         Ok(store)
     }
 
@@ -563,6 +565,7 @@ impl Store {
     }
 
     pub async fn create_task(&self, input: CreateTask) -> Result<Task, DomainError> {
+        morrows_core::validate_acceptance(&input.acceptance_criteria)?;
         if input.title.trim().is_empty() {
             return Err(DomainError::InvalidInput(
                 "task title cannot be empty".into(),
@@ -587,8 +590,8 @@ impl Store {
             }
         }
         sqlx::query(
-            "INSERT INTO tasks(id,project_id,title,description,owner_actor_id,state,priority,created_at,updated_at)
-             VALUES(?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO tasks(id,project_id,title,description,owner_actor_id,state,priority,created_at,updated_at,acceptance_criteria_json)
+             VALUES(?,?,?,?,?,?,?,?,?,?)",
         )
         .bind(id.to_string())
         .bind(input.project_id.map(|v| v.to_string()))
@@ -599,6 +602,7 @@ impl Store {
         .bind(input.priority)
         .bind(now.to_rfc3339())
         .bind(now.to_rfc3339())
+        .bind(serde_json::to_string(&input.acceptance_criteria).map_err(storage)?)
         .execute(&mut *tx).await.map_err(storage)?;
         let (actor_type, actor_id) = input
             .owner_actor_id
@@ -816,6 +820,7 @@ impl Store {
             return Err(DomainError::Conflict("assignment lease has expired".into()));
         }
         let expires = now + Duration::seconds(lease_seconds.max(30));
+
         sqlx::query(
             "UPDATE assignments SET renewed_at=?,expires_at=? WHERE id=? AND status='active'",
         )
@@ -1116,7 +1121,7 @@ impl Store {
                 _ => format!("task assignment mode is {mode}"),
             }));
         }
-        if state != "ready" {
+        if state != "ready" && role != "reviewer" {
             return Err(DomainError::Conflict(format!(
                 "task is {state}; only ready tasks can be self-claimed"
             )));
@@ -1287,6 +1292,7 @@ impl Store {
             )));
         }
         let now = Utc::now();
+        acceptance::save_completion_conn(&mut tx, &run, &result, &readiness).await?;
         sqlx::query("UPDATE runs SET status='completed', stop_reason='normal', result_json=?, ended_at=? WHERE id=?")
             .bind(result.to_string()).bind(now.to_rfc3339()).bind(id.to_string()).execute(&mut *tx).await.map_err(storage)?;
         let assignment_role: String = sqlx::query_scalar("SELECT role FROM assignments WHERE id=?")
@@ -1428,6 +1434,7 @@ impl Store {
                 }
             }
         };
+        acceptance::reconcile_legacy_conn(&mut tx, task_id, &input.constraints).await?;
         sqlx::query("INSERT INTO context_revisions(id,task_id,version,parent_revision_id,goal,background,constraints_json,current_summary,created_by_actor_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)")
             .bind(id.to_string()).bind(task_id.to_string()).bind(version).bind(&parent).bind(&input.goal).bind(&input.background)
             .bind(input.constraints.to_string()).bind(&input.current_summary).bind(&input.created_by_actor_id).bind(now.to_rfc3339())
@@ -1542,6 +1549,12 @@ fn row_to_task(row: sqlx::sqlite::SqliteRow) -> Result<Task, DomainError> {
     let state: String = row.try_get("state").map_err(storage)?;
     let assignment_mode: String = row.try_get("assignment_mode").map_err(storage)?;
     Ok(Task {
+        acceptance_criteria: serde_json::from_str(
+            &row.try_get::<String, _>("acceptance_criteria_json")
+                .map_err(storage)?,
+        )
+        .map_err(storage)?,
+        acceptance_version: row.try_get("acceptance_version").map_err(storage)?,
         id: parse_id(row.try_get("id").map_err(storage)?)?,
         project_id: parse_opt_id(row.try_get("project_id").map_err(storage)?)?,
         title: row.try_get("title").map_err(storage)?,
@@ -1933,6 +1946,20 @@ async fn claim_task_tx(
         ));
     }
     let expires = now + Duration::seconds(lease_seconds.max(30));
+    let native_contract:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tasks t,json_each(t.acceptance_criteria_json) c WHERE t.id=? AND json_extract(c.value,'$.legacy_path') IS NULL)").bind(task_id.to_string()).fetch_one(&mut **tx).await.map_err(storage)?;
+    if native_contract && (role == "reviewer" || role == "executor") {
+        let opposite = if role == "reviewer" {
+            "executor"
+        } else {
+            "reviewer"
+        };
+        let same: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM assignments WHERE task_id=? AND agent_instance_id=? AND role=?)").bind(task_id.to_string()).bind(agent_id.to_string()).bind(opposite).fetch_one(&mut **tx).await.map_err(storage)?;
+        if same {
+            return Err(DomainError::Conflict(
+                "executor and reviewer must use independent AgentInstances".into(),
+            ));
+        }
+    }
     let id = Uuid::new_v4();
     if role.trim().is_empty() {
         return Err(DomainError::InvalidInput("role cannot be empty".into()));

@@ -157,6 +157,7 @@ async fn task(
 ) -> morrows_core::Task {
     store
         .create_task(CreateTask {
+            acceptance_criteria: vec![],
             title: title.into(),
             project_id,
             description: "Task background".into(),

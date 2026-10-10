@@ -82,6 +82,7 @@ mod tests {
         let b = store.register_agent("bridge-b", &[]).await.unwrap();
         let task = store
             .create_task(morrows_core::CreateTask {
+                acceptance_criteria: vec![],
                 project_id: None,
                 title: "Bridge task".into(),
                 description: "Task delivery".into(),

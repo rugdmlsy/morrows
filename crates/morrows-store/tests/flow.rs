@@ -20,6 +20,7 @@ async fn vertical_slice_survives_reopen_and_preserves_context_history() {
         .unwrap();
     let task = store
         .create_task(CreateTask {
+            acceptance_criteria: vec![],
             project_id: None,
             title: "Implement vertical slice".into(),
             description: "test".into(),
@@ -112,6 +113,7 @@ async fn concurrent_claim_allows_only_one_active_executor() {
     let b = store.register_agent("agent-b", &[]).await.unwrap();
     let task = store
         .create_task(CreateTask {
+            acceptance_criteria: vec![],
             project_id: None,
             title: "Race".into(),
             description: String::new(),
@@ -149,6 +151,7 @@ async fn run_mutations_enforce_assignment_owner() {
     let intruder = store.register_agent("intruder", &[]).await.unwrap();
     let task = store
         .create_task(CreateTask {
+            acceptance_criteria: vec![],
             project_id: None,
             title: "Ownership".into(),
             description: String::new(),
