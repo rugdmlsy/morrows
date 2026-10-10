@@ -1988,6 +1988,7 @@ button.danger:hover,
   border-bottom: 1px solid var(--line-soft);
 }
 .task-management-tabs button {
+  font-size: calc(9px * var(--font-scale));
   display: inline-flex;
   align-items: center;
   gap: 8px;
@@ -2008,14 +2009,33 @@ button.danger:hover,
   padding: 1px 6px;
   border-radius: 999px;
   background: color-mix(in srgb, var(--ink) 7%, transparent);
-  font-size: 11px;
+  font-size: calc(8px * var(--font-scale));
   text-align: center;
 }
 .collection-management {
+  flex: 1 1 0;
+  min-width: 0;
   min-height: 0;
   display: grid;
+  align-content: start;
   gap: 14px;
-  padding-top: 14px;
+  padding: 14px 6px 24px 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  font-size: calc(10px * var(--font-scale));
+}
+.collection-management select,
+.collection-management input,
+.collection-management button {
+  font-size: calc(9px * var(--font-scale));
+}
+.collection-management .text-button {
+  font-size: calc(10px * var(--font-scale));
+}
+.collection-management .compact-action,
+.collection-management code {
+  font-size: calc(8px * var(--font-scale));
 }
 .collection-toolbar,
 .collection-form-row,
@@ -2040,6 +2060,7 @@ button.danger:hover,
 }
 .collection-detail {
   display: grid;
+  min-width: 0;
   gap: 18px;
   padding: 18px;
   border: 1px solid var(--line-soft);
@@ -2054,12 +2075,13 @@ button.danger:hover,
 }
 .collection-heading h2 {
   margin: 4px 0;
-  font-size: 18px;
+  font-size: calc(12px * var(--font-scale));
 }
 .collection-heading small,
 .collection-form-row small,
 .group-assignment-panel small {
   color: var(--muted);
+  font-size: calc(8px * var(--font-scale));
 }
 .chain-node-list,
 .group-member-list,
@@ -2099,7 +2121,7 @@ button.danger:hover,
 .chain-node p {
   margin: 2px 0 0;
   color: var(--muted);
-  font-size: 12px;
+  font-size: calc(8px * var(--font-scale));
   overflow-wrap: anywhere;
 }
 .chain-node small,
@@ -2120,7 +2142,7 @@ button.danger:hover,
 }
 .compact-action {
   padding: 5px 8px !important;
-  font-size: 11px;
+  font-size: calc(8px * var(--font-scale));
 }
 .chain-gate-pill {
   display: inline-flex;
@@ -2130,7 +2152,7 @@ button.danger:hover,
   padding: 3px 8px;
   border: 1px solid var(--line);
   border-radius: 999px;
-  font-size: 11px;
+  font-size: calc(8px * var(--font-scale));
   font-weight: 700;
   text-transform: uppercase;
 }
@@ -2273,6 +2295,15 @@ button.danger:hover,
   }
   .task-chain-successors {
     grid-template-columns: 1fr;
+  }
+}
+
+/* At phone widths, the document scrolls instead of a nested collection pane. */
+@media (max-width: 800px) {
+  .collection-management {
+    flex: none;
+    overflow: visible;
+    overscroll-behavior: auto;
   }
 }
 
