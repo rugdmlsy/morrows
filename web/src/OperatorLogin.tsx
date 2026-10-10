@@ -78,7 +78,7 @@ function MorrowsOAuthLogin({ locale, onLogin }: { locale: Locale; onLogin: () =>
     </button>
     {(required || error) && <div className="operator-signin-hint">
       <span>{error || (zh ? "Morrows 控制台使用内置 runtime OAuth，不依赖独立 LSM。" : "Morrows uses its built-in runtime OAuth and does not depend on standalone LSM.")}</span>
-      {!!getMorrowsOAuthToken() && <button type="button" onClick={() => { setMorrowsOAuthToken(""); setIdentity(null); setRequired(true); onLogin(); }}>{zh ? "清除本标签页 OAuth" : "Clear tab OAuth"}</button>}
+      {!!getMorrowsOAuthToken() && <button type="button" onClick={() => { setMorrowsOAuthToken(""); setIdentity(null); setRequired(true); onLogin(); }}>{zh ? "退出此浏览器" : "Sign out of this browser"}</button>}
     </div>}
   </div>;
 }

@@ -14,6 +14,7 @@ test('WebUI rotates the Morrows refresh token and retries one 401', async () => 
     ['morrows.oauth_refresh_token', 'old-refresh'],
     ['morrows.oauth_client_id', 'client-a'],
   ]);
+  const persisted = new Map();
   const saved = {
     window: globalThis.window,
     fetch: globalThis.fetch,
@@ -34,9 +35,11 @@ test('WebUI rotates the Morrows refresh token and retries one 401', async () => 
       removeItem: key => storage.delete(key),
     },
     localStorage: {
-      getItem: () => null,
-      removeItem: () => {},
+      getItem: key => persisted.get(key) || null,
+      setItem: (key, value) => persisted.set(key, value),
+      removeItem: key => persisted.delete(key),
     },
+    addEventListener: () => {},
     dispatchEvent: () => true,
   };
   globalThis.fetch = async (url, options = {}) => {
@@ -77,9 +80,9 @@ test('WebUI rotates the Morrows refresh token and retries one 401', async () => 
     const module = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`);
     const result = await module.api('/api/tasks');
     assert.deepEqual(result, { ok: true });
-    assert.equal(storage.get('morrows.oauth_access_token'), 'new-access');
-    assert.equal(storage.get('morrows.oauth_refresh_token'), 'new-refresh');
-    assert.equal(storage.get('morrows.oauth_client_id'), 'client-a');
+    assert.deepEqual(JSON.parse(persisted.get('morrows.oauth_browser_session.v1')), {
+      access: 'new-access', refresh: 'new-refresh', client: 'client-a',
+    });
     assert.equal(calls.length, 3);
   } finally {
     globalThis.window = saved.window;
