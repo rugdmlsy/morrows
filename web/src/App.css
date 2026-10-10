@@ -2276,11 +2276,10 @@ button.danger:hover,
   }
 }
 
-.acceptance-editor { flex-basis:100%; width:100%; border:1px solid var(--border); border-radius:8px; padding:12px; }
-.new-task { flex-wrap:wrap; }
-.criterion-editor {display:flex;flex-wrap:wrap;gap:8px;margin:12px 0;padding:8px;border-bottom:1px solid var(--border);}
+.acceptance-editor { grid-column:1 / -1; min-width:0; margin:0; border:1px solid var(--line); border-radius:8px; padding:10px; font-size:calc(10px * var(--font-scale)); }
+.criterion-editor {display:flex;flex-wrap:wrap;gap:8px;margin:12px 0;padding:8px;border-bottom:1px solid var(--line);}
 .criterion-editor input:not([type=checkbox]) {min-width:180px;flex:1;}
 .acceptance-detail {overflow:auto;padding:12px 0;}
-.acceptance-detail table {width:100%;border-collapse:collapse;}
+.acceptance-detail table {width:100%;border-collapse:collapse;font-size:calc(11px * var(--font-scale));}
 .acceptance-detail td,.acceptance-detail th {padding:8px;text-align:left;vertical-align:top;}
 .acceptance-detail pre {max-height:420px;overflow:auto;white-space:pre-wrap;word-break:break-word;}

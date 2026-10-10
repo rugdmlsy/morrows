@@ -2397,8 +2397,8 @@ export default function App() {
                   onChange={(e) => setPriority(Number(e.target.value))}
                   title={t("priority")}
                 />
-                <AcceptanceEditor value={newCriteria} onChange={setNewCriteria} zh={locale === "zh-CN"} />
                 <button type="submit">{t("create")}</button>
+                <AcceptanceEditor value={newCriteria} onChange={setNewCriteria} zh={locale === "zh-CN"} />
               </form>
 
               <div className="task-list project-task-list">
