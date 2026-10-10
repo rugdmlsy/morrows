@@ -253,6 +253,17 @@ pub struct CollectionRequest {
     pub id: Option<String>,
 }
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct AgentGroupCreateRequest {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+}
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct AgentGroupMemberRequest {
+    pub group_id: String,
+    pub task_id: String,
+}
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct DependencyRequest {
     pub task_id: String,
     pub depends_on_task_id: String,
@@ -739,6 +750,70 @@ impl MorrowsMcp {
             )
             .to_string()),
         }
+    }
+    #[tool(
+        description = "Create an agent-owned Task Group without operator approval. The authenticated AgentInstance owns this group; only the owner may change membership. Groups never change task dependency gates."
+    )]
+    async fn task_group_create(
+        &self,
+        Parameters(req): Parameters<AgentGroupCreateRequest>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<String, String> {
+        let agent = authenticated_agent(&parts)?;
+        Ok(json!(
+            self.store
+                .create_agent_task_group(
+                    agent,
+                    morrows_core::SaveTaskCollection {
+                        name: req.name,
+                        description: req.description,
+                        archived: false
+                    }
+                )
+                .await
+                .map_err(|e| e.to_string())?
+        )
+        .to_string())
+    }
+    #[tool(
+        description = "Add one task to a Task Group created by this AgentInstance. The task must be owned by or assigned to the caller. This does not bypass task chain prerequisites."
+    )]
+    async fn task_group_add_member(
+        &self,
+        Parameters(req): Parameters<AgentGroupMemberRequest>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<String, String> {
+        let agent = authenticated_agent(&parts)?;
+        self.store
+            .change_agent_task_group_member(
+                agent,
+                parse_id(&req.group_id)?,
+                parse_id(&req.task_id)?,
+                false,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(json!({"ok":true}).to_string())
+    }
+    #[tool(
+        description = "Remove one owned or assigned task from a Task Group created by this AgentInstance. This does not change task chain prerequisites."
+    )]
+    async fn task_group_remove_member(
+        &self,
+        Parameters(req): Parameters<AgentGroupMemberRequest>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<String, String> {
+        let agent = authenticated_agent(&parts)?;
+        self.store
+            .change_agent_task_group_member(
+                agent,
+                parse_id(&req.group_id)?,
+                parse_id(&req.task_id)?,
+                true,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(json!({"ok":true}).to_string())
     }
     #[tool(
         description = "Add an unconditional legacy prerequisite to a writable task. Morrows rejects cycles. The prerequisite must finish before execution."
@@ -2371,6 +2446,9 @@ mod tests {
         assert_eq!(tools.list_changed, Some(true));
         for name in [
             "task_group_get",
+            "task_group_create",
+            "task_group_add_member",
+            "task_group_remove_member",
             "task_chain_get",
             "task_gate",
             "dependency_add",

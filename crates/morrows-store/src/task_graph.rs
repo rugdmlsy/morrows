@@ -1,4 +1,5 @@
 use super::*;
+use crate::memory::task_writer_conn;
 use morrows_core::*;
 use std::collections::{HashMap, HashSet};
 
@@ -280,6 +281,126 @@ impl Store {
         tx.commit().await.map_err(storage)?;
         Ok(result)
     }
+    /// Employee group management is separate from control-plane group management.
+    /// An agent cannot alter legacy operator-created groups or another agent's group.
+    pub async fn create_agent_task_group(
+        &self,
+        agent_id: Id,
+        input: SaveTaskCollection,
+    ) -> Result<TaskCollection, DomainError> {
+        let name = input.name.trim();
+        if name.is_empty() || name.chars().count() > 160 {
+            return Err(DomainError::InvalidInput(
+                "group name must contain 1..160 characters".into(),
+            ));
+        }
+        if input.description.len() > 8192 || input.archived {
+            return Err(DomainError::InvalidInput(
+                "invalid new group description or archived state".into(),
+            ));
+        }
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(storage)?;
+        let exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM agent_instances WHERE id=?)")
+                .bind(agent_id.to_string())
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(storage)?;
+        if !exists {
+            return Err(DomainError::NotFound("agent instance".into()));
+        }
+        let id = Uuid::new_v4();
+        let now = Utc::now().to_rfc3339();
+        sqlx::query("INSERT INTO task_groups(id,name,description,archived,created_at,updated_at,owner_agent_instance_id) VALUES(?,?,?,0,?,?,?)")
+            .bind(id.to_string()).bind(name).bind(&input.description)
+            .bind(&now).bind(&now).bind(agent_id.to_string())
+            .execute(&mut *tx).await.map_err(storage)?;
+        append_event_tx(
+            &mut tx,
+            "agent_instance",
+            &agent_id.to_string(),
+            "task_groups",
+            id,
+            "collection.created",
+            json!({"name":name}),
+            None,
+        )
+        .await?;
+        tx.commit().await.map_err(storage)?;
+        Ok(TaskCollection {
+            id,
+            name: name.into(),
+            description: input.description,
+            archived: false,
+            created_at: parse_dt(now.clone())?,
+            updated_at: parse_dt(now)?,
+        })
+    }
+
+    pub async fn change_agent_task_group_member(
+        &self,
+        agent_id: Id,
+        group_id: Id,
+        task_id: Id,
+        remove: bool,
+    ) -> Result<(), DomainError> {
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(storage)?;
+        let row =
+            sqlx::query("SELECT owner_agent_instance_id,archived FROM task_groups WHERE id=?")
+                .bind(group_id.to_string())
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(storage)?
+                .ok_or_else(|| DomainError::NotFound("task group".into()))?;
+        let owner: Option<String> = row.try_get("owner_agent_instance_id").map_err(storage)?;
+        let archived: bool = row.try_get("archived").map_err(storage)?;
+        if archived {
+            return Err(DomainError::Conflict("group is archived".into()));
+        }
+        if owner.as_deref() != Some(agent_id.to_string().as_str()) {
+            return Err(DomainError::Conflict(
+                "only the creating agent may modify this group".into(),
+            ));
+        }
+        task_writer_conn(&mut tx, task_id, agent_id).await?;
+        if remove {
+            sqlx::query("DELETE FROM task_group_members WHERE group_id=? AND task_id=?")
+                .bind(group_id.to_string())
+                .bind(task_id.to_string())
+                .execute(&mut *tx)
+                .await
+                .map_err(storage)?;
+        } else {
+            sqlx::query("INSERT OR IGNORE INTO task_group_members(group_id,task_id) VALUES(?,?)")
+                .bind(group_id.to_string())
+                .bind(task_id.to_string())
+                .execute(&mut *tx)
+                .await
+                .map_err(storage)?;
+        }
+        append_event_tx(
+            &mut tx,
+            "agent_instance",
+            &agent_id.to_string(),
+            "task_groups",
+            group_id,
+            "collection.member_changed",
+            json!({"task_id":task_id,"removed":remove}),
+            None,
+        )
+        .await?;
+        tx.commit().await.map_err(storage)?;
+        Ok(())
+    }
+
     /// Archive instead of destroying history. Archiving a chain never disables gates.
     pub async fn archive_task_collection(&self, chain: bool, id: Id) -> Result<(), DomainError> {
         let table = tables(chain).0;

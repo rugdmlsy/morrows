@@ -295,3 +295,123 @@ async fn chain_detail_preserves_operator_provenance_without_fake_agent() {
         "operator:control-plane"
     );
 }
+
+#[tokio::test]
+async fn agent_owned_groups_respect_owner_and_task_write_access() {
+    let store = Store::connect("sqlite::memory:").await.unwrap();
+    let owner = store.register_agent("group-owner", &[]).await.unwrap();
+    let other = store.register_agent("other-owner", &[]).await.unwrap();
+    let own = store
+        .create_task(CreateTask {
+            project_id: None,
+            title: "own".into(),
+            description: String::new(),
+            owner_actor_id: format!("agent:{}", owner.id),
+            state: TaskState::Ready,
+            priority: 0,
+        })
+        .await
+        .unwrap();
+    let foreign = store
+        .create_task(CreateTask {
+            project_id: None,
+            title: "foreign".into(),
+            description: String::new(),
+            owner_actor_id: format!("agent:{}", other.id),
+            state: TaskState::Ready,
+            priority: 0,
+        })
+        .await
+        .unwrap();
+
+    let group = store
+        .create_agent_task_group(
+            owner.id,
+            SaveTaskCollection {
+                name: "  Agent Group  ".into(),
+                description: "bounded".into(),
+                archived: false,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(group.name, "Agent Group");
+    assert!(
+        store
+            .change_agent_task_group_member(owner.id, group.id, own.id, false)
+            .await
+            .is_ok()
+    );
+    assert!(
+        store
+            .change_agent_task_group_member(owner.id, group.id, own.id, false)
+            .await
+            .is_ok()
+    );
+    assert_eq!(
+        store.task_collection_detail(false, group.id).await.unwrap()["members"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    assert!(
+        store
+            .change_agent_task_group_member(owner.id, group.id, foreign.id, false)
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .change_agent_task_group_member(other.id, group.id, own.id, false)
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .change_agent_task_group_member(other.id, group.id, own.id, true)
+            .await
+            .is_err()
+    );
+
+    let old = store
+        .save_task_collection(
+            false,
+            None,
+            SaveTaskCollection {
+                name: "Operator legacy".into(),
+                description: String::new(),
+                archived: false,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        store
+            .change_agent_task_group_member(owner.id, old.id, own.id, false)
+            .await
+            .is_err()
+    );
+
+    store
+        .change_agent_task_group_member(owner.id, group.id, own.id, true)
+        .await
+        .unwrap();
+    assert!(
+        store.task_collection_detail(false, group.id).await.unwrap()["members"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    store
+        .archive_task_collection(false, group.id)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .change_agent_task_group_member(owner.id, group.id, own.id, false)
+            .await
+            .is_err()
+    );
+}

@@ -415,7 +415,7 @@ impl Store {
     }
 }
 
-pub(super) async fn task_writer_conn(
+pub(crate) async fn task_writer_conn(
     conn: &mut sqlx::SqliteConnection,
     task_id: Id,
     agent_id: Id,
