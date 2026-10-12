@@ -546,12 +546,32 @@ async fn historical_reviewer_may_become_executor_after_releasing_role() {
     let active_conflict = s.claim_task(t.id, a.id, "executor", 300).await.unwrap_err();
     assert!(active_conflict.to_string().contains("active opposite-role"));
 
-    // A finished reviewer assignment is part of history, not a permanent ban.
-    s.complete_run(first.id, a.id, json!({})).await.unwrap();
-    let next = run(&s, &t, a.id, "executor").await;
+    // A cancelled unmanaged reviewer releases its Assignment and restores ready.
+    let cancelled = s.request_run_cancel(first.id).await.unwrap();
+    assert_eq!(cancelled.status, "cancelled");
+    assert_eq!(s.get_task(t.id).await.unwrap().state, TaskState::Ready);
+    let next = s
+        .claim_task_for_execution(t.id, a.id, "executor", 300)
+        .await
+        .unwrap()
+        .run;
     assert_eq!(next.agent_instance_id, a.id);
 
     // A fresh reviewer must still be a different AgentInstance.
     let independent = run(&s, &t, b.id, "reviewer").await;
     assert_ne!(independent.agent_instance_id, next.agent_instance_id);
+}
+
+#[tokio::test]
+async fn no_runtime_executor_cannot_be_cancelled_as_unmanaged_reviewer() {
+    let s = Store::connect("sqlite::memory:").await.unwrap();
+    let a = s.register_agent("unmanaged-executor", &[]).await.unwrap();
+    let t = task(&s, vec![criterion("review", "independent_review")]).await;
+    let r = run(&s, &t, a.id, "executor").await;
+    let err = s.request_run_cancel(r.id).await.unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("no managed runtime provisioning intent")
+    );
+    assert_eq!(s.get_run(r.id).await.unwrap().status, "running");
 }

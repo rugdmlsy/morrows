@@ -654,9 +654,40 @@ impl Store {
         .await
         .map_err(storage)?;
         if !lsm_runtime {
-            return Err(DomainError::Conflict(
-                "Run has no managed runtime provisioning intent".into(),
-            ));
+            let role: String = sqlx::query_scalar("SELECT role FROM assignments WHERE id=?")
+                .bind(run.assignment_id.to_string())
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(storage)?;
+            if role != "reviewer" {
+                return Err(DomainError::Conflict(
+                    "Run has no managed runtime provisioning intent".into(),
+                ));
+            }
+            // Reviewers without managed runtimes have no resources to terminate.
+            // Finish their cancellation atomically rather than leaving the role locked.
+            sqlx::query("UPDATE runs SET status='cancelled',stop_reason='user_cancelled',ended_at=? WHERE id=?")
+                .bind(now.to_rfc3339()).bind(run_id.to_string())
+                .execute(&mut *tx).await.map_err(storage)?;
+            sqlx::query("UPDATE assignments SET status='released',released_at=?,release_reason='cancelled' WHERE id=? AND status='active'")
+                .bind(now.to_rfc3339()).bind(run.assignment_id.to_string())
+                .execute(&mut *tx).await.map_err(storage)?;
+            sqlx::query("UPDATE tasks SET state='ready',updated_at=? WHERE id=? AND state='in_progress' AND NOT EXISTS (SELECT 1 FROM assignments WHERE task_id=? AND role='executor' AND status='active')")
+                .bind(now.to_rfc3339()).bind(run.task_id.to_string()).bind(run.task_id.to_string())
+                .execute(&mut *tx).await.map_err(storage)?;
+            append_event_tx(
+                &mut tx,
+                "human",
+                "local",
+                "run",
+                run_id,
+                "run.cancelled",
+                json!({"reason":"user_cancelled","unmanaged_reviewer":true}),
+                None,
+            )
+            .await?;
+            tx.commit().await.map_err(storage)?;
+            return self.get_run(run_id).await;
         }
         if run.status == "cancelling" {
             tx.commit().await.map_err(storage)?;
