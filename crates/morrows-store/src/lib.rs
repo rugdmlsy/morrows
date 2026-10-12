@@ -1958,10 +1958,10 @@ async fn claim_task_tx(
         } else {
             "reviewer"
         };
-        let same: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM assignments WHERE task_id=? AND agent_instance_id=? AND role=?)").bind(task_id.to_string()).bind(agent_id.to_string()).bind(opposite).fetch_one(&mut **tx).await.map_err(storage)?;
+        let same: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM assignments WHERE task_id=? AND agent_instance_id=? AND role=? AND status='active')").bind(task_id.to_string()).bind(agent_id.to_string()).bind(opposite).fetch_one(&mut **tx).await.map_err(storage)?;
         if same {
             return Err(DomainError::Conflict(
-                "executor and reviewer must use independent AgentInstances".into(),
+                "release the active opposite-role assignment before switching roles".into(),
             ));
         }
     }
