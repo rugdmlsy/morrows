@@ -637,6 +637,9 @@ button.project-group-head:disabled { cursor: default; opacity: 1; }
   color: inherit;
   text-align: left;
 }
+.task-row-shell { position: relative; min-width: 0; }
+.task-row-shell > .task-row { padding-right: 38px; }
+.task-row-shell > .task-copy-button { position: absolute; top: 7px; right: 5px; }
 .task-row:hover { background: var(--panel-2); }
 .task-row.selected { background: var(--panel-2); border-color: var(--line); }
 .task-row-main { display: flex; gap: 8px; align-items: center; min-width: 0; }
@@ -773,6 +776,9 @@ button.project-group-head:disabled { cursor: default; opacity: 1; }
   grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
   gap: 7px;
 }
+.unclassified-task-shell { position: relative; min-width: 0; }
+.unclassified-task-shell > .unclassified-task-card { width: 100%; height: 100%; padding-right: 38px; }
+.unclassified-task-shell > .task-copy-button { position: absolute; top: 8px; right: 8px; }
 .unclassified-task-card {
   min-width: 0;
   padding: 10px;
@@ -1208,6 +1214,8 @@ h3 { margin: 20px 0 8px; color: var(--ink-3); font: 700 calc(8px * var(--font-sc
 .task-management-table time { color: var(--ink-3); white-space: nowrap; }
 
 .task-management-title-cell { min-width: 280px; max-width: 420px !important; }
+.task-management-copy-line { display: flex; align-items: center; gap: 6px; }
+.task-management-copy-line .task-copy-button { flex: none; }
 .task-management-title-cell > button {
   width: 100%;
   padding: 0;
@@ -1952,6 +1960,26 @@ h3 { margin: 20px 0 8px; color: var(--ink-3); font: 700 calc(8px * var(--font-sc
 .operator-pairing { display: grid; gap: 10px; }
 .operator-oauth-login { display: grid; gap: 4px; justify-items: end; }
 .operator-signin-hint { max-width: 260px; font-size: 12px; text-align: left; }
+
+.task-copy-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 28px;
+  padding: 5px 9px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel);
+  color: var(--ink-3);
+  cursor: pointer;
+  font-size: calc(9px * var(--font-scale));
+  line-height: 1.2;
+  white-space: nowrap;
+}
+.task-copy-button.icon-only { width: 26px; height: 26px; min-height: 26px; padding: 5px; }
+.task-copy-button:hover, .task-copy-button:focus-visible { color: var(--accent); border-color: var(--accent); }
+.task-copy-button.copied { color: var(--accent); border-color: var(--accent); }
 
 .detail-heading-actions {
   display: flex;

@@ -427,6 +427,37 @@ function shortId(id: string) {
   return id.slice(0, 8);
 }
 
+type TaskReference = Pick<Task, "id" | "title">;
+
+function CopyTaskButton({
+  task, locale, copied, onCopy, iconOnly = false,
+}: {
+  task: TaskReference;
+  locale: Locale;
+  copied: boolean;
+  onCopy: (task: TaskReference) => void;
+  iconOnly?: boolean;
+}) {
+  const label = copied
+    ? (locale === "zh-CN" ? "已复制" : "Copied")
+    : (locale === "zh-CN" ? "复制任务名称和 ID" : "Copy task name and ID");
+  return (
+    <button
+      type="button"
+      className={`task-copy-button${iconOnly ? " icon-only" : ""}${copied ? " copied" : ""}`}
+      title={label}
+      aria-label={label}
+      onClick={() => onCopy(task)}
+    >
+      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
+        <rect x="8" y="8" width="11" height="11" rx="2" />
+        <path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" />
+      </svg>
+      {!iconOnly && <span>{label}</span>}
+    </button>
+  );
+}
+
 type SidebarIconName = "project" | "task" | "session" | "agent" | "collapse" | "expand";
 
 function SidebarIcon({ name }: { name: SidebarIconName }) {
@@ -725,6 +756,32 @@ export default function App() {
   const [agentCreateBusy, setAgentCreateBusy] = useState(false);
   const [agentCreateResult, setAgentCreateResult] = useState<ManagedCodexProvision | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [copiedTaskId, setCopiedTaskId] = useState<string | null>(null);
+
+  async function copyTaskReference(task: TaskReference) {
+    const content = `${task.title}\n${task.id}`;
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(content);
+      } else {
+        const textarea = document.createElement("textarea");
+        textarea.value = content;
+        textarea.style.position = "fixed";
+        textarea.style.opacity = "0";
+        document.body.appendChild(textarea);
+        try {
+          textarea.select();
+          if (!document.execCommand("copy")) throw new Error("Clipboard access denied");
+        } finally {
+          textarea.remove();
+        }
+      }
+      setCopiedTaskId(task.id);
+      window.setTimeout(() => setCopiedTaskId((current) => current === task.id ? null : current), 2200);
+    } catch {
+      setError(locale === "zh-CN" ? "复制失败，请检查浏览器剪贴板权限。" : "Copy failed. Check browser clipboard permissions.");
+    }
+  }
 
   const orderedAgents = useMemo(
     () => [...agents].sort((a, b) =>
@@ -2099,7 +2156,10 @@ export default function App() {
                             <strong>{row.task.title}</strong>
                             <span>{row.task.description || (locale === "zh-CN" ? "无描述" : "No description")}</span>
                           </button>
-                          <small>{shortId(row.task.id)} · {assignmentMode}</small>
+                          <div className="task-management-copy-line">
+                            <small>{shortId(row.task.id)} · {assignmentMode}</small>
+                            <CopyTaskButton task={row.task} locale={locale} copied={copiedTaskId === row.task.id} onCopy={(task) => void copyTaskReference(task)} iconOnly />
+                          </div>
                         </td>
                         <td>
                           <strong>{row.project_name || (locale === "zh-CN" ? "未分类" : "Unclassified")}</strong>
@@ -2432,8 +2492,8 @@ export default function App() {
                     {expandedProjectId === group.id && (
                       <div className="project-task-items">
                         {group.tasks.map((task) => (
+                          <div className="task-row-shell" key={task.id}>
                           <button
-                            key={task.id}
                             className={`task-row ${!selectedProjectId && selectedId === task.id ? "selected" : ""}`}
                             onClick={() => selectTask(task.id)}
                           >
@@ -2447,6 +2507,8 @@ export default function App() {
                               <span>P{task.priority}</span>
                             </div>
                           </button>
+                          <CopyTaskButton task={task} locale={locale} copied={copiedTaskId === task.id} onCopy={(item) => void copyTaskReference(item)} iconOnly />
+                          </div>
                         ))}
                         {!group.tasks.length && <div className="project-empty">{t("noProjectTasks")}</div>}
                       </div>
@@ -2508,10 +2570,10 @@ export default function App() {
                   <h3 className="detail-section-title tone-blue">{t("tasks")}</h3>
                   <div className="unclassified-task-grid">
                     {unclassifiedTasks.map((task) => (
+                      <div className="unclassified-task-shell" key={task.id}>
                       <button
                         type="button"
                         className="unclassified-task-card"
-                        key={task.id}
                         onClick={() => selectTask(task.id)}
                       >
                         <div className="mini-card-row">
@@ -2521,6 +2583,8 @@ export default function App() {
                         <p>{task.description || t("noDescription")}</p>
                         <small>{shortId(task.id)} · P{task.priority} · {formatAge(locale, task.updated_at)}</small>
                       </button>
+                      <CopyTaskButton task={task} locale={locale} copied={copiedTaskId === task.id} onCopy={(item) => void copyTaskReference(item)} iconOnly />
+                      </div>
                     ))}
                     {!unclassifiedTasks.length && <div className="empty compact">{t("noUnclassifiedTasks")}</div>}
                   </div>
@@ -2635,6 +2699,7 @@ export default function App() {
                       <h2>{selectedTask.title}</h2>
                     </div>
                     <div className="detail-heading-actions">
+                      <CopyTaskButton task={selectedTask} locale={locale} copied={copiedTaskId === selectedTask.id} onCopy={(task) => void copyTaskReference(task)} />
                       <StateBadge state={selectedTask.state} locale={locale} />
                       {selectedTask.state !== "done" && selectedTask.state !== "cancelled" && (
                         <button className="secondary" type="button" onClick={() => void cancelTask(selectedTask)} disabled={taskMutationBusy}>
