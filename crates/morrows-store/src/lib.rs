@@ -68,6 +68,7 @@ impl Store {
         store.reconcile_git_memory().await?;
         store.migrate_legacy_acceptance().await?;
         store.migrate_task_revision_baselines().await?;
+        store.reconcile_legacy_handoff_tasks().await?;
         Ok(store)
     }
 

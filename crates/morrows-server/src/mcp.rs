@@ -4129,11 +4129,15 @@ mod tests {
         )
         .unwrap();
         assert_eq!(recovered["context"]["goal"], "MCP continuation");
-        let next = store
-            .claim_task(task.id, b.id, "executor", 300)
+        assert_eq!(
+            store.get_task(task.id).await.unwrap().state,
+            TaskState::Ready
+        );
+        let claimed = store
+            .claim_task_for_execution(task.id, b.id, "executor", 300)
             .await
             .unwrap();
-        let target = store.start_run(next.id, b.id, None).await.unwrap();
+        let target = claimed.run;
         let accept = || {
             Parameters(AcceptHandoffRequest {
                 handoff_id: h["id"].as_str().unwrap().into(),

@@ -11,6 +11,51 @@ fn required(value: &str, field: &str) -> Result<(), DomainError> {
 }
 
 impl Store {
+    // Repair only legacy Tasks whose latest executor Run was durably handed off.
+    pub(crate) async fn reconcile_legacy_handoff_tasks(&self) -> Result<u64, DomainError> {
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(storage)?;
+        let rows = sqlx::query(
+            "SELECT t.id FROM tasks t WHERE t.state='in_progress'
+             AND NOT EXISTS(SELECT 1 FROM assignments a WHERE a.task_id=t.id AND a.role='executor' AND a.status='active')
+             AND NOT EXISTS(SELECT 1 FROM runs r WHERE r.task_id=t.id AND r.status IN ('running','paused','interrupted','cleanup_pending','cancelling'))
+             AND NOT EXISTS(SELECT 1 FROM launch_attempts l WHERE l.task_id=t.id AND l.status IN ('starting','running'))
+             AND EXISTS(SELECT 1 FROM runs r JOIN assignments a ON a.id=r.assignment_id
+               JOIN handoffs h ON h.source_run_id=r.id
+               WHERE r.task_id=t.id AND r.status='handed_off' AND a.role='executor'
+               AND a.status='released' AND a.release_reason='handoff'
+               AND r.rowid=(SELECT r2.rowid FROM runs r2 WHERE r2.task_id=t.id ORDER BY r2.started_at DESC,r2.rowid DESC LIMIT 1))"
+        ).fetch_all(&mut *tx).await.map_err(storage)?;
+        for row in &rows {
+            let id: String = row.try_get("id").map_err(storage)?;
+            let task_id = parse_id(id)?;
+            sqlx::query(
+                "UPDATE tasks SET state='ready',updated_at=? WHERE id=? AND state='in_progress'",
+            )
+            .bind(Utc::now().to_rfc3339())
+            .bind(task_id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?;
+            append_event_tx(
+                &mut tx,
+                "system",
+                "handoff-reconciler",
+                "task",
+                task_id,
+                "task.handoff_reconciled",
+                json!({"reason":"legacy terminal handoff without active successor"}),
+                None,
+            )
+            .await?;
+        }
+        tx.commit().await.map_err(storage)?;
+        Ok(rows.len() as u64)
+    }
+
     /// Page each requested collection independently; messages are joined directly
     /// to their task instead of loading every thread and its complete history.
     pub async fn task_collaboration_page(
@@ -672,6 +717,25 @@ impl Store {
         }
         sqlx::query("UPDATE runs SET status='handed_off',stop_reason='handoff',ended_at=? WHERE assignment_id=? AND status IN ('running','paused')").bind(now.to_rfc3339()).bind(a.id.to_string()).execute(&mut *tx).await.map_err(storage)?;
         sqlx::query("UPDATE assignments SET status='released',released_at=?,release_reason='handoff' WHERE id=?").bind(now.to_rfc3339()).bind(a.id.to_string()).execute(&mut *tx).await.map_err(storage)?;
+        // A cooperative executor handoff ends this execution attempt, not the Task.
+        // Return it to the claimable queue in the same write transaction. Do not
+        // reopen blocked/review/terminal Tasks, or Tasks with another active
+        // executor. BEGIN IMMEDIATE serializes this with competing claims.
+        if a.role == "executor" {
+            sqlx::query(
+                "UPDATE tasks SET state='ready',updated_at=? WHERE id=? AND state='in_progress'
+                 AND NOT EXISTS (
+                     SELECT 1 FROM assignments
+                     WHERE task_id=? AND role='executor' AND status='active'
+                 )",
+            )
+            .bind(now.to_rfc3339())
+            .bind(run.task_id.to_string())
+            .bind(run.task_id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(storage)?;
+        }
         append_event_tx(&mut tx,"agent_instance",&actor.to_string(),"task",run.task_id,"handoff.created",json!({"handoff_id":id,"source_run_id":run_id,"assignment_id":a.id,"context_revision_id":context_revision_id,"milestone_id":milestone_id}),None).await?;
         tx.commit().await.map_err(storage)?;
         Ok(Handoff {

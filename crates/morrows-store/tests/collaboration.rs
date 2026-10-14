@@ -157,7 +157,7 @@ async fn handoff_continuation_survives_restart_with_all_collaboration_records() 
         store.get_assignment(assignment.id).await.unwrap().status,
         "released"
     );
-    assert_ne!(store.get_task(t.id).await.unwrap().state, TaskState::Done);
+    assert_eq!(store.get_task(t.id).await.unwrap().state, TaskState::Ready);
     for id in [run.id] {
         assert_eq!(store.get_run(id).await.unwrap().status, "handed_off");
         assert!(store.complete_run(id, a.id, json!({})).await.is_err());
@@ -205,6 +205,205 @@ async fn handoff_continuation_survives_restart_with_all_collaboration_records() 
     drop(store);
     let _ = std::fs::remove_file(path);
 }
+#[tokio::test]
+async fn startup_reconciles_only_stranded_legacy_handoffs_once() {
+    let path = std::env::temp_dir().join(format!("legacy-handoff-{}.db", Uuid::new_v4()));
+    let url = format!("sqlite://{}", path.display());
+    let store = Store::connect(&url).await.unwrap();
+    let actor = store.register_agent("previous", &[]).await.unwrap();
+    let orphan = task(&store, "orphaned by older version").await;
+    context(&store, orphan.id, "keep evidence").await;
+    let original = store
+        .claim_task_for_execution(orphan.id, actor.id, "executor", 300)
+        .await
+        .unwrap();
+    let marker = milestone(&store, original.run.id, actor.id, vec![], vec![]).await;
+    let mut input = handoff();
+    input.milestone_id = Some(marker.id.to_string());
+    let h = store
+        .create_handoff(original.run.id, actor.id, input)
+        .await
+        .unwrap();
+    let active = task(&store, "still executing").await;
+    store
+        .claim_task_for_execution(active.id, actor.id, "executor", 300)
+        .await
+        .unwrap();
+
+    // Model the historical bug without using a production database.
+    let pool = sqlx::SqlitePool::connect(&url).await.unwrap();
+    sqlx::query("UPDATE tasks SET state='in_progress' WHERE id=?")
+        .bind(orphan.id.to_string())
+        .execute(&pool)
+        .await
+        .unwrap();
+    pool.close().await;
+    drop(store);
+    let store = Store::connect(&url).await.unwrap();
+    assert_eq!(
+        store.get_task(orphan.id).await.unwrap().state,
+        TaskState::Ready
+    );
+    assert_eq!(
+        store.get_task(active.id).await.unwrap().state,
+        TaskState::InProgress
+    );
+    assert_eq!(
+        store.get_handoff(h.id).await.unwrap().milestone.unwrap().id,
+        marker.id
+    );
+    assert_eq!(
+        store
+            .task_events(orphan.id)
+            .await
+            .unwrap()
+            .iter()
+            .filter(|e| e.event_type == "task.handoff_reconciled")
+            .count(),
+        1
+    );
+    drop(store);
+    let store = Store::connect(&url).await.unwrap();
+    assert_eq!(
+        store
+            .task_events(orphan.id)
+            .await
+            .unwrap()
+            .iter()
+            .filter(|e| e.event_type == "task.handoff_reconciled")
+            .count(),
+        1
+    );
+    drop(store);
+    let _ = std::fs::remove_file(path);
+}
+
+#[tokio::test]
+async fn executor_handoff_reopens_for_one_new_claim_and_preserves_history() {
+    let store = Store::connect("sqlite::memory:").await.unwrap();
+    let source_agent = store.register_agent("source", &[]).await.unwrap();
+    let successor = store.register_agent("successor", &[]).await.unwrap();
+    let competitor = store.register_agent("competitor", &[]).await.unwrap();
+    let t = task(&store, "recover after handoff").await;
+    let revision = context(&store, t.id, "source progress").await;
+    let first = store
+        .claim_task_for_execution(t.id, source_agent.id, "executor", 300)
+        .await
+        .unwrap();
+    assert_eq!(
+        store.get_task(t.id).await.unwrap().state,
+        TaskState::InProgress
+    );
+    assert!(
+        store
+            .claim_task_for_execution(t.id, successor.id, "executor", 300)
+            .await
+            .is_err()
+    );
+    let marker = milestone(&store, first.run.id, source_agent.id, vec![], vec![]).await;
+    let mut input = handoff();
+    input.milestone_id = Some(marker.id.to_string());
+    let h = store
+        .create_handoff(first.run.id, source_agent.id, input.clone())
+        .await
+        .unwrap();
+    assert_eq!(store.get_task(t.id).await.unwrap().state, TaskState::Ready);
+    assert_eq!(
+        store
+            .get_assignment(first.assignment.id)
+            .await
+            .unwrap()
+            .status,
+        "released"
+    );
+    assert_eq!(
+        store.get_run(first.run.id).await.unwrap().status,
+        "handed_off"
+    );
+    assert!(
+        store
+            .create_handoff(first.run.id, source_agent.id, input)
+            .await
+            .is_err()
+    );
+    assert!(
+        store
+            .recover_assignment(
+                first.assignment.id,
+                first.run.id,
+                source_agent.id,
+                300,
+                "incorrect old run recovery"
+            )
+            .await
+            .is_err()
+    );
+    let (one, two) = tokio::join!(
+        store.claim_task_for_execution(t.id, successor.id, "executor", 300),
+        store.claim_task_for_execution(t.id, competitor.id, "executor", 300)
+    );
+    assert_ne!(one.is_ok(), two.is_ok());
+    let (winner, winner_agent) = if let Ok(one) = one {
+        (one, successor.id)
+    } else {
+        (two.unwrap(), competitor.id)
+    };
+    assert_eq!(
+        store.get_task(t.id).await.unwrap().state,
+        TaskState::InProgress
+    );
+    assert_eq!(
+        store
+            .get_assignment(winner.assignment.id)
+            .await
+            .unwrap()
+            .status,
+        "active"
+    );
+    assert_ne!(winner.run.id, first.run.id);
+    assert_eq!(
+        store.get_handoff(h.id).await.unwrap().context.id,
+        revision.id
+    );
+    assert_eq!(
+        store.get_handoff(h.id).await.unwrap().milestone.unwrap().id,
+        marker.id
+    );
+    let accepted = store
+        .accept_handoff(h.id, winner.run.id, winner_agent)
+        .await
+        .unwrap();
+    assert_eq!(accepted.status, "accepted");
+    assert!(
+        store
+            .accept_handoff(h.id, winner.run.id, winner_agent)
+            .await
+            .is_err()
+    );
+    let events = store.task_events(t.id).await.unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e.event_type == "handoff.created")
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e.event_type == "handoff.accepted")
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e.event_type == "assignment.claimed")
+            .count(),
+        2
+    );
+}
+
 #[tokio::test]
 async fn failed_handoff_rolls_back_and_rejects_cross_task_references() {
     let store = Store::connect("sqlite::memory:").await.unwrap();
