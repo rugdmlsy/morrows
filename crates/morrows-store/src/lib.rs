@@ -2034,8 +2034,8 @@ async fn claim_task_tx(
         intake::create_assignment_intake_tx(tx, id, task_id, agent_id).await?;
     }
 
-    sqlx::query("UPDATE tasks SET state=CASE WHEN state='ready' THEN 'in_progress' ELSE state END, updated_at=? WHERE id=?")
-            .bind(now.to_rfc3339()).bind(task_id.to_string()).execute(&mut **tx).await.map_err(storage)?;
+    sqlx::query("UPDATE tasks SET state=CASE WHEN ?='executor' AND state='ready' THEN 'in_progress' ELSE state END, updated_at=? WHERE id=?")
+            .bind(role).bind(now.to_rfc3339()).bind(task_id.to_string()).execute(&mut **tx).await.map_err(storage)?;
     append_event_tx(
         tx,
         "agent_instance",

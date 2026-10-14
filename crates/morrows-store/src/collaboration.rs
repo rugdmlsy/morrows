@@ -21,13 +21,13 @@ impl Store {
         let rows = sqlx::query(
             "SELECT t.id FROM tasks t WHERE t.state='in_progress'
              AND NOT EXISTS(SELECT 1 FROM assignments a WHERE a.task_id=t.id AND a.role='executor' AND a.status='active')
-             AND NOT EXISTS(SELECT 1 FROM runs r WHERE r.task_id=t.id AND r.status IN ('running','paused','interrupted','cleanup_pending','cancelling'))
+             AND NOT EXISTS(SELECT 1 FROM runs r JOIN assignments a ON a.id=r.assignment_id WHERE r.task_id=t.id AND a.role='executor' AND r.status IN ('running','paused','interrupted','cleanup_pending','cancelling'))
              AND NOT EXISTS(SELECT 1 FROM launch_attempts l WHERE l.task_id=t.id AND l.status IN ('starting','running'))
              AND EXISTS(SELECT 1 FROM runs r JOIN assignments a ON a.id=r.assignment_id
                JOIN handoffs h ON h.source_run_id=r.id
                WHERE r.task_id=t.id AND r.status='handed_off' AND a.role='executor'
                AND a.status='released' AND a.release_reason='handoff'
-               AND r.rowid=(SELECT r2.rowid FROM runs r2 WHERE r2.task_id=t.id ORDER BY r2.started_at DESC,r2.rowid DESC LIMIT 1))"
+               AND r.rowid=(SELECT r2.rowid FROM runs r2 JOIN assignments a2 ON a2.id=r2.assignment_id WHERE r2.task_id=t.id AND a2.role='executor' ORDER BY r2.started_at DESC,r2.rowid DESC LIMIT 1))"
         ).fetch_all(&mut *tx).await.map_err(storage)?;
         for row in &rows {
             let id: String = row.try_get("id").map_err(storage)?;

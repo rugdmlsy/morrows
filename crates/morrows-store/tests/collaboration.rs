@@ -211,10 +211,19 @@ async fn startup_reconciles_only_stranded_legacy_handoffs_once() {
     let url = format!("sqlite://{}", path.display());
     let store = Store::connect(&url).await.unwrap();
     let actor = store.register_agent("previous", &[]).await.unwrap();
+    let reviewer = store.register_agent("reviewer", &[]).await.unwrap();
     let orphan = task(&store, "orphaned by older version").await;
     context(&store, orphan.id, "keep evidence").await;
     let original = store
         .claim_task_for_execution(orphan.id, actor.id, "executor", 300)
+        .await
+        .unwrap();
+    let review_assignment = store
+        .claim_task(orphan.id, reviewer.id, "reviewer", 300)
+        .await
+        .unwrap();
+    let review_run = store
+        .start_run(review_assignment.id, reviewer.id, None)
         .await
         .unwrap();
     let marker = milestone(&store, original.run.id, actor.id, vec![], vec![]).await;
@@ -247,6 +256,18 @@ async fn startup_reconciles_only_stranded_legacy_handoffs_once() {
     assert_eq!(
         store.get_task(active.id).await.unwrap().state,
         TaskState::InProgress
+    );
+    assert_eq!(
+        store.get_run(review_run.id).await.unwrap().status,
+        "running"
+    );
+    assert_eq!(
+        store
+            .get_assignment(review_assignment.id)
+            .await
+            .unwrap()
+            .status,
+        "active"
     );
     assert_eq!(
         store.get_handoff(h.id).await.unwrap().milestone.unwrap().id,
@@ -284,6 +305,7 @@ async fn executor_handoff_reopens_for_one_new_claim_and_preserves_history() {
     let source_agent = store.register_agent("source", &[]).await.unwrap();
     let successor = store.register_agent("successor", &[]).await.unwrap();
     let competitor = store.register_agent("competitor", &[]).await.unwrap();
+    let reviewer = store.register_agent("reviewer", &[]).await.unwrap();
     let t = task(&store, "recover after handoff").await;
     let revision = context(&store, t.id, "source progress").await;
     let first = store
@@ -320,6 +342,19 @@ async fn executor_handoff_reopens_for_one_new_claim_and_preserves_history() {
         store.get_run(first.run.id).await.unwrap().status,
         "handed_off"
     );
+    let review_assignment = store
+        .claim_task(t.id, reviewer.id, "reviewer", 300)
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .get_assignment(review_assignment.id)
+            .await
+            .unwrap()
+            .status,
+        "active"
+    );
+    assert_eq!(store.get_task(t.id).await.unwrap().state, TaskState::Ready);
     assert!(
         store
             .create_handoff(first.run.id, source_agent.id, input)
@@ -400,7 +435,7 @@ async fn executor_handoff_reopens_for_one_new_claim_and_preserves_history() {
             .iter()
             .filter(|e| e.event_type == "assignment.claimed")
             .count(),
-        2
+        3
     );
 }
 
