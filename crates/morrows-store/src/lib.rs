@@ -22,6 +22,7 @@ mod milestone;
 mod oauth;
 mod revision;
 mod runtime;
+mod takeover;
 mod task_graph;
 mod task_rework;
 

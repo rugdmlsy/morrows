@@ -163,7 +163,20 @@ impl Store {
                 "runtime access requires the active implementing executor Assignment".into(),
             ));
         }
+        if assignment.expires_at <= Utc::now() {
+            return Err(DomainError::Conflict(
+                "stale executor: assignment lease has expired".into(),
+            ));
+        }
         let task = self.get_task(run.task_id).await?;
+        if !matches!(
+            task.state,
+            morrows_core::TaskState::InProgress | morrows_core::TaskState::Review
+        ) {
+            return Err(DomainError::Conflict(
+                "stale executor: Task is no longer executing or reviewing".into(),
+            ));
+        }
         Ok((run, task))
     }
 

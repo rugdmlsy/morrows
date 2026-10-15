@@ -497,6 +497,16 @@ pub struct TaskClaimRequest {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct TaskTakeoverRequest {
+    pub task_id: String,
+    pub reason: String,
+    #[serde(default)]
+    pub request_id: Option<String>,
+    #[serde(default = "default_lease")]
+    pub lease_seconds: i64,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct TaskIntakeRequest {
     pub task_id: String,
     #[serde(flatten)]
@@ -2066,6 +2076,51 @@ impl MorrowsMcp {
                     authenticated_agent(&parts)?,
                     &req.role,
                     req.lease_seconds,
+                )
+                .await
+                .map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())
+    }
+
+    #[tool(
+        description = "Read current executor assignment, latest executor Run, lease validity, and whether an in_progress Task is eligible for safe takeover. This is an advisory read; task_takeover rechecks all gates atomically, and active managed runtimes/jobs require cleanup first. Does not return private provider sessions."
+    )]
+    async fn task_takeover_status(
+        &self,
+        Parameters(req): Parameters<TaskIdRequest>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<String, String> {
+        let task_id = parse_id(&req.task_id)?;
+        self.ensure_task_read_access(task_id, authenticated_agent(&parts)?)
+            .await?;
+        Ok(self
+            .store
+            .task_takeover_status(task_id)
+            .await
+            .map_err(|e| e.to_string())?
+            .to_string())
+    }
+
+    #[tool(
+        description = "Atomically take over an in_progress OPEN Task with an expired or absent executor. An authenticated AgentInstance gets a NEW Assignment and intake Run; the old Run and checkpoint remain auditable. Active unexpired executors, non-open Tasks, running managed jobs/RuntimeScopes, and cleanup-pending Runs are rejected. Supply a reason. For force or approval/dispatch tasks use authenticated admin control plane, not this employee tool. On success call task_intake and complete Human Interview before executing."
+    )]
+    async fn task_takeover(
+        &self,
+        Parameters(req): Parameters<TaskTakeoverRequest>,
+        Extension(parts): Extension<Parts>,
+    ) -> Result<String, String> {
+        serde_json::to_string(
+            &self
+                .store
+                .takeover_task_request(
+                    parse_id(&req.task_id)?,
+                    authenticated_agent(&parts)?,
+                    req.lease_seconds,
+                    &req.reason,
+                    false,
+                    None,
+                    req.request_id.as_deref(),
                 )
                 .await
                 .map_err(|e| e.to_string())?,

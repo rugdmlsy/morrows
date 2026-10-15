@@ -283,6 +283,10 @@ async fn main() -> anyhow::Result<()> {
             post(set_task_assignment_mode),
         )
         .route("/tasks/{id}/claim", post(claim_task))
+        .route(
+            "/tasks/{id}/takeover",
+            get(get_takeover_status).post(operator_takeover),
+        )
         .route("/assignments/{id}/renew", post(renew_assignment))
         .route("/tasks/{id}/context", get(get_context).post(create_context))
         .route("/tasks/{id}/events", get(task_events))
@@ -637,6 +641,52 @@ async fn register_agent(
 async fn list_agents(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     Ok(Json(
         serde_json::to_value(state.store.list_agents().await?).unwrap(),
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+struct OperatorTakeoverBody {
+    agent_instance_id: Uuid,
+    reason: String,
+    #[serde(default)]
+    request_id: Option<String>,
+    #[serde(default)]
+    force: bool,
+    #[serde(default = "default_takeover_lease")]
+    lease_seconds: i64,
+}
+
+fn default_takeover_lease() -> i64 {
+    900
+}
+
+async fn get_takeover_status(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(state.store.task_takeover_status(id).await?))
+}
+
+async fn operator_takeover(
+    State(state): State<AppState>,
+    axum::Extension(identity): axum::Extension<operator_auth::OperatorIdentity>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<OperatorTakeoverBody>,
+) -> Result<Json<Value>, ApiError> {
+    let claim = state
+        .store
+        .takeover_task_request(
+            id,
+            body.agent_instance_id,
+            body.lease_seconds,
+            &body.reason,
+            body.force,
+            Some(&identity.0.to_string()),
+            body.request_id.as_deref(),
+        )
+        .await?;
+    Ok(Json(
+        serde_json::to_value(claim).map_err(|e| DomainError::Storage(e.to_string()))?,
     ))
 }
 

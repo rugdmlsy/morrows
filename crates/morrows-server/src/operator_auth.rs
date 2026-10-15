@@ -176,6 +176,10 @@ fn is_admin_route(method: &Method, path: &str) -> bool {
     {
         return true;
     }
+    // Force-transfer can replace a still-live executor; only admins may authorize it.
+    if method == Method::POST && path.starts_with("/api/tasks/") && path.ends_with("/takeover") {
+        return true;
+    }
     if method != Method::POST {
         return false;
     }

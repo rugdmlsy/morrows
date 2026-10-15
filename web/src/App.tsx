@@ -50,6 +50,21 @@ type MemoryEntry = {
   updated_at: string;
 };
 
+type TakeoverStatus = {
+  task_id: string;
+  task_state: string;
+  assignment_mode: string;
+  eligible: boolean;
+  employee_self_takeover: boolean;
+  reason: string;
+  latest_executor_run_id: string | null;
+  latest_executor_milestone_summary: string | null;
+  current_executor: {
+    assignment_id: string; agent_instance_id: string; status: string;
+    phase: string; expires_at: string;
+  } | null;
+};
+
 type Task = {
   acceptance_criteria: Criterion[];
   acceptance_version: number;
@@ -753,6 +768,12 @@ export default function App() {
   // Ignore late responses after selecting another project or task.
   const projectMemoryRequestRef = useRef(0);
   const [assignmentIntake, setAssignmentIntake] = useState<AssignmentIntakeView | null>(null);
+  const [takeoverStatus, setTakeoverStatus] = useState<TakeoverStatus | null>(null);
+  const [takeoverAgentId, setTakeoverAgentId] = useState("");
+  const [takeoverReason, setTakeoverReason] = useState("");
+  const [takeoverForce, setTakeoverForce] = useState(false);
+  const [takeoverBusy, setTakeoverBusy] = useState(false);
+  const takeoverRequestRef = useRef<string | null>(null);
   const [taskMessageDraft, setTaskMessageDraft] = useState("");
   const [taskMessageBusy, setTaskMessageBusy] = useState(false);
   const [renamingAgentId, setRenamingAgentId] = useState<string | null>(null);
@@ -1052,6 +1073,7 @@ export default function App() {
         api<LaunchInstruction[]>(`/api/tasks/${selectedId}/launch-instructions`),        api<TaskGate>(`/api/tasks/${selectedId}/gate`),
       ]);
       setAcceptanceData(await api<Parameters<typeof AcceptanceDetail>[0]["data"]>(`/api/tasks/${selectedId}/verification`));
+      setTakeoverStatus(await api<TakeoverStatus>("/api/tasks/" + selectedId + "/takeover").catch(() => null));
       setAssignments(nextAssignments);
       setRuns(nextRuns);
       setEvents(nextEvents);
@@ -1531,6 +1553,31 @@ export default function App() {
     } finally {
       setProjectBusy(false);
     }
+  }
+
+  async function takeoverSelectedTask() {
+    if (!selectedTask || !takeoverAgentId || !takeoverReason.trim()) return;
+    if (!window.confirm((locale === "zh-CN" ? "确认转交执行权至 " : "Confirm executor transfer to ")
+      + takeoverAgentId + (takeoverForce ? " (ADMIN FORCE)" : "") + "?")) return;
+    setTakeoverBusy(true);
+    try {
+      await api("/api/tasks/" + selectedTask.id + "/takeover", {
+        method: "POST",
+        body: JSON.stringify({
+          agent_instance_id: takeoverAgentId, reason: takeoverReason.trim(),
+          force: takeoverForce, lease_seconds: 900,
+          request_id: takeoverRequestRef.current ??= crypto.randomUUID(),
+        }),
+      });
+      setTakeoverReason("");
+      setTakeoverForce(false);
+      takeoverRequestRef.current = null;
+      setError(null);
+      await refreshQueueBase();
+      await refreshDetail();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally { setTakeoverBusy(false); }
   }
 
   async function moveTaskToProject(projectId: string) {
@@ -2773,6 +2820,45 @@ export default function App() {
                     </div>
                   </div>
                   <p className="description">{selectedTask.description || t("noDescription")}</p>
+                  {selectedTask.state === "in_progress" && (
+                    <section className="takeover-card" aria-label={locale === "zh-CN" ? "执行权接管" : "Executor takeover"}>
+                      <div className="mini-card-row">
+                        <strong>{locale === "zh-CN" ? "执行权与接管" : "Executor ownership & takeover"}</strong>
+                        <span className="badge">{takeoverStatus?.eligible ? (locale === "zh-CN" ? "可接管" : "Eligible") : (locale === "zh-CN" ? "不可直接接管" : "Not eligible")}</span>
+                      </div>
+                      {takeoverStatus && (
+                        <>
+                          <small>{takeoverStatus.reason}</small>
+                          {takeoverStatus.current_executor && <p>{locale === "zh-CN" ? "当前/原执行者" : "Current/prior executor"}：
+                            <code>{takeoverStatus.current_executor.agent_instance_id}</code> · {takeoverStatus.current_executor.status} ·
+                            {formatDateTime(locale, takeoverStatus.current_executor.expires_at)}
+                          </p>}
+                          <p>{locale === "zh-CN" ? "最近执行 Run" : "Latest executor Run"}：<code>{takeoverStatus.latest_executor_run_id || "—"}</code></p>
+                          {takeoverStatus.latest_executor_milestone_summary && <p>{locale === "zh-CN" ? "最新里程碑" : "Latest milestone"}：{takeoverStatus.latest_executor_milestone_summary}</p>}
+                        </>
+                      )}
+                      {(() => {
+                        const prior = runs.find((r) => r.id === takeoverStatus?.latest_executor_run_id);
+                        return prior?.checkpoint ? <pre className="takeover-checkpoint">{JSON.stringify(prior.checkpoint, null, 2)}</pre> : null;
+                      })()}
+                      <div className="takeover-actions">
+                        <label>{locale === "zh-CN" ? "新执行者" : "Successor"}
+                          <select value={takeoverAgentId} onChange={(event) => { takeoverRequestRef.current = null; setTakeoverAgentId(event.target.value); }}>
+                            <option value="">{locale === "zh-CN" ? "选择 Agent" : "Choose Agent"}</option>
+                            {orderedAgents.map((agent) => <option key={agent.instance.id} value={agent.instance.id}>{cleanAgentDisplayName(agent, locale)}</option>)}
+                          </select>
+                        </label>
+                        <label>{locale === "zh-CN" ? "接管原因（审计）" : "Audited reason"}
+                          <input value={takeoverReason} onChange={(event) => { takeoverRequestRef.current = null; setTakeoverReason(event.target.value); }} />
+                        </label>
+                        <label className="takeover-force"><input type="checkbox" checked={takeoverForce} onChange={(event) => { takeoverRequestRef.current = null; setTakeoverForce(event.target.checked); }} />
+                          {locale === "zh-CN" ? "管理员强制接管（需要 Admin 权限）" : "Admin force transfer"}
+                        </label>
+                        <button type="button" disabled={takeoverBusy || !takeoverAgentId || !takeoverReason.trim() || (!takeoverStatus?.eligible && !takeoverForce)}
+                          onClick={() => void takeoverSelectedTask()}>{locale === "zh-CN" ? "转交执行权" : "Transfer executor"}</button>
+                      </div>
+                    </section>
+                  )}
                   <TaskRevisionPanel key={selectedTask.id} taskId={selectedTask.id} taskState={selectedTask.state} zh={locale === "zh-CN"} onApplied={() => { void refreshQueueBase(); void refreshDetail(); }} />
                   <AcceptanceDetail taskId={selectedTask.id} criteria={selectedTask.acceptance_criteria || []} contextRevisionId={selectedTask.current_context_revision_id} acceptanceVersion={selectedTask.acceptance_version} data={acceptanceData} zh={locale === "zh-CN"} executorRunId={runs.find(r=>r.status==="running" && assignments.find(a=>a.id===r.assignment_id)?.role==="executor")?.id} refresh={()=>void refreshDetail()} />
 
