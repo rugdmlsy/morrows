@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, PointerEvent as ReactPointerEvent } from "react";
 import "./App.css";
 import {AcceptanceEditor, AcceptanceDetail} from "./Acceptance";
@@ -26,6 +26,11 @@ type Project = {
   status: string;
   created_at: string;
   updated_at: string;
+};
+
+type ProjectMemoriesPage = {
+  items: MemoryEntry[];
+  next_offset: number | null;
 };
 
 type MemoryEntry = {
@@ -742,6 +747,11 @@ export default function App() {
   const [projectMemories, setProjectMemories] = useState<MemoryEntry[]>([]);
   const [selectedProjectMemoryId, setSelectedProjectMemoryId] = useState<string | null>(null);
   const [projectMemoryLoading, setProjectMemoryLoading] = useState(false);
+  const [projectMemoryAppending, setProjectMemoryAppending] = useState(false);
+  const [projectMemoryNextOffset, setProjectMemoryNextOffset] = useState<number | null>(null);
+  const [projectMemoryError, setProjectMemoryError] = useState<string | null>(null);
+  // Ignore late responses after selecting another project or task.
+  const projectMemoryRequestRef = useRef(0);
   const [assignmentIntake, setAssignmentIntake] = useState<AssignmentIntakeView | null>(null);
   const [taskMessageDraft, setTaskMessageDraft] = useState("");
   const [taskMessageBusy, setTaskMessageBusy] = useState(false);
@@ -1354,37 +1364,67 @@ export default function App() {
     }
   }
 
-  function selectTask(taskId: string) {
-    setSelectedProjectId(null);
+  function resetProjectMemoryView() {
+    projectMemoryRequestRef.current += 1;
     setProjectMemories([]);
     setSelectedProjectMemoryId(null);
+    setProjectMemoryLoading(false);
+    setProjectMemoryAppending(false);
+    setProjectMemoryNextOffset(null);
+    setProjectMemoryError(null);
+  }
+
+  function selectTask(taskId: string) {
+    resetProjectMemoryView();
+    setSelectedProjectId(null);
     setSelectedId(taskId);
   }
 
   function openUnclassified() {
+    resetProjectMemoryView();
     setSelectedProjectId("__unclassified__");
-    setProjectMemories([]);
-    setSelectedProjectMemoryId(null);
-    setProjectMemoryLoading(false);
     setError(null);
   }
 
   async function openProject(project: Project) {
+    resetProjectMemoryView();
+    const requestId = projectMemoryRequestRef.current;
     setSelectedProjectId(project.id);
     setProjectMemoryLoading(true);
     try {
-      const memories = await api<MemoryEntry[]>(
-        `/api/memories?scope_type=project&project_id=${encodeURIComponent(project.id)}`,
+      const page = await api<ProjectMemoriesPage>(
+        "/api/projects/" + encodeURIComponent(project.id) + "/memories?limit=30&offset=0",
       );
-      setProjectMemories(memories);
-      setSelectedProjectMemoryId(memories[0]?.id ?? null);
-      setError(null);
+      if (requestId !== projectMemoryRequestRef.current) return;
+      setProjectMemories(page.items);
+      setSelectedProjectMemoryId(page.items[0]?.id ?? null);
+      setProjectMemoryNextOffset(page.next_offset);
     } catch (e) {
-      setProjectMemories([]);
-      setSelectedProjectMemoryId(null);
-      setError(e instanceof Error ? e.message : String(e));
+      if (requestId !== projectMemoryRequestRef.current) return;
+      setProjectMemoryError(e instanceof Error ? e.message : String(e));
     } finally {
-      setProjectMemoryLoading(false);
+      if (requestId === projectMemoryRequestRef.current) setProjectMemoryLoading(false);
+    }
+  }
+
+  async function loadMoreProjectMemories() {
+    if (!openedProject || projectMemoryNextOffset === null || projectMemoryAppending) return;
+    const requestId = projectMemoryRequestRef.current;
+    const offset = projectMemoryNextOffset;
+    setProjectMemoryAppending(true);
+    setProjectMemoryError(null);
+    try {
+      const page = await api<ProjectMemoriesPage>(
+        "/api/projects/" + encodeURIComponent(openedProject.id) + "/memories?limit=30&offset=" + offset,
+      );
+      if (requestId !== projectMemoryRequestRef.current) return;
+      setProjectMemories((current) => [...current, ...page.items]);
+      setProjectMemoryNextOffset(page.next_offset);
+    } catch (e) {
+      if (requestId !== projectMemoryRequestRef.current) return;
+      setProjectMemoryError(e instanceof Error ? e.message : String(e));
+    } finally {
+      if (requestId === projectMemoryRequestRef.current) setProjectMemoryAppending(false);
     }
   }
 
@@ -2623,7 +2663,7 @@ export default function App() {
                       </div>
                       <div className="metadata-field">
                         <span>{t("memoryEntries")}</span>
-                        <strong>{projectMemories.length}</strong>
+                        <strong>{projectMemories.length}{projectMemoryNextOffset !== null ? "+" : ""}</strong>
                       </div>
                       <div className="metadata-field">
                         <span>{t("createdAt")}</span>
@@ -2640,7 +2680,12 @@ export default function App() {
                     </div>
                   </section>
 
-                  <h3 className="detail-section-title tone-violet">{t("projectMemories")}</h3>
+                  <div className="project-memory-section-head">
+                    <h3 className="detail-section-title tone-violet">{t("projectMemories")}</h3>
+                    <button type="button" className="secondary" onClick={() => void openProject(openedProject)} disabled={projectMemoryLoading}>
+                      {locale === "zh-CN" ? "刷新" : "Refresh"}
+                    </button>
+                  </div>
                   {projectMemoryLoading ? (
                     <div className="empty compact">{t("loadingMemories")}</div>
                   ) : projectMemories.length ? (
@@ -2657,6 +2702,13 @@ export default function App() {
                             <small>{memory.source_kind} · {formatAge(locale, memory.created_at)}</small>
                           </button>
                         ))}
+                        {projectMemoryNextOffset !== null && (
+                          <button type="button" className="secondary project-memory-more" onClick={() => void loadMoreProjectMemories()} disabled={projectMemoryAppending}>
+                            {projectMemoryAppending
+                              ? (locale === "zh-CN" ? "加载中…" : "Loading…")
+                              : (locale === "zh-CN" ? "加载更多记忆" : "Load more memories")}
+                          </button>
+                        )}
                       </div>
                       {selectedProjectMemory && (
                         <article className="project-memory-detail">
@@ -2687,8 +2739,17 @@ export default function App() {
                         </article>
                       )}
                     </div>
-                  ) : (
+                  ) : !projectMemoryError ? (
                     <div className="empty compact">{t("noProjectMemories")}</div>
+                  ) : null}
+                  {projectMemoryError && (
+                    <div className="project-memory-error" role="alert">
+                      <span>{locale === "zh-CN" ? "无法加载项目记忆：" : "Could not load project memories: "}{projectMemoryError}</span>
+                      <button type="button" className="secondary" onClick={() => {
+                        if (projectMemories.length) void loadMoreProjectMemories();
+                        else void openProject(openedProject);
+                      }}>{locale === "zh-CN" ? "重试" : "Retry"}</button>
+                    </div>
                   )}
                 </>
               ) : selectedTask ? (

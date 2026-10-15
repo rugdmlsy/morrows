@@ -3,6 +3,12 @@ use axum::extract::Query;
 use morrows_core::CreateMemoryEntry;
 
 #[derive(Debug, Deserialize)]
+struct ProjectMemoriesQuery {
+    limit: Option<i64>,
+    offset: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
 struct MemoryQuery {
     scope_type: Option<String>,
     project_id: Option<Id>,
@@ -13,6 +19,10 @@ struct MemoryQuery {
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/memories", get(list_memories).post(create_memory))
+        .route(
+            "/projects/{id}/memories",
+            get(list_current_project_memories),
+        )
         .route("/memories/{id}", get(get_memory))
         .route(
             "/projects/{id}/memory/mirror",
@@ -27,6 +37,21 @@ pub fn routes() -> Router<AppState> {
             "/projects/{id}/memory/rebuild",
             axum::routing::post(rebuild_memory),
         )
+}
+
+/// The WebUI reads only the current, shared memories for this project,
+/// bounded so large projects do not block the detail panel.
+async fn list_current_project_memories(
+    State(state): State<AppState>,
+    Path(id): Path<Id>,
+    Query(query): Query<ProjectMemoriesQuery>,
+) -> Result<Json<Value>, ApiError> {
+    state.store.get_project(id).await?;
+    let page = state
+        .store
+        .project_memories_page(id, query.limit.unwrap_or(30), query.offset.unwrap_or(0))
+        .await?;
+    Ok(Json(json!(page)))
 }
 
 async fn list_memories(
@@ -98,4 +123,51 @@ async fn rebuild_memory(
 ) -> Result<Json<Value>, ApiError> {
     state.store.rebuild_project_memory_projection(id).await?;
     Ok(Json(json!({"project_id":id,"rebuilt":true})))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn project_memories_endpoint_returns_paged_current_memory() {
+        let store = Store::connect("sqlite::memory:").await.unwrap();
+        let project = store
+            .create_project(serde_json::from_value(json!({"name": "UI project"})).unwrap())
+            .await
+            .unwrap();
+        let old = store
+            .create_memory_entry(
+                serde_json::from_value(json!({
+                    "scope_type": "project", "project_id": project.id, "title": "old",
+                    "content": "old", "source_kind": "test"
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        store
+            .create_memory_entry(
+                serde_json::from_value(json!({
+                    "scope_type": "project", "project_id": project.id, "title": "current",
+                    "content": "current", "source_kind": "test", "supersedes_memory_id": old.id
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let Json(payload) = list_current_project_memories(
+            State(AppState { store }),
+            Path(project.id),
+            Query(ProjectMemoriesQuery {
+                limit: Some(30),
+                offset: Some(0),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(payload["items"].as_array().unwrap().len(), 1);
+        assert_eq!(payload["items"][0]["title"], "current");
+        assert!(payload["next_offset"].is_null());
+    }
 }

@@ -796,6 +796,25 @@ button.project-group-head:disabled { cursor: default; opacity: 1; }
   font-size: calc(8px * var(--font-scale));
 }
 
+.project-memory-section-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+.project-memory-section-head .detail-section-title { margin: 16px 0 9px; }
+.project-memory-more { width: 100%; text-align: center; }
+.project-memory-error {
+  margin-top: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  color: var(--red);
+  font-size: calc(9px * var(--font-scale));
+  overflow-wrap: anywhere;
+}
+.project-memory-error span { min-width: 0; flex: 1; }
 .project-memory-layout {
   min-height: 280px;
   display: grid;

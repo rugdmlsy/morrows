@@ -339,6 +339,36 @@ impl Store {
         row_to_memory_entry(row)
     }
 
+    /// Project-only shared current memory, newest first. Unlike task context
+    /// reads, this must not mix organization or private agent memories.
+    pub async fn project_memories_page(
+        &self,
+        project_id: Id,
+        limit: i64,
+        offset: i64,
+    ) -> Result<morrows_core::Page<MemoryEntry>, DomainError> {
+        super::discovery::validate_page(limit, offset)?;
+        let mut read = self.memory_read_transaction().await?;
+        let rows = sqlx::query(
+            "SELECT m.* FROM memory_entries m
+             WHERE m.scope_type='project' AND m.project_id=? AND m.visibility='shared'
+               AND NOT EXISTS (SELECT 1 FROM memory_entries newer
+                 WHERE newer.supersedes_memory_id=m.id AND newer.visibility='shared')
+             ORDER BY m.created_at DESC,m.id DESC LIMIT ? OFFSET ?",
+        )
+        .bind(project_id.to_string())
+        .bind(limit + 1)
+        .bind(offset)
+        .fetch_all(&mut *read)
+        .await
+        .map_err(storage)?;
+        let items = rows
+            .into_iter()
+            .map(row_to_memory_entry)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(morrows_core::Page::from_extra_row(items, limit, offset))
+    }
+
     pub async fn list_memory_entries(
         &self,
         scope_type: Option<&str>,
